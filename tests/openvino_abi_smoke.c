@@ -1,3 +1,4 @@
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -23,7 +24,8 @@ int main(void) {
         return 2;
     }
 
-    // 2. Struct size too small for load
+    // 2. Struct size too small for load (< VINOX_MODEL_OPTIONS_MIN_SIZE)
+    model_options.struct_size = VINOX_MODEL_OPTIONS_MIN_SIZE - 1;
     if (vinox_model_load(&model_options, &model) != VINOX_STATUS_INCOMPATIBLE_ABI) {
         return 3;
     }
@@ -31,45 +33,67 @@ int main(void) {
         return 4;
     }
 
-    // 3. Null model generate
-    if (vinox_model_generate(NULL, &generation_options, discard_text, NULL)
-        != VINOX_STATUS_INVALID_ARGUMENT) {
+    // 3. Minimum supported vinox_model_options layout (up to model_path, without device)
+    model_options.struct_size = VINOX_MODEL_OPTIONS_MIN_SIZE;
+    model_options.model_path = NULL; // Invalid prompt/path test to check validation without loading
+    if (vinox_model_load(&model_options, &model) != VINOX_STATUS_INVALID_ARGUMENT) {
         return 5;
     }
-
-    // 4. Incompatible struct size for generate (size 0)
-    if (vinox_model_generate((vinox_model*)1, &generation_options, discard_text, NULL)
-        != VINOX_STATUS_INCOMPATIBLE_ABI) {
+    if (strstr(vinox_openvino_last_error(), "model_path cannot be null") == NULL) {
         return 6;
     }
 
-    // 5. Flexible MIN_SIZE check: VINOX_GENERATION_OPTIONS_MIN_SIZE is accepted as ABI valid.
-    // With NULL prompt, it fails with INVALID_ARGUMENT (not INCOMPATIBLE_ABI).
+    // 4. Null model generate
+    if (vinox_model_generate(NULL, &generation_options, discard_text, NULL)
+        != VINOX_STATUS_INVALID_ARGUMENT) {
+        return 7;
+    }
+
+    // 5. Incompatible struct size for generate (size 0)
+    generation_options.struct_size = 0;
+    if (vinox_model_generate((vinox_model*)1, &generation_options, discard_text, NULL)
+        != VINOX_STATUS_INCOMPATIBLE_ABI) {
+        return 8;
+    }
+
+    // 6. Minimum generation_options layout (up to max_new_tokens)
     generation_options.struct_size = VINOX_GENERATION_OPTIONS_MIN_SIZE;
     generation_options.prompt = NULL;
     if (vinox_model_generate((vinox_model*)1, &generation_options, discard_text, NULL)
         != VINOX_STATUS_INVALID_ARGUMENT) {
-        return 7;
+        return 9;
     }
     if (strstr(vinox_openvino_last_error(), "prompt cannot be null") == NULL) {
-        return 8;
+        return 10;
     }
 
-    // 6. Invalid sampling parameter (temperature < 0)
-    generation_options.struct_size = (uint32_t)sizeof(generation_options);
+    // 7. Intermediate generation_options layout (up to top_p)
+    generation_options.struct_size = (uint32_t)(offsetof(vinox_generation_options, top_p) + sizeof(float));
+    generation_options.prompt = "Valid prompt";
+    generation_options.temperature = -1.0f; // invalid temperature present in intermediate struct
+    if (vinox_model_generate((vinox_model*)1, &generation_options, discard_text, NULL)
+        != VINOX_STATUS_INVALID_ARGUMENT) {
+        return 11;
+    }
+    if (strstr(vinox_openvino_last_error(), "temperature") == NULL) {
+        return 12;
+    }
+
+    // 8. Future tail-extended struct_size (e.g. +64 bytes tail padding) is accepted
+    generation_options.struct_size = (uint32_t)(sizeof(vinox_generation_options) + 64);
     generation_options.prompt = "Valid prompt";
     generation_options.temperature = -1.0f;
     if (vinox_model_generate((vinox_model*)1, &generation_options, discard_text, NULL)
         != VINOX_STATUS_INVALID_ARGUMENT) {
-        return 9;
+        return 13;
     }
     if (strstr(vinox_openvino_last_error(), "temperature") == NULL) {
-        return 10;
+        return 14;
     }
 
-    // 7. Async cancel null check
+    // 9. Async cancel null check
     if (vinox_model_cancel(NULL) != VINOX_STATUS_INVALID_ARGUMENT) {
-        return 11;
+        return 15;
     }
 
     vinox_model_destroy(NULL);

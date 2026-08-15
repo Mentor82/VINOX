@@ -27,7 +27,8 @@ typedef struct vinox_model_options {
     const char* device;
 } vinox_model_options;
 
-#define VINOX_MODEL_OPTIONS_MIN_SIZE ((uint32_t)sizeof(vinox_model_options))
+#define VINOX_MODEL_OPTIONS_MIN_SIZE \
+    ((uint32_t)(offsetof(vinox_model_options, model_path) + sizeof(const char*)))
 
 typedef struct vinox_generation_options {
     uint32_t struct_size;

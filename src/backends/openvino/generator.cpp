@@ -4,6 +4,7 @@
 #include <exception>
 #include <memory>
 #include <string>
+#include <type_traits>
 
 #include "openvino/genai/llm_pipeline.hpp"
 
@@ -16,6 +17,9 @@ struct vinox_model {
 };
 
 namespace {
+
+#define VINOX_FIELD_PRESENT(ptr, member) \
+    ((ptr)->struct_size >= (offsetof(std::remove_pointer_t<decltype(ptr)>, member) + sizeof((ptr)->member)))
 
 thread_local std::string last_error;
 
@@ -61,9 +65,9 @@ vinox_status vinox_model_load(
     }
 
     const std::string device =
-        options->device == nullptr || options->device[0] == '\0'
-            ? "CPU"
-            : options->device;
+        (VINOX_FIELD_PRESENT(options, device) && options->device != nullptr && options->device[0] != '\0')
+            ? options->device
+            : "CPU";
 
     try {
         auto loaded_model = std::make_unique<vinox_model>(options->model_path, device);
@@ -99,20 +103,15 @@ vinox_status vinox_model_generate(
         return fail_arg("options->prompt cannot be null or empty");
     }
 
-    // Validate sampling options if struct_size covers them
-    const size_t sz = options->struct_size;
-    const bool has_sampling = sz >= offsetof(vinox_generation_options, frequency_penalty) + sizeof(float);
-
-    if (has_sampling) {
-        if (options->temperature < 0.0f) {
-            return fail_arg("Invalid generation option: temperature must be >= 0.0");
-        }
-        if (options->top_p < 0.0f || options->top_p > 1.0f) {
-            return fail_arg("Invalid generation option: top_p must be between 0.0 and 1.0");
-        }
-        if (options->repetition_penalty < 0.0f) {
-            return fail_arg("Invalid generation option: repetition_penalty must be >= 0.0");
-        }
+    // Per-field presence validation
+    if (VINOX_FIELD_PRESENT(options, temperature) && options->temperature < 0.0f) {
+        return fail_arg("Invalid generation option: temperature must be >= 0.0");
+    }
+    if (VINOX_FIELD_PRESENT(options, top_p) && (options->top_p < 0.0f || options->top_p > 1.0f)) {
+        return fail_arg("Invalid generation option: top_p must be between 0.0 and 1.0");
+    }
+    if (VINOX_FIELD_PRESENT(options, repetition_penalty) && options->repetition_penalty < 0.0f) {
+        return fail_arg("Invalid generation option: repetition_penalty must be >= 0.0");
     }
 
     try {
@@ -121,28 +120,26 @@ vinox_status vinox_model_generate(
             ? 32
             : options->max_new_tokens;
 
-        if (has_sampling) {
-            if (options->temperature > 0.0f) {
-                config.temperature = options->temperature;
-                config.do_sample = true;
-            }
-            if (options->top_p > 0.0f && options->top_p <= 1.0f) {
-                config.top_p = options->top_p;
-                config.do_sample = true;
-            }
-            if (options->top_k > 0) {
-                config.top_k = options->top_k;
-                config.do_sample = true;
-            }
-            if (options->repetition_penalty > 0.0f) {
-                config.repetition_penalty = options->repetition_penalty;
-            }
-            if (options->presence_penalty != 0.0f) {
-                config.presence_penalty = options->presence_penalty;
-            }
-            if (options->frequency_penalty != 0.0f) {
-                config.frequency_penalty = options->frequency_penalty;
-            }
+        if (VINOX_FIELD_PRESENT(options, temperature) && options->temperature > 0.0f) {
+            config.temperature = options->temperature;
+            config.do_sample = true;
+        }
+        if (VINOX_FIELD_PRESENT(options, top_p) && options->top_p > 0.0f && options->top_p <= 1.0f) {
+            config.top_p = options->top_p;
+            config.do_sample = true;
+        }
+        if (VINOX_FIELD_PRESENT(options, top_k) && options->top_k > 0) {
+            config.top_k = options->top_k;
+            config.do_sample = true;
+        }
+        if (VINOX_FIELD_PRESENT(options, repetition_penalty) && options->repetition_penalty > 0.0f) {
+            config.repetition_penalty = options->repetition_penalty;
+        }
+        if (VINOX_FIELD_PRESENT(options, presence_penalty) && options->presence_penalty != 0.0f) {
+            config.presence_penalty = options->presence_penalty;
+        }
+        if (VINOX_FIELD_PRESENT(options, frequency_penalty) && options->frequency_penalty != 0.0f) {
+            config.frequency_penalty = options->frequency_penalty;
         }
 
         model->cancel_requested.store(false);
