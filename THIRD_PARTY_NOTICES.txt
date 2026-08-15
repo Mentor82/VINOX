@@ -1,0 +1,16 @@
+ovchat third-party notices
+
+This file is populated from the locked dependency and runtime manifests during
+release packaging. The initial dependency-free build contains no vendored
+third-party source code.
+
+Microsoft Visual C++ runtime files, when present in a Windows release package,
+are redistributed under the Microsoft Visual Studio license and the applicable
+Visual C++ Redistributable terms.
+
+OpenVINO Runtime and OpenVINO GenAI 2026.2.1
+Copyright Intel Corporation and contributors.
+Runtime binaries are redistributed under the terms supplied in
+`licenses/openvino`, including `EULA.txt`, `redist.txt`, and the applicable
+third-party-program notices. Headers and relevant source components are
+available under Apache License 2.0 as described in those files.

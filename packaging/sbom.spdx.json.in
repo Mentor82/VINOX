@@ -1,0 +1,53 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "vinox-@PROJECT_VERSION@",
+  "documentNamespace": "https://vinox.local/spdx/vinox-@PROJECT_VERSION@",
+  "creationInfo": {
+    "created": "2026-08-15T00:00:00Z",
+    "creators": [
+      "Tool: CMake-@CMAKE_VERSION@"
+    ]
+  },
+  "packages": [
+    {
+      "name": "vinox",
+      "SPDXID": "SPDXRef-Package-vinox",
+      "versionInfo": "@PROJECT_VERSION@",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "Copyright 2026 vinox contributors"
+    },
+    {
+      "name": "OpenVINO Runtime and OpenVINO GenAI",
+      "SPDXID": "SPDXRef-Package-OpenVINO",
+      "versionInfo": "2026.2.1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "LicenseRef-Intel-OpenVINO-Distribution",
+      "copyrightText": "Copyright Intel Corporation and contributors"
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-vinox"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-vinox",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-OpenVINO"
+    }
+  ],
+  "hasExtractedLicensingInfos": [
+    {
+      "licenseId": "LicenseRef-Intel-OpenVINO-Distribution",
+      "extractedText": "See licenses/openvino/EULA.txt and licenses/openvino/redist.txt in the distribution."
+    }
+  ]
+}

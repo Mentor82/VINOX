@@ -1,0 +1,7 @@
+/out/
+/.cache/
+/.vs/
+/.vscode/ipch/
+*.user
+*.suo
+*.VC.db
