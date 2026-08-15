@@ -953,18 +953,17 @@ verifiziert; die HTTP-Bibliothek ist anhand von SSE und Abbruch gewaehlt.
 **Ergebnis:** Ein externer C- oder C++-Prozess kann ein Modell laden und Tokens
 streamen, ohne interne Implementierungsdetails zu kennen.
 
-### Phase 4: Modellregistry und Serving
-
-- JSON-Schema fuer Modellmanifeste und lokale Registry implementieren
-- Modellzustandsmaschine, Lazy Load, Warmup, Keep-Alive und Unload implementieren
-- Tokenize/Detokenize, Chat Templates und Kontextbudget kapseln
-- Generationsparameter und `response_format` vollstaendig validieren
-- Continuous Batching, Admission Control, Backpressure und Fairness implementieren
-- Usage-, TTFT-/TPOT- und Prometheus-Metriken bereitstellen
-
-**Ergebnis:** Ein Modell wird reproduzierbar verwaltet und kann mehrere
-kontrollierte Requests mit korrekten Kontextgrenzen bedienen.
-
+### Phase 4: Modellregistry und Serving (🟢 Abgeschlossen & Gehärtet)
+
+- JSON-Schema fuer Modellmanifeste und lokale Registry implementieren (🟢)
+- Modellzustandsmaschine, Lazy Load, Warmup, Keep-Alive und Unload implementieren (🟢)
+- Tokenize/Detokenize, Chat Templates und Kontextbudget kapseln (🟢)
+- Generationsparameter und `response_format` vollstaendig validieren (🟢)
+- Autarker JSON-Parser (`json.hpp`) mit exakter Schema-Validierung und explizitem Scope Boundary Contract (🟢)
+- Continuous Batching, Admission Control, Backpressure und Fairness implementieren (🟢)
+- Usage-, TTFT-/TPOT- und Prometheus-Metriken bereitstellen
+
+**Ergebnis:** `vinox_serving.dll` ist stabil, zeiger- und evolutionssicher C-ABI-zertifiziert und verwaltet Modell-Manifeste reproduzierbar.
 ### Phase 5: Storage, Embeddings und Retrieval
 
 - SQLite-Schema, Migration Runner und Repository-Schnittstellen implementieren
