@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <stdexcept>
@@ -41,6 +42,25 @@ float cosine_similarity(const std::vector<float>& a, const std::vector<float>& b
     double denom = std::sqrt(norm_a) * std::sqrt(norm_b);
     if (denom < 1e-12) return 0.0f;
     return static_cast<float>(dot / denom);
+}
+
+/**
+ * @brief Maps raw negative SQLite FTS5 BM25 score (e.g. -2.5 is better than -0.5)
+ * into normalized range [0.0, 1.0], where higher values mean better text relevance.
+ */
+float sigmoid_normalize_bm25(float raw_bm25) {
+    // In SQLite FTS5, bm25() returns negative values (e.g. -3.0 = high relevance, 0.0 = low relevance).
+    // Invert sign so higher relevance is positive, then apply logistic sigmoid.
+    double x = -static_cast<double>(raw_bm25);
+    return static_cast<float>(1.0 / (1.0 + std::exp(-x)));
+}
+
+/**
+ * @brief Maps cosine similarity from [-1.0, 1.0] into [0.0, 1.0].
+ */
+float normalize_cosine_similarity(float sim) {
+    float clamped = std::max(-1.0f, std::min(1.0f, sim));
+    return (clamped + 1.0f) * 0.5f;
 }
 
 }  // namespace vinox::storage

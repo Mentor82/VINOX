@@ -68,6 +68,14 @@ public:
         return count;
     }
 
+    vinox_vector_backend_kind get_vector_backend_kind() const {
+        uint32_t kind = 0;
+        if (vinox_storage_get_vector_backend_kind(engine_.get(), &kind) != VINOX_STATUS_OK) {
+            throw std::runtime_error(vinox_storage_last_error());
+        }
+        return static_cast<vinox_vector_backend_kind>(kind);
+    }
+
     size_t search_messages_fts(std::string_view query, size_t max_results = 50) const {
         size_t matches = 0;
         if (vinox_storage_search_messages_fts(engine_.get(), query.data(), max_results, &matches) != VINOX_STATUS_OK) {

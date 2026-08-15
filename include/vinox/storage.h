@@ -62,9 +62,19 @@ typedef struct vinox_search_result {
 #define VINOX_SEARCH_RESULT_MIN_SIZE \
     ((uint32_t)(offsetof(vinox_search_result, vector_score) + sizeof(float)))
 
+typedef enum vinox_vector_backend_kind {
+    VINOX_VECTOR_BACKEND_SQLITE_VEC = 1,
+    VINOX_VECTOR_BACKEND_BRUTE_FORCE_REF = 2
+} vinox_vector_backend_kind;
+
 VINOX_API vinox_status vinox_storage_engine_open(
     const char* db_path,
     vinox_storage_engine** engine_out
+);
+
+VINOX_API vinox_status vinox_storage_get_vector_backend_kind(
+    const vinox_storage_engine* engine,
+    uint32_t* backend_kind_out
 );
 
 VINOX_API vinox_status vinox_storage_create_conversation(

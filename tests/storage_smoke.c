@@ -331,7 +331,7 @@ int main(void) {
     }
 
     // -------------------------------------------------------------
-    // TEST 9: Phase 5.2 Embedding Storage & Hybrid Search
+    // TEST 9: Issue #6 Real BM25 Ranking, Vector Backend & Hybrid Validation
     // -------------------------------------------------------------
     vinox_conversation_info emb_conv = {0};
     emb_conv.struct_size = VINOX_CONVERSATION_INFO_MIN_SIZE;
@@ -341,44 +341,80 @@ int main(void) {
         return 28;
     }
 
-    float dummy_embedding[1024];
-    for (size_t i = 0; i < 1024; ++i) dummy_embedding[i] = (float)(i + 1);
-
-    msg_in.id = "vec-msg-001";
-    msg_in.conversation_id = emb_conv.id;
-    msg_in.role = "user";
-    msg_in.content = "OpenVINO GenAI Vector Search Target";
-    msg_out.struct_size = sizeof(msg_out);
-    if (vinox_storage_add_message(engine, &msg_in, &msg_out) != VINOX_STATUS_OK) {
-        printf("FAILED: Add message for embedding test: %s\n", vinox_storage_last_error());
+    uint32_t backend_kind = 0;
+    if (vinox_storage_get_vector_backend_kind(engine, &backend_kind) != VINOX_STATUS_OK || backend_kind == 0) {
+        printf("FAILED: Vector backend query: %s\n", vinox_storage_last_error());
         vinox_storage_engine_close(engine);
         return 29;
     }
 
-    if (vinox_storage_store_embedding(engine, "vec-msg-001", dummy_embedding, 1024) != VINOX_STATUS_OK) {
-        printf("FAILED: Store embedding: %s\n", vinox_storage_last_error());
+    // 9a. Test Real FTS5 BM25 Score Variation (bm25-high vs bm25-low)
+    msg_in.id = "bm25-high";
+    msg_in.conversation_id = emb_conv.id;
+    msg_in.role = "user";
+    msg_in.content = "Alpha Alpha Alpha Alpha Alpha";
+    msg_out.struct_size = sizeof(msg_out);
+    if (vinox_storage_add_message(engine, &msg_in, &msg_out) != VINOX_STATUS_OK) {
+        printf("FAILED: Add high BM25 message\n");
         vinox_storage_engine_close(engine);
         return 30;
+    }
+
+    msg_in.id = "bm25-low";
+    msg_in.content = "Alpha Beta Gamma Delta Epsilon";
+    if (vinox_storage_add_message(engine, &msg_in, &msg_out) != VINOX_STATUS_OK) {
+        printf("FAILED: Add low BM25 message\n");
+        vinox_storage_engine_close(engine);
+        return 31;
+    }
+
+    float dummy_embedding[1024];
+    for (size_t i = 0; i < 1024; ++i) dummy_embedding[i] = (float)(i + 1);
+
+    if (vinox_storage_store_embedding(engine, "bm25-high", dummy_embedding, 1024) != VINOX_STATUS_OK) {
+        printf("FAILED: Store embedding: %s\n", vinox_storage_last_error());
+        vinox_storage_engine_close(engine);
+        return 32;
     }
 
     vinox_search_result h_results[5];
     for (int i = 0; i < 5; ++i) h_results[i].struct_size = sizeof(vinox_search_result);
     size_t h_count = 0;
 
-    if (vinox_storage_search_hybrid(engine, dummy_embedding, 1024, "OpenVINO", 0.5f, 5, h_results, &h_count) != VINOX_STATUS_OK || h_count < 1) {
-        printf("FAILED: Hybrid search: %s\n", vinox_storage_last_error());
+    // Pure BM25 search (alpha = 0.0) -> high relevance must score higher than low relevance
+    if (vinox_storage_search_hybrid(engine, NULL, 0, "Alpha", 0.0f, 5, h_results, &h_count) != VINOX_STATUS_OK || h_count < 2) {
+        printf("FAILED: Real BM25 hybrid search: %s\n", vinox_storage_last_error());
         vinox_storage_engine_close(engine);
-        return 31;
+        return 33;
     }
 
-    if (h_results[0].message_id == NULL || h_results[0].hybrid_score <= 0.0f) {
-        printf("FAILED: Hybrid search result validation\n");
+    if (h_results[0].bm25_score <= h_results[1].bm25_score) {
+        printf("FAILED: Real BM25 ranking variation check (high relevance score %f <= low relevance score %f)\n",
+               h_results[0].bm25_score, h_results[1].bm25_score);
         vinox_storage_engine_close(engine);
-        return 32;
+        return 34;
+    }
+
+    // 9b. Test Invalid Alpha Rejection (alpha = 1.5 -> VINOX_STATUS_INVALID_ARGUMENT)
+    vinox_status bad_alpha_status = vinox_storage_search_hybrid(engine, dummy_embedding, 1024, "Alpha", 1.5f, 5, h_results, &h_count);
+    if (bad_alpha_status != VINOX_STATUS_INVALID_ARGUMENT) {
+        printf("FAILED: Invalid alpha (1.5) was not rejected with VINOX_STATUS_INVALID_ARGUMENT (got %d)\n", bad_alpha_status);
+        vinox_storage_engine_close(engine);
+        return 35;
+    }
+
+    // 9c. Test Embedding Dimension Mismatch Rejection (query dim 512 != index dim 1024)
+    float bad_embedding[512];
+    for (size_t i = 0; i < 512; ++i) bad_embedding[i] = 1.0f;
+    vinox_status bad_dim_status = vinox_storage_search_hybrid(engine, bad_embedding, 512, "Alpha", 0.5f, 5, h_results, &h_count);
+    if (bad_dim_status != VINOX_STATUS_INVALID_ARGUMENT) {
+        printf("FAILED: Dimension mismatch (512 vs 1024) was not rejected with VINOX_STATUS_INVALID_ARGUMENT (got %d)\n", bad_dim_status);
+        vinox_storage_engine_close(engine);
+        return 36;
     }
 
     vinox_storage_engine_close(engine);
     remove(db_file);
-    printf("SUCCESS: All Phase 5.1 & Phase 5.2 Storage tests passed!\n");
+    printf("SUCCESS: All Issue #6 Storage tests passed!\n");
     return 0;
 }
