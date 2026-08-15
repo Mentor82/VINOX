@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 
 #include "vinox/vinox.h"
@@ -30,6 +31,20 @@ inline Version version() {
         info.patch,
         info.version_string,
     };
+}
+
+struct ProvenanceMeta {
+    vinox_provenance_kind kind{VINOX_PROVENANCE_SOURCE_LITERAL};
+    std::string source_id;
+    uint64_t timestamp_ms{0};
+};
+
+/**
+ * @brief Asserts exact byte-for-byte identity of opaque literal identifiers across module boundaries.
+ * Guarantees that no implicit truncation or normalization occurred.
+ */
+inline bool is_literal_identical(std::string_view original, std::string_view candidate) noexcept {
+    return original == candidate;
 }
 
 }  // namespace vinox

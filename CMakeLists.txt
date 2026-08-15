@@ -162,6 +162,10 @@ if(BUILD_TESTING)
     target_link_libraries(vinox_abi_smoke PRIVATE vinox::core)
     add_test(NAME abi_smoke COMMAND vinox_abi_smoke)
 
+    add_executable(vinox_provenance_smoke tests/provenance_smoke.c)
+    target_link_libraries(vinox_provenance_smoke PRIVATE vinox::core)
+    add_test(NAME provenance_smoke COMMAND vinox_provenance_smoke)
+
     add_executable(vinox_serving_smoke tests/serving_smoke.c)
     target_link_libraries(vinox_serving_smoke PRIVATE vinox::serving)
     add_test(NAME serving_smoke COMMAND vinox_serving_smoke)
