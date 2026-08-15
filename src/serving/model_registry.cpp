@@ -9,9 +9,10 @@
 #include <type_traits>
 #include <vector>
 
-#include "json.hpp"
+#include <nlohmann/json.hpp>
 
 namespace fs = std::filesystem;
+using json = nlohmann::json;
 
 struct ModelEntry {
     std::string model_id;
@@ -55,30 +56,26 @@ bool validate_and_parse_manifest(const fs::path& path, ModelEntry& entry, std::s
         err_msg = "Failed to open manifest file: " + path.string();
         return false;
     }
-    std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 
-    vinox::serving::JsonValue root;
+    json root;
     try {
-        root = vinox::serving::JsonParser::parse(content);
+        file >> root;
     } catch (const std::exception& ex) {
         err_msg = std::string("Manifest JSON parse error in ") + path.filename().string() + ": " + ex.what();
         return false;
     }
 
-    if (root.type != vinox::serving::JsonType::Object) {
+    if (!root.is_object()) {
         err_msg = "Manifest root must be a JSON object in " + path.filename().string();
         return false;
     }
 
-    const auto& obj = root.object_value;
-
     // 1. Required model_id
-    auto it_id = obj.find("model_id");
-    if (it_id == obj.end() || it_id->second.type != vinox::serving::JsonType::String || it_id->second.string_value.empty()) {
+    if (!root.contains("model_id") || !root["model_id"].is_string() || root["model_id"].get<std::string>().empty()) {
         err_msg = "Manifest missing required string property 'model_id'";
         return false;
     }
-    entry.model_id = it_id->second.string_value;
+    entry.model_id = root["model_id"].get<std::string>();
 
     // Pattern check: vendor/name
     static const std::regex id_pattern("^[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+$");
@@ -88,58 +85,54 @@ bool validate_and_parse_manifest(const fs::path& path, ModelEntry& entry, std::s
     }
 
     // 2. Required display_name
-    auto it_name = obj.find("display_name");
-    if (it_name == obj.end() || it_name->second.type != vinox::serving::JsonType::String || it_name->second.string_value.empty()) {
+    if (!root.contains("display_name") || !root["display_name"].is_string() || root["display_name"].get<std::string>().empty()) {
         err_msg = "Manifest missing required string property 'display_name'";
         return false;
     }
-    entry.display_name = it_name->second.string_value;
+    entry.display_name = root["display_name"].get<std::string>();
 
     // 3. Required local_path
-    auto it_path = obj.find("local_path");
-    if (it_path == obj.end() || it_path->second.type != vinox::serving::JsonType::String || it_path->second.string_value.empty()) {
+    if (!root.contains("local_path") || !root["local_path"].is_string() || root["local_path"].get<std::string>().empty()) {
         err_msg = "Manifest missing required string property 'local_path'";
         return false;
     }
-    entry.local_path = it_path->second.string_value;
+    entry.local_path = root["local_path"].get<std::string>();
 
     // 4. Required context_length (> 0)
-    auto it_ctx = obj.find("context_length");
-    if (it_ctx == obj.end() || it_ctx->second.type != vinox::serving::JsonType::Number || it_ctx->second.number_value <= 0) {
+    if (!root.contains("context_length") || !root["context_length"].is_number_integer() || root["context_length"].get<int64_t>() <= 0) {
         err_msg = "Manifest missing or invalid integer property 'context_length' (> 0)";
         return false;
     }
-    entry.context_length = static_cast<uint64_t>(it_ctx->second.number_value);
+    entry.context_length = static_cast<uint64_t>(root["context_length"].get<int64_t>());
 
     // 5. Required capabilities array
-    auto it_cap = obj.find("capabilities");
-    if (it_cap == obj.end() || it_cap->second.type != vinox::serving::JsonType::Array || it_cap->second.array_value.empty()) {
+    if (!root.contains("capabilities") || !root["capabilities"].is_array() || root["capabilities"].empty()) {
         err_msg = "Manifest missing required array property 'capabilities' (minItems 1)";
         return false;
     }
     static const std::vector<std::string> valid_caps = {"chat", "structured_output", "tools", "embeddings", "vision"};
-    for (const auto& cap_item : it_cap->second.array_value) {
-        if (cap_item.type != vinox::serving::JsonType::String) {
+    for (const auto& cap_item : root["capabilities"]) {
+        if (!cap_item.is_string()) {
             err_msg = "Invalid capability item type in manifest";
             return false;
         }
+        std::string cap_str = cap_item.get<std::string>();
         bool valid = false;
         for (const auto& vc : valid_caps) {
-            if (cap_item.string_value == vc) {
+            if (cap_str == vc) {
                 valid = true;
                 break;
             }
         }
         if (!valid) {
-            err_msg = "Unknown model capability: '" + cap_item.string_value + "'";
+            err_msg = "Unknown model capability: '" + cap_str + "'";
             return false;
         }
     }
 
     // 6. Optional default_device
-    auto it_dev = obj.find("default_device");
-    if (it_dev != obj.end() && it_dev->second.type == vinox::serving::JsonType::String && !it_dev->second.string_value.empty()) {
-        entry.default_device = it_dev->second.string_value;
+    if (root.contains("default_device") && root["default_device"].is_string() && !root["default_device"].get<std::string>().empty()) {
+        entry.default_device = root["default_device"].get<std::string>();
     } else {
         entry.default_device = "CPU";
     }

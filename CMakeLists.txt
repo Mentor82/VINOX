@@ -124,6 +124,8 @@ if(VINOX_OPENVINO_SDK_ROOT)
     endif()
 endif()
 
+find_package(nlohmann_json REQUIRED)
+
 add_library(vinox_serving SHARED
     src/serving/model_registry.cpp
     src/serving/context_budget.cpp
@@ -131,6 +133,7 @@ add_library(vinox_serving SHARED
 add_library(vinox::serving ALIAS vinox_serving)
 set_target_properties(vinox_serving PROPERTIES EXPORT_NAME serving)
 
+target_link_libraries(vinox_serving PRIVATE nlohmann_json::nlohmann_json)
 target_compile_definitions(vinox_serving PRIVATE VINOX_BUILD_SHARED)
 target_include_directories(vinox_serving
     PUBLIC

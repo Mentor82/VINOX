@@ -4,5 +4,7 @@
   "version-semver": "0.1.0",
   "description": "Standalone C++ GenAI infrastructure powered by OpenVINO",
   "supports": "windows | linux",
-  "dependencies": []
+  "dependencies": [
+    "nlohmann-json"
+  ]
 }
