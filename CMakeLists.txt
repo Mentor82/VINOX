@@ -213,7 +213,7 @@ if(BUILD_TESTING)
     add_test(NAME serving_smoke COMMAND vinox_serving_smoke)
 
     add_executable(vinox_storage_smoke tests/storage_smoke.c)
-    target_link_libraries(vinox_storage_smoke PRIVATE vinox::storage)
+    target_link_libraries(vinox_storage_smoke PRIVATE vinox::storage unofficial::sqlite3::sqlite3)
     add_test(NAME storage_smoke COMMAND vinox_storage_smoke)
 
     if(TARGET vinox_openvino)
