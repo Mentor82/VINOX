@@ -146,6 +146,27 @@ else()
     target_compile_options(vinox_serving PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+find_package(unofficial-sqlite3 REQUIRED)
+
+add_library(vinox_storage SHARED
+    src/storage/db.cpp
+)
+add_library(vinox::storage ALIAS vinox_storage)
+set_target_properties(vinox_storage PROPERTIES EXPORT_NAME storage)
+
+target_link_libraries(vinox_storage PRIVATE unofficial::sqlite3::sqlite3)
+target_compile_definitions(vinox_storage PRIVATE VINOX_BUILD_SHARED)
+target_include_directories(vinox_storage
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+if(MSVC)
+    target_compile_options(vinox_storage PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(vinox_storage PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 add_executable(vinox_cli
     src/cli/main.cpp
 )
@@ -173,6 +194,10 @@ if(BUILD_TESTING)
     target_link_libraries(vinox_serving_smoke PRIVATE vinox::serving)
     add_test(NAME serving_smoke COMMAND vinox_serving_smoke)
 
+    add_executable(vinox_storage_smoke tests/storage_smoke.c)
+    target_link_libraries(vinox_storage_smoke PRIVATE vinox::storage)
+    add_test(NAME storage_smoke COMMAND vinox_storage_smoke)
+
     if(TARGET vinox_openvino)
         add_executable(vinox_openvino_abi_smoke tests/openvino_abi_smoke.c)
         target_link_libraries(vinox_openvino_abi_smoke PRIVATE vinox::openvino)
@@ -186,7 +211,7 @@ if(BUILD_TESTING)
 endif()
 
 install(
-    TARGETS vinox_core vinox_serving vinox_cli
+    TARGETS vinox_core vinox_serving vinox_storage vinox_cli
     EXPORT vinoxTargets
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}

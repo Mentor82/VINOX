@@ -5,6 +5,7 @@
   "description": "Standalone C++ GenAI infrastructure powered by OpenVINO",
   "supports": "windows | linux",
   "dependencies": [
-    "nlohmann-json"
+    "nlohmann-json",
+    "sqlite3"
   ]
 }
