@@ -13,6 +13,11 @@ extern "C" {
 
 typedef struct vinox_storage_engine vinox_storage_engine;
 
+/**
+ * @brief Conversation metadata structure.
+ * @note Pointer lifetime contract: C-string pointers (id, title) populated by the API
+ * remain valid for the lifetime of the underlying vinox_storage_engine instance.
+ */
 typedef struct vinox_conversation_info {
     uint32_t struct_size;
     const char* id;
@@ -24,6 +29,11 @@ typedef struct vinox_conversation_info {
 #define VINOX_CONVERSATION_INFO_MIN_SIZE \
     ((uint32_t)(offsetof(vinox_conversation_info, title) + sizeof(const char*)))
 
+/**
+ * @brief Message item structure.
+ * @note Pointer lifetime contract: C-string pointers (id, conversation_id, parent_id, role, content)
+ * populated in message_out remain valid for the lifetime of the underlying vinox_storage_engine instance.
+ */
 typedef struct vinox_message_info {
     uint32_t struct_size;
     const char* id;

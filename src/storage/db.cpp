@@ -76,9 +76,8 @@ std::string generate_uuid() {
     return ss.str().substr(0, 32);
 }
 
-const char* INIT_SQL = R"(
-PRAGMA foreign_keys = ON;
-
+// Canonical Migration 001 SQL (Matches schemas/database/001_init.sql)
+const char* CANONICAL_MIGRATION_001_SQL = R"(
 CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -108,7 +107,118 @@ CREATE TABLE IF NOT EXISTS typed_relations (
     confidence REAL NOT NULL DEFAULT 1.0,
     created_at_ms INTEGER NOT NULL
 );
+
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    content,
+    content='messages',
+    content_rowid='rowid'
+);
+
+CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+    INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
 )";
+
+bool enforce_sqlite_invariants(sqlite3* db, std::string& err_out) {
+    char* err_msg = nullptr;
+    if (sqlite3_exec(db, "PRAGMA foreign_keys = ON;", nullptr, nullptr, &err_msg) != SQLITE_OK) {
+        err_out = std::string("Failed to enable foreign_keys: ") + (err_msg ? err_msg : "unknown error");
+        if (err_msg) sqlite3_free(err_msg);
+        return false;
+    }
+
+    // Verify Foreign Keys invariant
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, "PRAGMA foreign_keys;", -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            int fk_enabled = sqlite3_column_int(stmt, 0);
+            sqlite3_finalize(stmt);
+            if (fk_enabled != 1) {
+                err_out = "SQLite foreign_keys invariant check failed (PRAGMA foreign_keys returned 0)";
+                return false;
+            }
+        } else {
+            sqlite3_finalize(stmt);
+        }
+    }
+
+    // Set WAL mode (for disk-backed DBs)
+    sqlite3_exec(db, "PRAGMA journal_mode = WAL;", nullptr, nullptr, nullptr);
+    return true;
+}
+
+bool run_canonical_migrations(sqlite3* db, std::string& err_out) {
+    char* err_msg = nullptr;
+    int rc = sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at_ms INTEGER NOT NULL);", nullptr, nullptr, &err_msg);
+    if (rc != SQLITE_OK) {
+        err_out = std::string("Failed to create schema_migrations table: ") + (err_msg ? err_msg : "unknown error");
+        if (err_msg) sqlite3_free(err_msg);
+        return false;
+    }
+
+    // Check version 1 migration
+    sqlite3_stmt* stmt = nullptr;
+    rc = sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM schema_migrations WHERE version = 1;", -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        err_out = std::string("Failed to check migration version: ") + sqlite3_errmsg(db);
+        return false;
+    }
+
+    bool already_applied = false;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        already_applied = (sqlite3_column_int(stmt, 0) > 0);
+    }
+    sqlite3_finalize(stmt);
+
+    if (already_applied) {
+        return true;
+    }
+
+    // Run migration 001 inside a transaction
+    rc = sqlite3_exec(db, "BEGIN TRANSACTION;", nullptr, nullptr, &err_msg);
+    if (rc != SQLITE_OK) {
+        err_out = std::string("Failed to begin migration transaction: ") + (err_msg ? err_msg : "unknown error");
+        if (err_msg) sqlite3_free(err_msg);
+        return false;
+    }
+
+    rc = sqlite3_exec(db, CANONICAL_MIGRATION_001_SQL, nullptr, nullptr, &err_msg);
+    if (rc != SQLITE_OK) {
+        err_out = std::string("Canonical migration 001 failed: ") + (err_msg ? err_msg : "unknown error");
+        if (err_msg) sqlite3_free(err_msg);
+        sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+        return false;
+    }
+
+    // Record migration 001
+    std::string record_sql = "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (1, " + std::to_string(current_timestamp_ms()) + ");";
+    rc = sqlite3_exec(db, record_sql.c_str(), nullptr, nullptr, &err_msg);
+    if (rc != SQLITE_OK) {
+        err_out = std::string("Failed to record migration 001: ") + (err_msg ? err_msg : "unknown error");
+        if (err_msg) sqlite3_free(err_msg);
+        sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+        return false;
+    }
+
+    rc = sqlite3_exec(db, "COMMIT;", nullptr, nullptr, &err_msg);
+    if (rc != SQLITE_OK) {
+        err_out = std::string("Failed to commit migration 001: ") + (err_msg ? err_msg : "unknown error");
+        if (err_msg) sqlite3_free(err_msg);
+        sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+        return false;
+    }
+
+    return true;
+}
 
 }  // namespace
 
@@ -131,22 +241,17 @@ vinox_status vinox_storage_engine_open(
         return fail_runtime(err.c_str());
     }
 
-    // Enable WAL mode
-    char* err_msg = nullptr;
-    sqlite3_exec(db, "PRAGMA journal_mode = WAL;", nullptr, nullptr, nullptr);
-    sqlite3_exec(db, "PRAGMA foreign_keys = ON;", nullptr, nullptr, nullptr);
-
-    // Run schema migrations
-    rc = sqlite3_exec(db, INIT_SQL, nullptr, nullptr, &err_msg);
-    if (rc != SQLITE_OK) {
-        std::string err = err_msg ? err_msg : "Failed to execute schema init SQL";
-        if (err_msg) sqlite3_free(err_msg);
+    std::string inv_err;
+    if (!enforce_sqlite_invariants(db, inv_err)) {
         sqlite3_close(db);
-        return fail_runtime(err.c_str());
+        return fail_runtime(inv_err.c_str());
     }
 
-    // Try creating FTS5 table if supported
-    sqlite3_exec(db, "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(content);", nullptr, nullptr, nullptr);
+    std::string mig_err;
+    if (!run_canonical_migrations(db, mig_err)) {
+        sqlite3_close(db);
+        return fail_runtime(mig_err.c_str());
+    }
 
     try {
         auto* engine = new vinox_storage_engine();
@@ -174,6 +279,8 @@ vinox_status vinox_storage_create_conversation(
     if (info_out == nullptr) {
         return fail_arg("info_out pointer cannot be null");
     }
+
+    // PRE-TRANSACTION ABI VALIDATION
     if (info_out->struct_size < VINOX_CONVERSATION_INFO_MIN_SIZE) {
         return fail_abi("info_out->struct_size is smaller than VINOX_CONVERSATION_INFO_MIN_SIZE");
     }
@@ -227,9 +334,15 @@ vinox_status vinox_storage_add_message(
     if (message_in == nullptr) {
         return fail_arg("message_in pointer cannot be null");
     }
+
+    // PRE-TRANSACTION ABI VALIDATION (INPUT & OUTPUT STRUCTS BEFORE SIDE EFFECTS)
     if (message_in->struct_size < VINOX_MESSAGE_INFO_MIN_SIZE) {
         return fail_abi("message_in->struct_size is smaller than VINOX_MESSAGE_INFO_MIN_SIZE");
     }
+    if (message_out != nullptr && message_out->struct_size < VINOX_MESSAGE_INFO_MIN_SIZE) {
+        return fail_abi("message_out->struct_size is smaller than VINOX_MESSAGE_INFO_MIN_SIZE");
+    }
+
     if (message_in->conversation_id == nullptr || message_in->content == nullptr || message_in->role == nullptr) {
         return fail_arg("message required fields (conversation_id, role, content) cannot be null");
     }
@@ -237,9 +350,9 @@ vinox_status vinox_storage_add_message(
     std::lock_guard<std::mutex> lock(engine->mutex);
 
     MessageEntry entry;
-    entry.id = message_in->id ? message_in->id : generate_uuid();
+    entry.id = (message_in->id && message_in->id[0] != '\0') ? message_in->id : generate_uuid();
     entry.conversation_id = message_in->conversation_id;
-    entry.parent_id = message_in->parent_id ? message_in->parent_id : "";
+    entry.parent_id = (message_in->parent_id && message_in->parent_id[0] != '\0') ? message_in->parent_id : "";
     entry.role = message_in->role;
     entry.content = message_in->content;
     entry.provenance_kind = VINOX_FIELD_PRESENT(message_in, provenance_kind) ? message_in->provenance_kind : 0;
@@ -274,9 +387,6 @@ vinox_status vinox_storage_add_message(
     const auto& stored = engine->message_pool.back();
 
     if (message_out) {
-        if (message_out->struct_size < VINOX_MESSAGE_INFO_MIN_SIZE) {
-            return fail_abi("message_out->struct_size is smaller than VINOX_MESSAGE_INFO_MIN_SIZE");
-        }
         message_out->id = stored.id.c_str();
         message_out->conversation_id = stored.conversation_id.c_str();
         message_out->parent_id = stored.parent_id.empty() ? nullptr : stored.parent_id.c_str();
@@ -335,18 +445,23 @@ vinox_status vinox_storage_search_messages_fts(
 
     std::lock_guard<std::mutex> lock(const_cast<vinox_storage_engine*>(engine)->mutex);
 
-    std::string pattern = "%" + std::string(query) + "%";
-    const char* sql = "SELECT COUNT(*) FROM messages WHERE content LIKE ?;";
+    // Real FTS5 MATCH Query
+    const char* sql = "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH ?;";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(engine->db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
         return fail_runtime(sqlite3_errmsg(engine->db));
     }
 
-    sqlite3_bind_text(stmt, 1, pattern.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 1, query, -1, SQLITE_STATIC);
 
     size_t count = 0;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
+    int rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
         count = static_cast<size_t>(sqlite3_column_int64(stmt, 0));
+    } else if (rc != SQLITE_DONE) {
+        std::string err = sqlite3_errmsg(engine->db);
+        sqlite3_finalize(stmt);
+        return fail_runtime(err.c_str());
     }
     sqlite3_finalize(stmt);
 

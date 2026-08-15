@@ -6,6 +6,12 @@
   "supports": "windows | linux",
   "dependencies": [
     "nlohmann-json",
-    "sqlite3"
+    {
+      "name": "sqlite3",
+      "features": [
+        "fts5",
+        "json1"
+      ]
+    }
   ]
 }
