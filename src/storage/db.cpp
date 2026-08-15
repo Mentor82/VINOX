@@ -13,6 +13,8 @@
 
 #include <sqlite3.h>
 
+#include "generated/001_init_sql.h"
+
 namespace fs = std::filesystem;
 
 struct ConversationEntry {
@@ -76,59 +78,7 @@ std::string generate_uuid() {
     return ss.str().substr(0, 32);
 }
 
-// Canonical Migration 001 SQL (Matches schemas/database/001_init.sql)
-const char* CANONICAL_MIGRATION_001_SQL = R"(
-CREATE TABLE IF NOT EXISTS conversations (
-    id TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL,
-    metadata_json TEXT DEFAULT '{}'
-);
-
-CREATE TABLE IF NOT EXISTS messages (
-    id TEXT PRIMARY KEY,
-    conversation_id TEXT NOT NULL,
-    parent_id TEXT,
-    role TEXT NOT NULL,
-    content TEXT NOT NULL,
-    provenance_kind INTEGER NOT NULL DEFAULT 0,
-    created_at_ms INTEGER NOT NULL,
-    FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
-    FOREIGN KEY(parent_id) REFERENCES messages(id) ON DELETE SET NULL
-);
-
-CREATE TABLE IF NOT EXISTS typed_relations (
-    id TEXT PRIMARY KEY,
-    source_id TEXT NOT NULL,
-    target_id TEXT NOT NULL,
-    relation_type TEXT NOT NULL,
-    evidence_text TEXT,
-    confidence REAL NOT NULL DEFAULT 1.0,
-    created_at_ms INTEGER NOT NULL
-);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-    content,
-    content='messages',
-    content_rowid='rowid'
-);
-
-CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-    INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
-END;
-
-CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.rowid, old.content);
-END;
-
-CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.rowid, old.content);
-    INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
-END;
-)";
-
-bool enforce_sqlite_invariants(sqlite3* db, std::string& err_out) {
+bool enforce_sqlite_invariants(sqlite3* db, const char* db_path, std::string& err_out) {
     char* err_msg = nullptr;
     if (sqlite3_exec(db, "PRAGMA foreign_keys = ON;", nullptr, nullptr, &err_msg) != SQLITE_OK) {
         err_out = std::string("Failed to enable foreign_keys: ") + (err_msg ? err_msg : "unknown error");
@@ -148,11 +98,41 @@ bool enforce_sqlite_invariants(sqlite3* db, std::string& err_out) {
             }
         } else {
             sqlite3_finalize(stmt);
+            err_out = "SQLite foreign_keys query failed to return a row";
+            return false;
+        }
+    } else {
+        err_out = "Failed to prepare PRAGMA foreign_keys query";
+        return false;
+    }
+
+    // Set WAL mode
+    sqlite3_exec(db, "PRAGMA journal_mode = WAL;", nullptr, nullptr, nullptr);
+
+    // Verify WAL invariant for disk-backed DBs
+    std::string path_str(db_path ? db_path : "");
+    if (path_str != ":memory:" && path_str.find("mode=memory") == std::string::npos) {
+        stmt = nullptr;
+        if (sqlite3_prepare_v2(db, "PRAGMA journal_mode;", -1, &stmt, nullptr) == SQLITE_OK) {
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                const char* mode = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+                std::string mode_str = mode ? mode : "";
+                sqlite3_finalize(stmt);
+                if (mode_str != "wal" && mode_str != "WAL") {
+                    err_out = "SQLite journal_mode invariant check failed (PRAGMA journal_mode returned '" + mode_str + "', expected 'wal')";
+                    return false;
+                }
+            } else {
+                sqlite3_finalize(stmt);
+                err_out = "SQLite journal_mode query failed to return a row";
+                return false;
+            }
+        } else {
+            err_out = "Failed to prepare PRAGMA journal_mode query";
+            return false;
         }
     }
 
-    // Set WAL mode (for disk-backed DBs)
-    sqlite3_exec(db, "PRAGMA journal_mode = WAL;", nullptr, nullptr, nullptr);
     return true;
 }
 
@@ -179,42 +159,40 @@ bool run_canonical_migrations(sqlite3* db, std::string& err_out) {
     }
     sqlite3_finalize(stmt);
 
-    if (already_applied) {
-        return true;
-    }
+    if (!already_applied) {
+        // Run migration 001 inside a transaction using generated header from schemas/database/001_init.sql
+        rc = sqlite3_exec(db, "BEGIN TRANSACTION;", nullptr, nullptr, &err_msg);
+        if (rc != SQLITE_OK) {
+            err_out = std::string("Failed to begin migration transaction: ") + (err_msg ? err_msg : "unknown error");
+            if (err_msg) sqlite3_free(err_msg);
+            return false;
+        }
 
-    // Run migration 001 inside a transaction
-    rc = sqlite3_exec(db, "BEGIN TRANSACTION;", nullptr, nullptr, &err_msg);
-    if (rc != SQLITE_OK) {
-        err_out = std::string("Failed to begin migration transaction: ") + (err_msg ? err_msg : "unknown error");
-        if (err_msg) sqlite3_free(err_msg);
-        return false;
-    }
+        rc = sqlite3_exec(db, vinox::storage::CANONICAL_MIGRATION_001_SQL, nullptr, nullptr, &err_msg);
+        if (rc != SQLITE_OK) {
+            err_out = std::string("Canonical migration 001 failed: ") + (err_msg ? err_msg : "unknown error");
+            if (err_msg) sqlite3_free(err_msg);
+            sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+            return false;
+        }
 
-    rc = sqlite3_exec(db, CANONICAL_MIGRATION_001_SQL, nullptr, nullptr, &err_msg);
-    if (rc != SQLITE_OK) {
-        err_out = std::string("Canonical migration 001 failed: ") + (err_msg ? err_msg : "unknown error");
-        if (err_msg) sqlite3_free(err_msg);
-        sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
-        return false;
-    }
+        // Record migration 001
+        std::string record_sql = "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (1, " + std::to_string(current_timestamp_ms()) + ");";
+        rc = sqlite3_exec(db, record_sql.c_str(), nullptr, nullptr, &err_msg);
+        if (rc != SQLITE_OK) {
+            err_out = std::string("Failed to record migration 001: ") + (err_msg ? err_msg : "unknown error");
+            if (err_msg) sqlite3_free(err_msg);
+            sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+            return false;
+        }
 
-    // Record migration 001
-    std::string record_sql = "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (1, " + std::to_string(current_timestamp_ms()) + ");";
-    rc = sqlite3_exec(db, record_sql.c_str(), nullptr, nullptr, &err_msg);
-    if (rc != SQLITE_OK) {
-        err_out = std::string("Failed to record migration 001: ") + (err_msg ? err_msg : "unknown error");
-        if (err_msg) sqlite3_free(err_msg);
-        sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
-        return false;
-    }
-
-    rc = sqlite3_exec(db, "COMMIT;", nullptr, nullptr, &err_msg);
-    if (rc != SQLITE_OK) {
-        err_out = std::string("Failed to commit migration 001: ") + (err_msg ? err_msg : "unknown error");
-        if (err_msg) sqlite3_free(err_msg);
-        sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
-        return false;
+        rc = sqlite3_exec(db, "COMMIT;", nullptr, nullptr, &err_msg);
+        if (rc != SQLITE_OK) {
+            err_out = std::string("Failed to commit migration 001: ") + (err_msg ? err_msg : "unknown error");
+            if (err_msg) sqlite3_free(err_msg);
+            sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+            return false;
+        }
     }
 
     return true;
@@ -242,7 +220,7 @@ vinox_status vinox_storage_engine_open(
     }
 
     std::string inv_err;
-    if (!enforce_sqlite_invariants(db, inv_err)) {
+    if (!enforce_sqlite_invariants(db, db_path, inv_err)) {
         sqlite3_close(db);
         return fail_runtime(inv_err.c_str());
     }

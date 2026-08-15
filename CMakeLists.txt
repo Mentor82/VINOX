@@ -148,6 +148,22 @@ endif()
 
 find_package(unofficial-sqlite3 REQUIRED)
 
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/schemas/database/001_init.sql" CANONICAL_MIGRATION_001_CONTENT)
+string(CONFIGURE [[
+#ifndef VINOX_CANONICAL_MIGRATION_001_H
+#define VINOX_CANONICAL_MIGRATION_001_H
+
+namespace vinox::storage {
+inline constexpr const char* CANONICAL_MIGRATION_001_SQL = R"(
+@CANONICAL_MIGRATION_001_CONTENT@
+)";
+}
+
+#endif
+]] GENERATED_001_INIT_HEADER @ONLY)
+
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/generated/001_init_sql.h" "${GENERATED_001_INIT_HEADER}")
+
 add_library(vinox_storage SHARED
     src/storage/db.cpp
 )
@@ -160,6 +176,8 @@ target_include_directories(vinox_storage
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+    PRIVATE
+        ${CMAKE_CURRENT_BINARY_DIR}
 )
 if(MSVC)
     target_compile_options(vinox_storage PRIVATE /W4 /permissive- /EHsc)
