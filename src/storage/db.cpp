@@ -1,5 +1,6 @@
 #include "vinox/storage.h"
 
+#include <algorithm>
 #include <chrono>
 #include <deque>
 #include <filesystem>
@@ -16,6 +17,11 @@
 #include "generated/001_init_sql.h"
 
 namespace fs = std::filesystem;
+
+namespace vinox::storage {
+void l2_normalize(std::vector<float>& vec);
+float cosine_similarity(const std::vector<float>& a, const std::vector<float>& b);
+}
 
 struct ConversationEntry {
     std::string id;
@@ -39,6 +45,7 @@ struct vinox_storage_engine {
     std::mutex mutex;
     std::deque<ConversationEntry> conversation_pool;
     std::deque<MessageEntry> message_pool;
+    std::deque<std::string> string_pool;
 };
 
 namespace {
@@ -445,6 +452,176 @@ vinox_status vinox_storage_search_messages_fts(
 
     if (match_count_out) {
         *match_count_out = (max_results > 0 && count > max_results) ? max_results : count;
+    }
+
+    last_error.clear();
+    return VINOX_STATUS_OK;
+}
+
+vinox_status vinox_storage_store_embedding(
+    vinox_storage_engine* engine,
+    const char* message_id,
+    const float* embedding_data,
+    size_t dim
+) {
+    if (engine == nullptr || engine->db == nullptr) {
+        return fail_arg("storage engine handle cannot be null");
+    }
+    if (message_id == nullptr || message_id[0] == '\0') {
+        return fail_arg("message_id cannot be null or empty");
+    }
+    if (embedding_data == nullptr || dim == 0) {
+        return fail_arg("embedding_data cannot be null and dim must be > 0");
+    }
+
+    std::vector<float> vec(embedding_data, embedding_data + dim);
+    vinox::storage::l2_normalize(vec);
+
+    std::lock_guard<std::mutex> lock(engine->mutex);
+
+    const char* sql = "INSERT OR REPLACE INTO message_embeddings (message_id, embedding, dim, created_at_ms) VALUES (?, ?, ?, ?);";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(engine->db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return fail_runtime(sqlite3_errmsg(engine->db));
+    }
+
+    sqlite3_bind_text(stmt, 1, message_id, -1, SQLITE_STATIC);
+    sqlite3_bind_blob(stmt, 2, vec.data(), static_cast<int>(vec.size() * sizeof(float)), SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 3, static_cast<int>(dim));
+    sqlite3_bind_int64(stmt, 4, static_cast<sqlite3_int64>(current_timestamp_ms()));
+
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (rc != SQLITE_DONE) {
+        return fail_runtime(sqlite3_errmsg(engine->db));
+    }
+
+    last_error.clear();
+    return VINOX_STATUS_OK;
+}
+
+struct HybridCandidate {
+    std::string message_id;
+    float bm25_score{0.0f};
+    float vector_score{0.0f};
+    float hybrid_score{0.0f};
+};
+
+vinox_status vinox_storage_search_hybrid(
+    const vinox_storage_engine* engine,
+    const float* query_embedding,
+    size_t dim,
+    const char* text_query,
+    float alpha,
+    size_t max_results,
+    vinox_search_result* results_out,
+    size_t* results_count_out
+) {
+    if (engine == nullptr || engine->db == nullptr) {
+        return fail_arg("storage engine handle cannot be null");
+    }
+    if (results_out == nullptr && max_results > 0) {
+        return fail_arg("results_out cannot be null when max_results > 0");
+    }
+
+    // PRE-TRANSACTION ABI VALIDATION ON RESULTS_OUT STRUCTS
+    if (results_out != nullptr) {
+        for (size_t i = 0; i < max_results; ++i) {
+            if (results_out[i].struct_size < VINOX_SEARCH_RESULT_MIN_SIZE) {
+                return fail_abi("results_out struct_size is smaller than VINOX_SEARCH_RESULT_MIN_SIZE");
+            }
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(const_cast<vinox_storage_engine*>(engine)->mutex);
+
+    std::vector<float> q_vec;
+    if (query_embedding && dim > 0) {
+        q_vec.assign(query_embedding, query_embedding + dim);
+        vinox::storage::l2_normalize(q_vec);
+    }
+
+    std::vector<HybridCandidate> candidates;
+
+    // 1. Fetch text matches via FTS5
+    if (text_query && text_query[0] != '\0') {
+        const char* sql = "SELECT m.id FROM messages_fts f JOIN messages m ON f.rowid = m.rowid WHERE messages_fts MATCH ?;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(engine->db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, text_query, -1, SQLITE_STATIC);
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                const char* id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+                if (id) {
+                    HybridCandidate c;
+                    c.message_id = id;
+                    c.bm25_score = 1.0f;
+                    candidates.push_back(c);
+                }
+            }
+            sqlite3_finalize(stmt);
+        }
+    }
+
+    // 2. Fetch and compute vector similarity for stored embeddings
+    if (!q_vec.empty()) {
+        const char* sql = "SELECT message_id, embedding, dim FROM message_embeddings;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(engine->db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                const char* id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+                const void* blob = sqlite3_column_blob(stmt, 1);
+                int bytes = sqlite3_column_bytes(stmt, 1);
+                int stored_dim = sqlite3_column_int(stmt, 2);
+
+                if (id && blob && bytes > 0 && stored_dim == static_cast<int>(dim)) {
+                    std::vector<float> s_vec(bytes / sizeof(float));
+                    std::memcpy(s_vec.data(), blob, bytes);
+                    float sim = vinox::storage::cosine_similarity(q_vec, s_vec);
+
+                    bool found = false;
+                    for (auto& c : candidates) {
+                        if (c.message_id == id) {
+                            c.vector_score = sim;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        HybridCandidate c;
+                        c.message_id = id;
+                        c.vector_score = sim;
+                        candidates.push_back(c);
+                    }
+                }
+            }
+            sqlite3_finalize(stmt);
+        }
+    }
+
+    // 3. Compute hybrid scores
+    for (auto& c : candidates) {
+        c.hybrid_score = (1.0f - alpha) * c.bm25_score + alpha * c.vector_score;
+    }
+
+    // Sort descending by hybrid_score
+    std::sort(candidates.begin(), candidates.end(), [](const HybridCandidate& a, const HybridCandidate& b) {
+        return a.hybrid_score > b.hybrid_score;
+    });
+
+    size_t count = std::min(candidates.size(), max_results);
+    auto* mutable_engine = const_cast<vinox_storage_engine*>(engine);
+
+    for (size_t i = 0; i < count; ++i) {
+        mutable_engine->string_pool.push_back(candidates[i].message_id);
+        results_out[i].message_id = mutable_engine->string_pool.back().c_str();
+        results_out[i].bm25_score = candidates[i].bm25_score;
+        results_out[i].vector_score = candidates[i].vector_score;
+        results_out[i].hybrid_score = candidates[i].hybrid_score;
+    }
+
+    if (results_count_out) {
+        *results_count_out = count;
     }
 
     last_error.clear();

@@ -48,6 +48,20 @@ typedef struct vinox_message_info {
 #define VINOX_MESSAGE_INFO_MIN_SIZE \
     ((uint32_t)(offsetof(vinox_message_info, content) + sizeof(const char*)))
 
+/**
+ * @brief Hybrid search result item.
+ */
+typedef struct vinox_search_result {
+    uint32_t struct_size;
+    const char* message_id;
+    float bm25_score;
+    float vector_score;
+    float hybrid_score;
+} vinox_search_result;
+
+#define VINOX_SEARCH_RESULT_MIN_SIZE \
+    ((uint32_t)(offsetof(vinox_search_result, vector_score) + sizeof(float)))
+
 VINOX_API vinox_status vinox_storage_engine_open(
     const char* db_path,
     vinox_storage_engine** engine_out
@@ -75,6 +89,24 @@ VINOX_API vinox_status vinox_storage_search_messages_fts(
     const char* query,
     size_t max_results,
     size_t* match_count_out
+);
+
+VINOX_API vinox_status vinox_storage_store_embedding(
+    vinox_storage_engine* engine,
+    const char* message_id,
+    const float* embedding_data,
+    size_t dim
+);
+
+VINOX_API vinox_status vinox_storage_search_hybrid(
+    const vinox_storage_engine* engine,
+    const float* query_embedding,
+    size_t dim,
+    const char* text_query,
+    float alpha,
+    size_t max_results,
+    vinox_search_result* results_out,
+    size_t* results_count_out
 );
 
 VINOX_API void vinox_storage_engine_close(vinox_storage_engine* engine);

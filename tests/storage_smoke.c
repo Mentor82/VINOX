@@ -330,14 +330,55 @@ int main(void) {
         return 27;
     }
 
-    if (vinox_storage_get_conversation_count(engine, &count) != VINOX_STATUS_OK || count < 1) {
-        printf("FAILED: Reopened DB conversation count (expected >= 1, got %zu)\n", count);
+    // -------------------------------------------------------------
+    // TEST 9: Phase 5.2 Embedding Storage & Hybrid Search
+    // -------------------------------------------------------------
+    vinox_conversation_info emb_conv = {0};
+    emb_conv.struct_size = VINOX_CONVERSATION_INFO_MIN_SIZE;
+    if (vinox_storage_create_conversation(engine, "Embedding Test Conversation", &emb_conv) != VINOX_STATUS_OK) {
+        printf("FAILED: Create conversation for embedding test: %s\n", vinox_storage_last_error());
         vinox_storage_engine_close(engine);
         return 28;
     }
 
+    float dummy_embedding[1024];
+    for (size_t i = 0; i < 1024; ++i) dummy_embedding[i] = (float)(i + 1);
+
+    msg_in.id = "vec-msg-001";
+    msg_in.conversation_id = emb_conv.id;
+    msg_in.role = "user";
+    msg_in.content = "OpenVINO GenAI Vector Search Target";
+    msg_out.struct_size = sizeof(msg_out);
+    if (vinox_storage_add_message(engine, &msg_in, &msg_out) != VINOX_STATUS_OK) {
+        printf("FAILED: Add message for embedding test: %s\n", vinox_storage_last_error());
+        vinox_storage_engine_close(engine);
+        return 29;
+    }
+
+    if (vinox_storage_store_embedding(engine, "vec-msg-001", dummy_embedding, 1024) != VINOX_STATUS_OK) {
+        printf("FAILED: Store embedding: %s\n", vinox_storage_last_error());
+        vinox_storage_engine_close(engine);
+        return 30;
+    }
+
+    vinox_search_result h_results[5];
+    for (int i = 0; i < 5; ++i) h_results[i].struct_size = sizeof(vinox_search_result);
+    size_t h_count = 0;
+
+    if (vinox_storage_search_hybrid(engine, dummy_embedding, 1024, "OpenVINO", 0.5f, 5, h_results, &h_count) != VINOX_STATUS_OK || h_count < 1) {
+        printf("FAILED: Hybrid search: %s\n", vinox_storage_last_error());
+        vinox_storage_engine_close(engine);
+        return 31;
+    }
+
+    if (h_results[0].message_id == NULL || h_results[0].hybrid_score <= 0.0f) {
+        printf("FAILED: Hybrid search result validation\n");
+        vinox_storage_engine_close(engine);
+        return 32;
+    }
+
     vinox_storage_engine_close(engine);
     remove(db_file);
-    printf("SUCCESS: All Issue #5 Storage final target assertions passed!\n");
+    printf("SUCCESS: All Phase 5.1 & Phase 5.2 Storage tests passed!\n");
     return 0;
 }

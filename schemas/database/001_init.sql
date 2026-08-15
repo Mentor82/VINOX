@@ -32,6 +32,14 @@ CREATE TABLE IF NOT EXISTS typed_relations (
     created_at_ms INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS message_embeddings (
+    message_id TEXT PRIMARY KEY,
+    embedding BLOB NOT NULL,
+    dim INTEGER NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     content,
     content='messages',

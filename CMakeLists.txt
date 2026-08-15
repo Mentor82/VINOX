@@ -166,6 +166,7 @@ file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/generated/001_init_sql.h" "${GENERATED_0
 
 add_library(vinox_storage SHARED
     src/storage/db.cpp
+    src/storage/embeddings.cpp
 )
 add_library(vinox::storage ALIAS vinox_storage)
 set_target_properties(vinox_storage PROPERTIES EXPORT_NAME storage)
