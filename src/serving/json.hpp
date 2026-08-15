@@ -11,8 +11,14 @@
 
 namespace vinox::serving {
 
+/**
+ * @brief Categorizes primitive JSON data types.
+ */
 enum class JsonType { Null, Bool, Number, String, Array, Object };
 
+/**
+ * @brief Represents a parsed JSON value node.
+ */
 struct JsonValue {
     JsonType type{JsonType::Null};
     bool bool_value{false};
@@ -22,6 +28,15 @@ struct JsonValue {
     std::map<std::string, JsonValue> object_value;
 };
 
+/**
+ * @brief Lightweight, zero-dependency C++20 JSON parser for VINOX model manifests.
+ *
+ * @note SCOPE BOUNDARY & SECURITY CONTRACT:
+ * This parser is specifically scoped for local, trusted VINOX model-manifest parsing.
+ * For future untrusted network, MCP JSON-RPC, or public API traffic (Phases 9/10),
+ * an extended security-hardening pass (surrogate pairs, strict recursion limits, duplicate key policy)
+ * or a dedicated external library (e.g. nlohmann_json / simdjson) will be evaluated.
+ */
 class JsonParser {
 public:
     explicit JsonParser(std::string_view input) : input_(input), pos_(0) {}
@@ -132,10 +147,35 @@ private:
                 if (esc == '"') res += '"';
                 else if (esc == '\\') res += '\\';
                 else if (esc == '/') res += '/';
+                else if (esc == 'b') res += '\b';
+                else if (esc == 'f') res += '\f';
                 else if (esc == 'n') res += '\n';
                 else if (esc == 'r') res += '\r';
                 else if (esc == 't') res += '\t';
-                else res += esc;
+                else if (esc == 'u') {
+                    if (pos_ + 4 > input_.size()) throw std::runtime_error("Incomplete \\uXXXX escape sequence");
+                    uint32_t codepoint = 0;
+                    for (int i = 0; i < 4; ++i) {
+                        char hex_ch = input_[pos_++];
+                        codepoint <<= 4;
+                        if (hex_ch >= '0' && hex_ch <= '9') codepoint |= static_cast<uint32_t>(hex_ch - '0');
+                        else if (hex_ch >= 'a' && hex_ch <= 'f') codepoint |= static_cast<uint32_t>(hex_ch - 'a' + 10);
+                        else if (hex_ch >= 'A' && hex_ch <= 'F') codepoint |= static_cast<uint32_t>(hex_ch - 'A' + 10);
+                        else throw std::runtime_error("Invalid hex digit in \\uXXXX escape sequence");
+                    }
+                    if (codepoint <= 0x7F) {
+                        res += static_cast<char>(codepoint);
+                    } else if (codepoint <= 0x7FF) {
+                        res += static_cast<char>(0xC0 | ((codepoint >> 6) & 0x1F));
+                        res += static_cast<char>(0x80 | (codepoint & 0x3F));
+                    } else {
+                        res += static_cast<char>(0xE0 | ((codepoint >> 12) & 0x0F));
+                        res += static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+                        res += static_cast<char>(0x80 | (codepoint & 0x3F));
+                    }
+                } else {
+                    throw std::runtime_error(std::string("Invalid escape sequence in JSON string: \\") + esc);
+                }
             } else {
                 res += c;
             }
