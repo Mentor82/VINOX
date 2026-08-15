@@ -124,6 +124,25 @@ if(VINOX_OPENVINO_SDK_ROOT)
     endif()
 endif()
 
+add_library(vinox_serving SHARED
+    src/serving/model_registry.cpp
+    src/serving/context_budget.cpp
+)
+add_library(vinox::serving ALIAS vinox_serving)
+set_target_properties(vinox_serving PROPERTIES EXPORT_NAME serving)
+
+target_compile_definitions(vinox_serving PRIVATE VINOX_BUILD_SHARED)
+target_include_directories(vinox_serving
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+if(MSVC)
+    target_compile_options(vinox_serving PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(vinox_serving PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 add_executable(vinox_cli
     src/cli/main.cpp
 )
@@ -143,6 +162,10 @@ if(BUILD_TESTING)
     target_link_libraries(vinox_abi_smoke PRIVATE vinox::core)
     add_test(NAME abi_smoke COMMAND vinox_abi_smoke)
 
+    add_executable(vinox_serving_smoke tests/serving_smoke.c)
+    target_link_libraries(vinox_serving_smoke PRIVATE vinox::serving)
+    add_test(NAME serving_smoke COMMAND vinox_serving_smoke)
+
     if(TARGET vinox_openvino)
         add_executable(vinox_openvino_abi_smoke tests/openvino_abi_smoke.c)
         target_link_libraries(vinox_openvino_abi_smoke PRIVATE vinox::openvino)
@@ -156,13 +179,14 @@ if(BUILD_TESTING)
 endif()
 
 install(
-    TARGETS vinox_core vinox_cli
+    TARGETS vinox_core vinox_serving vinox_cli
     EXPORT vinoxTargets
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(DIRECTORY schemas/ DESTINATION share/vinox/schemas)
 install(
     EXPORT vinoxTargets
     NAMESPACE vinox::
@@ -203,3 +227,4 @@ install(DIRECTORY DESTINATION share/vinox/schemas)
 install(DIRECTORY DESTINATION share/vinox/migrations)
 install(DIRECTORY DESTINATION share/vinox/prompts)
 install(DIRECTORY DESTINATION share/vinox/config)
+

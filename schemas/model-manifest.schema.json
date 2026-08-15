@@ -1,0 +1,64 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "VINOX Model Manifest Schema",
+  "description": "Validates VINOX model manifest files for local model discovery and serving registry.",
+  "type": "object",
+  "required": [
+    "model_id",
+    "display_name",
+    "local_path",
+    "context_length",
+    "capabilities"
+  ],
+  "properties": {
+    "model_id": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+$"
+    },
+    "display_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "type": "string",
+      "default": "1.0.0"
+    },
+    "local_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "model_type": {
+      "type": "string",
+      "enum": ["llm", "embedding", "vision", "reranker"],
+      "default": "llm"
+    },
+    "context_length": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "default_device": {
+      "type": "string",
+      "default": "CPU"
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["chat", "structured_output", "tools", "embeddings", "vision"]
+      },
+      "uniqueItems": true,
+      "minItems": 1
+    },
+    "default_generation_options": {
+      "type": "object",
+      "properties": {
+        "max_new_tokens": { "type": "integer", "minimum": 1 },
+        "temperature": { "type": "number", "minimum": 0.0 },
+        "top_p": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "top_k": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
