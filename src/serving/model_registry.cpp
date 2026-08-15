@@ -1,11 +1,15 @@
 #include "vinox/serving.h"
 
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <regex>
 #include <string>
+#include <type_traits>
 #include <vector>
+
+#include "json.hpp"
 
 namespace fs = std::filesystem;
 
@@ -20,10 +24,13 @@ struct ModelEntry {
 
 struct vinox_model_registry {
     std::mutex mutex;
-    std::vector<ModelEntry> models;
+    std::deque<ModelEntry> models; // deque guarantees pointer stability on push_back
 };
 
 namespace {
+
+#define VINOX_FIELD_PRESENT(ptr, member) \
+    ((ptr)->struct_size >= (offsetof(std::remove_pointer_t<decltype(ptr)>, member) + sizeof((ptr)->member)))
 
 thread_local std::string last_error;
 
@@ -42,54 +49,103 @@ vinox_status fail_runtime(const char* message) {
     return VINOX_STATUS_RUNTIME_ERROR;
 }
 
-std::string extract_json_string(const std::string& json, const std::string& key) {
-    std::regex pattern("\"" + key + "\"\\s*:\\s*\"([^\"]+)\"");
-    std::smatch match;
-    if (std::regex_search(json, match, pattern) && match.size() > 1) {
-        return match[1].str();
-    }
-    return "";
-}
-
-uint64_t extract_json_uint64(const std::string& json, const std::string& key, uint64_t default_val) {
-    std::regex pattern("\"" + key + "\"\\s*:\\s*(\\d+)");
-    std::smatch match;
-    if (std::regex_search(json, match, pattern) && match.size() > 1) {
-        try {
-            return std::stoull(match[1].str());
-        } catch (...) {}
-    }
-    return default_val;
-}
-
-bool parse_manifest_file(const fs::path& path, ModelEntry& entry) {
+bool validate_and_parse_manifest(const fs::path& path, ModelEntry& entry, std::string& err_msg) {
     std::ifstream file(path);
     if (!file.is_open()) {
+        err_msg = "Failed to open manifest file: " + path.string();
         return false;
     }
     std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 
-    entry.model_id = extract_json_string(content, "model_id");
-    entry.display_name = extract_json_string(content, "display_name");
-    entry.local_path = extract_json_string(content, "local_path");
-    
-    std::string device = extract_json_string(content, "default_device");
-    entry.default_device = device.empty() ? "CPU" : device;
+    vinox::serving::JsonValue root;
+    try {
+        root = vinox::serving::JsonParser::parse(content);
+    } catch (const std::exception& ex) {
+        err_msg = std::string("Manifest JSON parse error in ") + path.filename().string() + ": " + ex.what();
+        return false;
+    }
 
-    entry.context_length = extract_json_uint64(content, "context_length", 4096);
+    if (root.type != vinox::serving::JsonType::Object) {
+        err_msg = "Manifest root must be a JSON object in " + path.filename().string();
+        return false;
+    }
+
+    const auto& obj = root.object_value;
+
+    // 1. Required model_id
+    auto it_id = obj.find("model_id");
+    if (it_id == obj.end() || it_id->second.type != vinox::serving::JsonType::String || it_id->second.string_value.empty()) {
+        err_msg = "Manifest missing required string property 'model_id'";
+        return false;
+    }
+    entry.model_id = it_id->second.string_value;
+
+    // Pattern check: vendor/name
+    static const std::regex id_pattern("^[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+$");
+    if (!std::regex_match(entry.model_id, id_pattern)) {
+        err_msg = "Invalid model_id format: '" + entry.model_id + "' must match pattern vendor/name";
+        return false;
+    }
+
+    // 2. Required display_name
+    auto it_name = obj.find("display_name");
+    if (it_name == obj.end() || it_name->second.type != vinox::serving::JsonType::String || it_name->second.string_value.empty()) {
+        err_msg = "Manifest missing required string property 'display_name'";
+        return false;
+    }
+    entry.display_name = it_name->second.string_value;
+
+    // 3. Required local_path
+    auto it_path = obj.find("local_path");
+    if (it_path == obj.end() || it_path->second.type != vinox::serving::JsonType::String || it_path->second.string_value.empty()) {
+        err_msg = "Manifest missing required string property 'local_path'";
+        return false;
+    }
+    entry.local_path = it_path->second.string_value;
+
+    // 4. Required context_length (> 0)
+    auto it_ctx = obj.find("context_length");
+    if (it_ctx == obj.end() || it_ctx->second.type != vinox::serving::JsonType::Number || it_ctx->second.number_value <= 0) {
+        err_msg = "Manifest missing or invalid integer property 'context_length' (> 0)";
+        return false;
+    }
+    entry.context_length = static_cast<uint64_t>(it_ctx->second.number_value);
+
+    // 5. Required capabilities array
+    auto it_cap = obj.find("capabilities");
+    if (it_cap == obj.end() || it_cap->second.type != vinox::serving::JsonType::Array || it_cap->second.array_value.empty()) {
+        err_msg = "Manifest missing required array property 'capabilities' (minItems 1)";
+        return false;
+    }
+    static const std::vector<std::string> valid_caps = {"chat", "structured_output", "tools", "embeddings", "vision"};
+    for (const auto& cap_item : it_cap->second.array_value) {
+        if (cap_item.type != vinox::serving::JsonType::String) {
+            err_msg = "Invalid capability item type in manifest";
+            return false;
+        }
+        bool valid = false;
+        for (const auto& vc : valid_caps) {
+            if (cap_item.string_value == vc) {
+                valid = true;
+                break;
+            }
+        }
+        if (!valid) {
+            err_msg = "Unknown model capability: '" + cap_item.string_value + "'";
+            return false;
+        }
+    }
+
+    // 6. Optional default_device
+    auto it_dev = obj.find("default_device");
+    if (it_dev != obj.end() && it_dev->second.type == vinox::serving::JsonType::String && !it_dev->second.string_value.empty()) {
+        entry.default_device = it_dev->second.string_value;
+    } else {
+        entry.default_device = "CPU";
+    }
+
     entry.state = VINOX_MODEL_STATE_UNLOADED;
-
-    if (entry.model_id.empty()) {
-        entry.model_id = path.stem().string();
-    }
-    if (entry.display_name.empty()) {
-        entry.display_name = entry.model_id;
-    }
-    if (entry.local_path.empty()) {
-        entry.local_path = path.parent_path().string();
-    }
-
-    return !entry.model_id.empty();
+    return true;
 }
 
 }  // namespace
@@ -125,25 +181,25 @@ vinox_status vinox_model_registry_scan(
         return fail_arg("directory_path does not exist or is not a directory");
     }
 
-    size_t added_count = 0;
     std::lock_guard<std::mutex> lock(registry->mutex);
 
     for (const auto& entry : fs::recursive_directory_iterator(dir, ec)) {
         if (ec) break;
         if (entry.is_regular_file() && entry.path().filename().string() == "model-manifest.json") {
             ModelEntry model_info;
-            if (parse_manifest_file(entry.path(), model_info)) {
-                // Check if already registered by model_id
+            std::string parse_err;
+            if (validate_and_parse_manifest(entry.path(), model_info, parse_err)) {
+                // Duplicate check by model_id
                 bool exists = false;
-                for (const auto& m : registry->models) {
+                for (auto& m : registry->models) {
                     if (m.model_id == model_info.model_id) {
+                        m = model_info;
                         exists = true;
                         break;
                     }
                 }
                 if (!exists) {
                     registry->models.push_back(model_info);
-                    added_count++;
                 }
             }
         }
@@ -175,8 +231,9 @@ vinox_status vinox_model_registry_register_manifest(
     }
 
     ModelEntry entry;
-    if (!parse_manifest_file(path, entry)) {
-        return fail_arg("failed to parse manifest file");
+    std::string parse_err;
+    if (!validate_and_parse_manifest(path, entry, parse_err)) {
+        return fail_arg(parse_err.c_str());
     }
 
     std::lock_guard<std::mutex> lock(registry->mutex);
@@ -234,9 +291,16 @@ vinox_status vinox_model_registry_get_info(
     info_out->model_id = entry.model_id.c_str();
     info_out->display_name = entry.display_name.c_str();
     info_out->local_path = entry.local_path.c_str();
-    info_out->default_device = entry.default_device.c_str();
-    info_out->context_length = entry.context_length;
-    info_out->state = static_cast<uint32_t>(entry.state);
+
+    if (VINOX_FIELD_PRESENT(info_out, default_device)) {
+        info_out->default_device = entry.default_device.c_str();
+    }
+    if (VINOX_FIELD_PRESENT(info_out, context_length)) {
+        info_out->context_length = entry.context_length;
+    }
+    if (VINOX_FIELD_PRESENT(info_out, state)) {
+        info_out->state = static_cast<uint32_t>(entry.state);
+    }
 
     last_error.clear();
     return VINOX_STATUS_OK;

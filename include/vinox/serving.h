@@ -31,8 +31,9 @@ typedef struct vinox_model_info {
     uint32_t state;
 } vinox_model_info;
 
+/* Minimum required struct_size for backward compatibility (up to local_path) */
 #define VINOX_MODEL_INFO_MIN_SIZE \
-    ((uint32_t)(offsetof(vinox_model_info, state) + sizeof(uint32_t)))
+    ((uint32_t)(offsetof(vinox_model_info, local_path) + sizeof(const char*)))
 
 VINOX_API vinox_status vinox_model_registry_create(vinox_model_registry** registry);
 
@@ -52,6 +53,14 @@ VINOX_API vinox_status vinox_model_registry_get_count(
     size_t* count_out
 );
 
+/**
+ * @brief Populates `info_out` with metadata for model at `index`.
+ *
+ * @note Lifetime Contract:
+ * Pointers returned in `info_out` (model_id, display_name, local_path, default_device)
+ * remain valid for the lifetime of the `vinox_model_registry` instance until `vinox_model_registry_destroy` is called,
+ * even across concurrent scans or new model registrations.
+ */
 VINOX_API vinox_status vinox_model_registry_get_info(
     const vinox_model_registry* registry,
     size_t index,
