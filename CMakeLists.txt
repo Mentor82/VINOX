@@ -94,16 +94,18 @@ if(VINOX_OPENVINO_SDK_ROOT)
     )
 
     if(WIN32)
-        if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-            set(_vinox_openvino_runtime_config Debug)
-        else()
-            set(_vinox_openvino_runtime_config Release)
-        endif()
-
         install(
-            DIRECTORY
-                "${VINOX_OPENVINO_SDK_ROOT}/runtime/bin/intel64/${_vinox_openvino_runtime_config}/"
+            DIRECTORY "${VINOX_OPENVINO_SDK_ROOT}/runtime/bin/intel64/Debug/"
             DESTINATION ${CMAKE_INSTALL_BINDIR}
+            CONFIGURATIONS Debug
+            FILES_MATCHING
+                PATTERN "*.dll"
+                PATTERN "cache.json"
+        )
+        install(
+            DIRECTORY "${VINOX_OPENVINO_SDK_ROOT}/runtime/bin/intel64/Release/"
+            DESTINATION ${CMAKE_INSTALL_BINDIR}
+            CONFIGURATIONS Release RelWithDebInfo MinSizeRel
             FILES_MATCHING
                 PATTERN "*.dll"
                 PATTERN "cache.json"

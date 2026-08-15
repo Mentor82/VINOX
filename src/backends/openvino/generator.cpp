@@ -1,5 +1,6 @@
 #include "vinox/openvino.h"
 
+#include <atomic>
 #include <exception>
 #include <memory>
 #include <string>
@@ -11,18 +12,29 @@ struct vinox_model {
         : pipeline(std::make_unique<ov::genai::LLMPipeline>(model_path, device)) {}
 
     std::unique_ptr<ov::genai::LLMPipeline> pipeline;
+    std::atomic<bool> cancel_requested{false};
 };
 
 namespace {
 
 thread_local std::string last_error;
 
-vinox_status fail(const char* message) {
+vinox_status fail_arg(const char* message) {
+    last_error = message;
+    return VINOX_STATUS_INVALID_ARGUMENT;
+}
+
+vinox_status fail_abi(const char* message) {
+    last_error = message;
+    return VINOX_STATUS_INCOMPATIBLE_ABI;
+}
+
+vinox_status fail_runtime(const char* message) {
     last_error = message;
     return VINOX_STATUS_RUNTIME_ERROR;
 }
 
-vinox_status fail(const std::exception& error) {
+vinox_status fail_runtime(const std::exception& error) {
     last_error = error.what();
     return VINOX_STATUS_RUNTIME_ERROR;
 }
@@ -33,15 +45,19 @@ vinox_status vinox_model_load(
     const vinox_model_options* options,
     vinox_model** model
 ) {
-    if (options == nullptr || model == nullptr) {
-        return VINOX_STATUS_INVALID_ARGUMENT;
+    if (options == nullptr) {
+        return fail_arg("options pointer cannot be null");
+    }
+    if (model == nullptr) {
+        return fail_arg("model output pointer cannot be null");
     }
     *model = nullptr;
-    if (options->struct_size != sizeof(vinox_model_options)) {
-        return VINOX_STATUS_INCOMPATIBLE_ABI;
+
+    if (options->struct_size < VINOX_MODEL_OPTIONS_MIN_SIZE) {
+        return fail_abi("options->struct_size is smaller than VINOX_MODEL_OPTIONS_MIN_SIZE");
     }
     if (options->model_path == nullptr || options->model_path[0] == '\0') {
-        return VINOX_STATUS_INVALID_ARGUMENT;
+        return fail_arg("options->model_path cannot be null or empty");
     }
 
     const std::string device =
@@ -55,9 +71,9 @@ vinox_status vinox_model_load(
         last_error.clear();
         return VINOX_STATUS_OK;
     } catch (const std::exception& error) {
-        return fail(error);
+        return fail_runtime(error);
     } catch (...) {
-        return fail("Unknown error while loading the OpenVINO model");
+        return fail_runtime("Unknown error while loading the OpenVINO model");
     }
 }
 
@@ -67,14 +83,36 @@ vinox_status vinox_model_generate(
     vinox_text_callback callback,
     void* user_data
 ) {
-    if (model == nullptr || options == nullptr || callback == nullptr) {
-        return VINOX_STATUS_INVALID_ARGUMENT;
+    if (model == nullptr) {
+        return fail_arg("model handle cannot be null");
     }
-    if (options->struct_size != sizeof(vinox_generation_options)) {
-        return VINOX_STATUS_INCOMPATIBLE_ABI;
+    if (options == nullptr) {
+        return fail_arg("options pointer cannot be null");
+    }
+    if (callback == nullptr) {
+        return fail_arg("callback cannot be null");
+    }
+    if (options->struct_size < VINOX_GENERATION_OPTIONS_MIN_SIZE) {
+        return fail_abi("options->struct_size is smaller than VINOX_GENERATION_OPTIONS_MIN_SIZE");
     }
     if (options->prompt == nullptr || options->prompt[0] == '\0') {
-        return VINOX_STATUS_INVALID_ARGUMENT;
+        return fail_arg("options->prompt cannot be null or empty");
+    }
+
+    // Validate sampling options if struct_size covers them
+    const size_t sz = options->struct_size;
+    const bool has_sampling = sz >= offsetof(vinox_generation_options, frequency_penalty) + sizeof(float);
+
+    if (has_sampling) {
+        if (options->temperature < 0.0f) {
+            return fail_arg("Invalid generation option: temperature must be >= 0.0");
+        }
+        if (options->top_p < 0.0f || options->top_p > 1.0f) {
+            return fail_arg("Invalid generation option: top_p must be between 0.0 and 1.0");
+        }
+        if (options->repetition_penalty < 0.0f) {
+            return fail_arg("Invalid generation option: repetition_penalty must be >= 0.0");
+        }
     }
 
     try {
@@ -83,34 +121,46 @@ vinox_status vinox_model_generate(
             ? 32
             : options->max_new_tokens;
 
-        if (options->temperature > 0.0f) {
-            config.temperature = options->temperature;
-            config.do_sample = true;
-        }
-        if (options->top_p > 0.0f && options->top_p <= 1.0f) {
-            config.top_p = options->top_p;
-            config.do_sample = true;
-        }
-        if (options->top_k > 0) {
-            config.top_k = options->top_k;
-            config.do_sample = true;
-        }
-        if (options->repetition_penalty > 0.0f) {
-            config.repetition_penalty = options->repetition_penalty;
-        }
-        if (options->presence_penalty != 0.0f) {
-            config.presence_penalty = options->presence_penalty;
-        }
-        if (options->frequency_penalty != 0.0f) {
-            config.frequency_penalty = options->frequency_penalty;
+        if (has_sampling) {
+            if (options->temperature > 0.0f) {
+                config.temperature = options->temperature;
+                config.do_sample = true;
+            }
+            if (options->top_p > 0.0f && options->top_p <= 1.0f) {
+                config.top_p = options->top_p;
+                config.do_sample = true;
+            }
+            if (options->top_k > 0) {
+                config.top_k = options->top_k;
+                config.do_sample = true;
+            }
+            if (options->repetition_penalty > 0.0f) {
+                config.repetition_penalty = options->repetition_penalty;
+            }
+            if (options->presence_penalty != 0.0f) {
+                config.presence_penalty = options->presence_penalty;
+            }
+            if (options->frequency_penalty != 0.0f) {
+                config.frequency_penalty = options->frequency_penalty;
+            }
         }
 
+        model->cancel_requested.store(false);
         bool cancelled_by_callback = false;
-        auto streamer = [callback, user_data, &cancelled_by_callback](std::string subword) -> ov::genai::StreamingStatus {
+
+        auto streamer = [model, callback, user_data, &cancelled_by_callback](std::string subword) -> ov::genai::StreamingStatus {
+            if (model->cancel_requested.load()) {
+                cancelled_by_callback = true;
+                return ov::genai::StreamingStatus::STOP;
+            }
             if (subword.empty()) {
                 return ov::genai::StreamingStatus::RUNNING;
             }
             if (callback(subword.data(), subword.size(), user_data) != 0) {
+                cancelled_by_callback = true;
+                return ov::genai::StreamingStatus::STOP;
+            }
+            if (model->cancel_requested.load()) {
                 cancelled_by_callback = true;
                 return ov::genai::StreamingStatus::STOP;
             }
@@ -119,12 +169,23 @@ vinox_status vinox_model_generate(
 
         model->pipeline->generate(options->prompt, config, streamer);
         last_error.clear();
-        return cancelled_by_callback ? VINOX_STATUS_CANCELLED : VINOX_STATUS_OK;
+        return (cancelled_by_callback || model->cancel_requested.load())
+            ? VINOX_STATUS_CANCELLED
+            : VINOX_STATUS_OK;
     } catch (const std::exception& error) {
-        return fail(error);
+        return fail_runtime(error);
     } catch (...) {
-        return fail("Unknown error during OpenVINO generation");
+        return fail_runtime("Unknown error during OpenVINO generation");
     }
+}
+
+vinox_status vinox_model_cancel(vinox_model* model) {
+    if (model == nullptr) {
+        return fail_arg("model handle cannot be null");
+    }
+    model->cancel_requested.store(true);
+    last_error.clear();
+    return VINOX_STATUS_OK;
 }
 
 void vinox_model_destroy(vinox_model* model) {
