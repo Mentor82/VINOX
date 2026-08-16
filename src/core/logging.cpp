@@ -258,12 +258,12 @@ vinox_status vinox_correlation_serialize_envelope(
     size_t req_len = str.length() + 1;
     if (required_size_out) *required_size_out = req_len;
 
-    if (output_buf && output_buf_size > 0) {
-        size_t copy_len = std::min(str.length(), output_buf_size - 1);
-        std::memcpy(output_buf, str.c_str(), copy_len);
-        output_buf[copy_len] = '\0';
+    if (!output_buf || output_buf_size < req_len) {
+        vinox_set_last_error("output_buf is null or buffer size too small for correlation envelope");
+        return VINOX_STATUS_INVALID_ARGUMENT;
     }
 
+    std::memcpy(output_buf, str.c_str(), req_len);
     return VINOX_STATUS_OK;
 }
 
@@ -291,11 +291,25 @@ vinox_status vinox_correlation_deserialize_envelope(
         return VINOX_STATUS_INVALID_ARGUMENT;
     }
 
+    if (!j.contains("wire_version") || !j["wire_version"].is_number_integer()) {
+        vinox_set_last_error("Missing or invalid wire_version in correlation envelope");
+        return VINOX_STATUS_INVALID_ARGUMENT;
+    }
+    int64_t ver = j["wire_version"].get<int64_t>();
+    if (ver != 1) {
+        vinox_set_last_error("Unsupported wire_version in correlation envelope");
+        return VINOX_STATUS_INCOMPATIBLE_ABI;
+    }
+
     size_t offset = 0;
+    bool pool_failed = false;
     auto copy_field = [&](const char* key) -> const char* {
         if (!j.contains(key) || !j[key].is_string()) return nullptr;
         std::string val = j[key].get<std::string>();
-        if (offset + val.length() + 1 > string_pool_buf_size) return nullptr;
+        if (offset + val.length() + 1 > string_pool_buf_size) {
+            pool_failed = true;
+            return nullptr;
+        }
         char* dst = string_pool_buf + offset;
         std::memcpy(dst, val.c_str(), val.length());
         dst[val.length()] = '\0';
@@ -303,11 +317,25 @@ vinox_status vinox_correlation_deserialize_envelope(
         return dst;
     };
 
-    correlation_out->request_id = copy_field("request_id");
-    if (VINOX_FIELD_PRESENT_MEMBER(correlation_out, session_id)) correlation_out->session_id = copy_field("session_id");
-    if (VINOX_FIELD_PRESENT_MEMBER(correlation_out, run_id)) correlation_out->run_id = copy_field("run_id");
-    if (VINOX_FIELD_PRESENT_MEMBER(correlation_out, task_id)) correlation_out->task_id = copy_field("task_id");
-    if (VINOX_FIELD_PRESENT_MEMBER(correlation_out, operation_id)) correlation_out->operation_id = copy_field("operation_id");
+    const char* req_id = copy_field("request_id");
+    const char* sess_id = VINOX_FIELD_PRESENT_MEMBER(correlation_out, session_id) ? copy_field("session_id") : nullptr;
+    const char* r_id = VINOX_FIELD_PRESENT_MEMBER(correlation_out, run_id) ? copy_field("run_id") : nullptr;
+    const char* t_id = VINOX_FIELD_PRESENT_MEMBER(correlation_out, task_id) ? copy_field("task_id") : nullptr;
+    const char* op_id = VINOX_FIELD_PRESENT_MEMBER(correlation_out, operation_id) ? copy_field("operation_id") : nullptr;
+
+    if (pool_failed) {
+        uint32_t original_size = correlation_out->struct_size;
+        std::memset(correlation_out, 0, sizeof(*correlation_out));
+        correlation_out->struct_size = original_size;
+        vinox_set_last_error("string_pool_buf exhausted during correlation envelope deserialization");
+        return VINOX_STATUS_INVALID_ARGUMENT;
+    }
+
+    correlation_out->request_id = req_id;
+    if (VINOX_FIELD_PRESENT_MEMBER(correlation_out, session_id)) correlation_out->session_id = sess_id;
+    if (VINOX_FIELD_PRESENT_MEMBER(correlation_out, run_id)) correlation_out->run_id = r_id;
+    if (VINOX_FIELD_PRESENT_MEMBER(correlation_out, task_id)) correlation_out->task_id = t_id;
+    if (VINOX_FIELD_PRESENT_MEMBER(correlation_out, operation_id)) correlation_out->operation_id = op_id;
 
     return VINOX_STATUS_OK;
 }

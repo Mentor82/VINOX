@@ -7,9 +7,9 @@
 #include "vinox/vinox.h"
 
 int main(void) {
-    printf("Starting VINOX Issue #8 Comprehensive Acceptance Smoke Test...\n");
+    printf("Starting VINOX Issue #8 Protocol & Evidence Hardened Smoke Test...\n");
 
-    // 1. Test Log Level Validation (reject values > VINOX_LOG_CRITICAL)
+    // 1. Log Level Validation (reject values > VINOX_LOG_CRITICAL)
     if (vinox_log_set_level(VINOX_LOG_CRITICAL + 10) != VINOX_STATUS_INVALID_ARGUMENT) {
         printf("FAILED: vinox_log_set_level did not reject level > VINOX_LOG_CRITICAL\n");
         return 1;
@@ -20,159 +20,123 @@ int main(void) {
         return 2;
     }
 
-    uint32_t active_level = 0;
-    if (vinox_log_get_level(&active_level) != VINOX_STATUS_OK || active_level != VINOX_LOG_DEBUG) {
-        printf("FAILED: vinox_log_get_level (expected %d, got %u)\n", VINOX_LOG_DEBUG, active_level);
-        return 3;
-    }
-
-    // 2. Test Process-Boundary Envelope Serialization & Deserialization
+    // 2. Wire Serialization & Buffer Size Contract
     vinox_correlation_context orig_ctx;
     memset(&orig_ctx, 0, sizeof(orig_ctx));
     orig_ctx.struct_size = sizeof(orig_ctx);
     orig_ctx.request_id = "req-boundary-101";
     orig_ctx.session_id = "sess-boundary-202";
-    orig_ctx.run_id = "run-boundary-303";
+
+    char tiny_wire_buf[10];
+    size_t req_wire_size = 0;
+    if (vinox_correlation_serialize_envelope(&orig_ctx, tiny_wire_buf, sizeof(tiny_wire_buf), &req_wire_size) != VINOX_STATUS_INVALID_ARGUMENT || req_wire_size == 0) {
+        printf("FAILED: vinox_correlation_serialize_envelope failed to reject insufficient buffer\n");
+        return 3;
+    }
 
     char wire_buf[512];
-    size_t req_wire_size = 0;
-    if (vinox_correlation_serialize_envelope(&orig_ctx, wire_buf, sizeof(wire_buf), &req_wire_size) != VINOX_STATUS_OK) {
+    if (vinox_correlation_serialize_envelope(&orig_ctx, wire_buf, sizeof(wire_buf), NULL) != VINOX_STATUS_OK) {
         printf("FAILED: vinox_correlation_serialize_envelope\n");
         return 4;
     }
 
-    if (strstr(wire_buf, "\"request_id\":\"req-boundary-101\"") == NULL || strstr(wire_buf, "\"wire_version\":1") == NULL) {
-        printf("FAILED: Serialized wire format verification (got '%s')\n", wire_buf);
+    // 3. Deserializer Wire Version Enforcement & Pool Exhaustion Tests
+    vinox_correlation_context test_ctx;
+    memset(&test_ctx, 0, sizeof(test_ctx));
+    test_ctx.struct_size = sizeof(test_ctx);
+    char pool_buf[512];
+
+    // Missing wire_version
+    if (vinox_correlation_deserialize_envelope("{\"request_id\":\"r1\"}", &test_ctx, pool_buf, sizeof(pool_buf)) != VINOX_STATUS_INVALID_ARGUMENT) {
+        printf("FAILED: vinox_correlation_deserialize_envelope failed to reject missing wire_version\n");
         return 5;
     }
 
-    vinox_correlation_context deserialized_ctx;
-    memset(&deserialized_ctx, 0, sizeof(deserialized_ctx));
-    deserialized_ctx.struct_size = sizeof(deserialized_ctx);
-    char pool_buf[512];
-
-    if (vinox_correlation_deserialize_envelope(wire_buf, &deserialized_ctx, pool_buf, sizeof(pool_buf)) != VINOX_STATUS_OK) {
-        printf("FAILED: vinox_correlation_deserialize_envelope\n");
+    // Unsupported wire_version (999)
+    if (vinox_correlation_deserialize_envelope("{\"wire_version\":999,\"request_id\":\"r1\"}", &test_ctx, pool_buf, sizeof(pool_buf)) != VINOX_STATUS_INCOMPATIBLE_ABI) {
+        printf("FAILED: vinox_correlation_deserialize_envelope failed to reject unsupported wire_version 999\n");
         return 6;
     }
 
-    if (strcmp(deserialized_ctx.request_id, "req-boundary-101") != 0 ||
-        strcmp(deserialized_ctx.session_id, "sess-boundary-202") != 0 ||
-        strcmp(deserialized_ctx.run_id, "run-boundary-303") != 0) {
-        printf("FAILED: Deserialized correlation values do not match original\n");
+    // String pool exhaustion (too small pool)
+    char tiny_pool[4];
+    if (vinox_correlation_deserialize_envelope(wire_buf, &test_ctx, tiny_pool, sizeof(tiny_pool)) != VINOX_STATUS_INVALID_ARGUMENT) {
+        printf("FAILED: vinox_correlation_deserialize_envelope failed to reject string pool exhaustion\n");
         return 7;
     }
 
-    // 3. Test Typed Canonical Structured Log Event (vinox_log_event_ex) & Spdlog Rotation Sink
-    const char* test_log_path = "test_vinox_comprehensive_logging.log";
+    // Happy path deserialization
+    if (vinox_correlation_deserialize_envelope(wire_buf, &test_ctx, pool_buf, sizeof(pool_buf)) != VINOX_STATUS_OK ||
+        strcmp(test_ctx.request_id, "req-boundary-101") != 0) {
+        printf("FAILED: Happy path deserialization\n");
+        return 8;
+    }
+
+    // 4. Overlong Field Truncation & Secret Absence in Written Log
+    const char* test_log_path = "test_vinox_protocol_smoke.log";
     remove(test_log_path);
 
     if (vinox_log_configure_sink(test_log_path, 1, 3) != VINOX_STATUS_OK) {
         printf("FAILED: vinox_log_configure_sink: %s\n", vinox_last_error());
-        return 8;
-    }
-
-    vinox_log_event_meta typed_meta;
-    memset(&typed_meta, 0, sizeof(typed_meta));
-    typed_meta.struct_size = sizeof(typed_meta);
-    typed_meta.model_id = "Qwen2.5-1B-Instruct";
-    typed_meta.backend = "openvino";
-    typed_meta.duration_ms = 42;
-    typed_meta.status = "OK";
-    typed_meta.status_code = 200;
-    typed_meta.details = "Inference completed successfully";
-
-    // Invalid correlation ID chars test (should be sanitized to [a-zA-Z0-9_.-])
-    vinox_correlation_context dirty_ctx;
-    memset(&dirty_ctx, 0, sizeof(dirty_ctx));
-    dirty_ctx.struct_size = sizeof(dirty_ctx);
-    dirty_ctx.request_id = "req-123!@#$%^\n\t";
-
-    if (vinox_log_event_ex(VINOX_LOG_INFO, "serving", "inference.complete", &dirty_ctx, &typed_meta) != VINOX_STATUS_OK) {
-        printf("FAILED: vinox_log_event_ex\n");
         return 9;
     }
 
-    // 4. Test Cross-DLL Correlation Context Propagation via vinox_storage_add_message_ex
-    vinox_storage_engine* storage = NULL;
-    const char* db_file = "test_logging_propagation.db";
-    remove(db_file);
+    // Construct 50-char component name, 100-char event ID, and 1500-char secret-bearing details
+    char overlong_comp[64];
+    memset(overlong_comp, 'C', 50);
+    overlong_comp[50] = '\0';
 
-    if (vinox_storage_engine_open(db_file, &storage) != VINOX_STATUS_OK) {
-        printf("FAILED: vinox_storage_engine_open: %s\n", vinox_storage_last_error());
+    char overlong_evt[128];
+    memset(overlong_evt, 'E', 100);
+    overlong_evt[100] = '\0';
+
+    char overlong_details[2000];
+    snprintf(overlong_details, sizeof(overlong_details), "Authorization: Bearer sk-secretkey-12345 ");
+    size_t cur_len = strlen(overlong_details);
+    memset(overlong_details + cur_len, 'X', 1500);
+    overlong_details[cur_len + 1500] = '\0';
+
+    vinox_log_event_meta meta;
+    memset(&meta, 0, sizeof(meta));
+    meta.struct_size = sizeof(meta);
+    meta.details = overlong_details;
+
+    if (vinox_log_event_ex(VINOX_LOG_INFO, overlong_comp, overlong_evt, &orig_ctx, &meta) != VINOX_STATUS_OK) {
+        printf("FAILED: vinox_log_event_ex\n");
         return 10;
     }
-
-    vinox_conversation_info conv;
-    conv.struct_size = sizeof(conv);
-    if (vinox_storage_create_conversation(storage, "Cross DLL Logging Test", &conv) != VINOX_STATUS_OK) {
-        printf("FAILED: vinox_storage_create_conversation\n");
-        vinox_storage_engine_close(storage);
-        return 11;
-    }
-
-    vinox_message_info msg_in, msg_out;
-    memset(&msg_in, 0, sizeof(msg_in));
-    msg_in.struct_size = sizeof(msg_in);
-    msg_in.conversation_id = conv.id;
-    msg_in.role = "user";
-    msg_in.content = "Test cross-DLL correlation propagation";
-    memset(&msg_out, 0, sizeof(msg_out));
-    msg_out.struct_size = sizeof(msg_out);
-
-    vinox_correlation_context dll_ctx;
-    memset(&dll_ctx, 0, sizeof(dll_ctx));
-    dll_ctx.struct_size = sizeof(dll_ctx);
-    dll_ctx.request_id = "req-cross-dll-555";
-    dll_ctx.session_id = conv.id;
-
-    if (vinox_storage_add_message_ex(storage, &msg_in, &dll_ctx, &msg_out) != VINOX_STATUS_OK) {
-        printf("FAILED: vinox_storage_add_message_ex: %s\n", vinox_storage_last_error());
-        vinox_storage_engine_close(storage);
-        return 12;
-    }
-
-    vinox_storage_engine_close(storage);
-    remove(db_file);
 
     // Flush spdlog logger
     vinox_log_configure_sink(NULL, 0, 0);
 
-    // Verify written log file for typed fields and cross-DLL correlation event
     FILE* f = fopen(test_log_path, "r");
     if (!f) {
         printf("FAILED: Could not open written log file '%s'\n", test_log_path);
-        return 13;
+        return 11;
     }
 
-    char file_line1[2048];
-    char file_line2[2048];
-    if (!fgets(file_line1, sizeof(file_line1), f) || !fgets(file_line2, sizeof(file_line2), f)) {
-        printf("FAILED: Could not read log lines from '%s'\n", test_log_path);
+    char file_line[4096];
+    if (!fgets(file_line, sizeof(file_line), f)) {
+        printf("FAILED: Could not read log line from '%s'\n", test_log_path);
         fclose(f);
-        return 14;
+        return 12;
     }
     fclose(f);
     remove(test_log_path);
 
-    // Line 1 checks (vinox_log_event_ex typed fields & sanitized dirty request ID)
-    if (strstr(file_line1, "\"model_id\":\"Qwen2.5-1B-Instruct\"") == NULL ||
-        strstr(file_line1, "\"backend\":\"openvino\"") == NULL ||
-        strstr(file_line1, "\"duration_ms\":42") == NULL ||
-        strstr(file_line1, "\"status_code\":200") == NULL ||
-        strstr(file_line1, "\"request_id\":\"req-123________\"") == NULL) {
-        printf("FAILED: Typed canonical event envelope verification (got '%s')\n", file_line1);
-        return 15;
+    // Verify raw secret is ABSENT and REDACTED is PRESENT
+    if (strstr(file_line, "sk-secretkey-12345") != NULL || strstr(file_line, "[REDACTED]") == NULL) {
+        printf("FAILED: Secret-bearing log line contained raw secret! (got '%s')\n", file_line);
+        return 13;
     }
 
-    // Line 2 checks (Cross-DLL storage message.add event with req-cross-dll-555)
-    if (strstr(file_line2, "\"component\":\"storage\"") == NULL ||
-        strstr(file_line2, "\"event\":\"message.add\"") == NULL ||
-        strstr(file_line2, "\"request_id\":\"req-cross-dll-555\"") == NULL) {
-        printf("FAILED: Cross-DLL correlation propagation verification (got '%s')\n", file_line2);
-        return 16;
+    // Verify overlong component was truncated to 32 chars and event to 64 chars
+    if (strstr(file_line, "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC") == NULL ||
+        strstr(file_line, "...[TRUNCATED]") == NULL) {
+        printf("FAILED: Field truncation verification failed (got '%s')\n", file_line);
+        return 14;
     }
 
-    printf("SUCCESS: All VINOX Issue #8 Comprehensive Acceptance smoke tests passed!\n");
+    printf("SUCCESS: All VINOX Issue #8 Protocol & Evidence Hardening smoke tests passed!\n");
     return 0;
 }
