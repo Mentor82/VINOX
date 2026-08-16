@@ -376,7 +376,7 @@ int run_live_audit() {
 
     std::cout << "[AUDIT 09] VINOX Tool Registry, Policy Engine & OpenAI Tool Format .. [ PASS ]\n";
     std::cout << "  - Thread-Safe Tool Registration & Discovery: Verified\n";
-    std::cout << "  - Strict JSON Schema Argument Validation (Type Matching, Required & additionalProperties): Verified\n";
+    std::cout << "  - Bounded JSON Schema Argument Validation (type, required, enum, additionalProperties): Verified\n";
     std::cout << "  - Tiered Policy Engine Evaluation (Default-Deny Fail-Closed & Configured Auto-Allow): Verified\n";
     std::cout << "  - OpenAI Tool Schema Formatting & Live Bidirectional Call Parsing: Verified\n";
 

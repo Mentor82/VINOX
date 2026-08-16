@@ -578,9 +578,12 @@ Sicherheitsklasse uebersetzt. Der Ablauf ist immer:
 6. Das Modell erhaelt das begrenzte Ergebnis fuer den naechsten Dialogschritt.
 
 Die Anzahl automatischer Tool-Runden ist begrenzt. Unbekannte Tools, zusaetzliche
-Argumente und ungueltige JSON-Antworten werden nicht ausgefuehrt. Das
-Qwen2.5-Instruct-Modell wird im Spike auf Toolauswahl und Argumenttreue getestet;
-strukturierte Generierung gegen JSON Schema dient als kontrollierter Fallback.
+Argumente und ungueltige JSON-Antworten werden nicht ausgefuehrt. VINOX verwendet eine
+explizit begrenzte JSON-Schema-Subset-Validierung (`Bounded JSON Schema Subset`: `type`, `required`,
+`enum`, `additionalProperties: false`). Nicht unterstuetzte sicherheitsrelevante Schema-Features
+duerfen nicht stillschweigend als validiert gelten. Das Qwen2.5-Instruct-Modell wird im Spike auf
+Toolauswahl und Argumenttreue getestet; strukturierte Generierung gegen JSON Schema dient als
+kontrollierter Fallback.
 
 ### OpenAI-kompatibles Tool Calling
 
