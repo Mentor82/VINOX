@@ -39,6 +39,7 @@ find_package(spdlog CONFIG REQUIRED)
 add_library(vinox_core SHARED
     src/core/version.cpp
     src/core/logging.cpp
+    src/core/tools.cpp
 )
 add_library(vinox::core ALIAS vinox_core)
 set_target_properties(vinox_core PROPERTIES EXPORT_NAME core)
@@ -229,6 +230,10 @@ if(BUILD_TESTING)
     add_executable(vinox_storage_smoke tests/storage_smoke.c)
     target_link_libraries(vinox_storage_smoke PRIVATE vinox::storage unofficial::sqlite3::sqlite3)
     add_test(NAME storage_smoke COMMAND vinox_storage_smoke)
+
+    add_executable(vinox_tools_smoke tests/tools_smoke.c)
+    target_link_libraries(vinox_tools_smoke PRIVATE vinox::core)
+    add_test(NAME tools_smoke COMMAND vinox_tools_smoke)
 
     add_test(NAME audit_smoke COMMAND vinox_cli --audit)
     if(WIN32 AND VINOX_OPENVINO_SDK_ROOT)
