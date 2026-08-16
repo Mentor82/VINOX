@@ -1044,18 +1044,17 @@ streamen, ohne interne Implementierungsdetails zu kennen.
 
 **Ergebnis:** Phase 6 (Tools, Policy Engine, MCP Client, MCP Server, Governance Control Loop, JSON Schema Validierung & Gehärteter Qwen2.5 Evaluation Harness) ist vollständig umgesetzt und mit 13 CTest-Targets verifiziert.
 
-### Phase 7: Agent und Sandbox
+### Phase 7: Agent und Sandbox — 🟢 abgeschlossen
 
-- Mode Controller und unveraenderliche Policies implementieren
-- Plan-Schema, Zustandsmaschine, Hash und Freigabeprozess implementieren
-- Agent-Loop mit Budgets, Checkpoints, Pause, Resume und Abbruch implementieren
-- versioniertes Host-Worker-RPC und isolierten Workspace implementieren
-- Windows-Sandbox-Backends gegen Datei-, Netzwerk- und Credential-Flucht testen
-- Diff-, Artefakt-, Validierungs- und konfliktfeste Uebernahme implementieren
-- MCP-Aufrufe im Agent-Modus ueber den Policy-Proxy erzwingen
+- [x] Mode Controller und unveraenderliche Policies implementieren
+- [x] Plan-Schema, Zustandsmaschine, Hash und Freigabeprozess implementieren
+- [x] Agent-Loop mit Budgets, Checkpoints, Pause, Resume und Abbruch implementieren
+- [x] versioniertes Host-Worker-RPC und isolierten Workspace implementieren
+- [x] Windows-Sandbox-Backends gegen Datei-, Netzwerk- und Credential-Flucht testen
+- [x] Diff-, Artefakt-, Validierungs- und konfliktfeste Uebernahme implementieren
+- [x] MCP-Aufrufe im Agent-Modus ueber den Policy-Proxy erzwingen
 
-**Ergebnis:** Ein freigegebener Plan laeuft begrenzt in einer nachweislich
-isolierten Umgebung und kann nur gepruefte Artefakte zur Uebernahme vorschlagen.
+**Ergebnis:** Ein freigegebener Plan laeuft begrenzt in einer nachweislich isolierten Umgebung (`vinox_sandbox_worker.exe` mit Job-Object Binding) und kann nur gepruefte Artefakte zur atomaren Uebernahme vorschlagen. (Verifiziert mit `agent_smoke` & `sandbox_smoke`).
 
 ### Phase 8: CLI
 
