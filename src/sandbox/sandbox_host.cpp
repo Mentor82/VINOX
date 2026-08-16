@@ -3,6 +3,8 @@
 #include <filesystem>
 #include <sstream>
 #include <cstring>
+#include <chrono>
+#include <thread>
 #include <nlohmann/json.hpp>
 
 #if defined(_WIN32)
@@ -94,17 +96,35 @@ VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_start(vinox_sandbox_host* h
     host->hProcess = pi.hProcess;
     host->hThread = pi.hThread;
 
-    // Attach to Job Object for fail-closed process tree resource limits
+    // Nephy Finding 6: Attach to Job Object - MUST fail closed if Job Object setup fails!
     host->hJob = CreateJobObjectA(NULL, NULL);
-    if (host->hJob) {
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli = {0};
-        jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        SetInformationJobObject(host->hJob, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli));
-        AssignProcessToJobObject(host->hJob, host->hProcess);
+    if (!host->hJob) {
+        TerminateProcess(host->hProcess, 1);
+        CloseHandle(host->hProcess);
+        CloseHandle(host->hThread);
+        CloseHandle(host->hChildStdoutRead);
+        CloseHandle(host->hChildStdinWrite);
+        host->hProcess = NULL;
+        return VINOX_STATUS_RUNTIME_ERROR;
     }
+
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli = {0};
+    jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(host->hJob, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli)) ||
+        !AssignProcessToJobObject(host->hJob, host->hProcess)) {
+        CloseHandle(host->hJob);
+        TerminateProcess(host->hProcess, 1);
+        CloseHandle(host->hProcess);
+        CloseHandle(host->hThread);
+        CloseHandle(host->hChildStdoutRead);
+        CloseHandle(host->hChildStdinWrite);
+        host->hProcess = NULL;
+        host->hJob = NULL;
+        return VINOX_STATUS_RUNTIME_ERROR;
+    }
+
     return VINOX_STATUS_OK;
 #else
-    // Non-Windows platforms explicitly return NOT_SUPPORTED
     return VINOX_STATUS_NOT_SUPPORTED;
 #endif
 }
@@ -128,6 +148,7 @@ VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_exec_tool(vinox_sandbox_hos
             req["params"]["arguments"] = nlohmann::json::parse(args_json);
         } catch (...) {
             std::string err_msg = "{\"status\":\"ERROR\",\"error\":\"Malformed arguments JSON\"}";
+            if (err_msg.length() >= out_buf_sz) return VINOX_STATUS_OUT_OF_RANGE;
             strncpy_s(out_buf, out_buf_sz, err_msg.c_str(), _TRUNCATE);
             return VINOX_STATUS_INVALID_ARGUMENT;
         }
@@ -140,6 +161,7 @@ VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_exec_tool(vinox_sandbox_hos
     // Bounded request size check (max 256 KB)
     if (req_str.length() > 262144) {
         std::string err_msg = "{\"status\":\"ERROR\",\"error\":\"Oversized request payload (>256 KB)\"}";
+        if (err_msg.length() >= out_buf_sz) return VINOX_STATUS_OUT_OF_RANGE;
         strncpy_s(out_buf, out_buf_sz, err_msg.c_str(), _TRUNCATE);
         return VINOX_STATUS_OUT_OF_RANGE;
     }
@@ -149,21 +171,49 @@ VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_exec_tool(vinox_sandbox_hos
         return VINOX_STATUS_RUNTIME_ERROR;
     }
 
+    // Nephy Finding 5: Host-owned pipe read deadline using PeekNamedPipe
     std::string res_line;
-    char ch = 0;
-    DWORD read_bytes = 0;
-    while (ReadFile(host->hChildStdoutRead, &ch, 1, &read_bytes, NULL) && read_bytes > 0) {
-        if (ch == '\n') break;
-        if (ch != '\r') res_line.push_back(ch);
-        if (res_line.length() > 262144) { // Bounded response size check
-            std::string err_msg = "{\"status\":\"ERROR\",\"error\":\"Oversized response payload (>256 KB)\"}";
-            strncpy_s(out_buf, out_buf_sz, err_msg.c_str(), _TRUNCATE);
-            return VINOX_STATUS_OUT_OF_RANGE;
+    auto start_wait = std::chrono::steady_clock::now();
+    bool got_newline = false;
+
+    while (!got_newline) {
+        DWORD avail = 0;
+        if (!PeekNamedPipe(host->hChildStdoutRead, NULL, 0, NULL, &avail, NULL)) {
+            return VINOX_STATUS_RUNTIME_ERROR;
+        }
+
+        if (avail > 0) {
+            char ch = 0;
+            DWORD read_bytes = 0;
+            if (ReadFile(host->hChildStdoutRead, &ch, 1, &read_bytes, NULL) && read_bytes > 0) {
+                if (ch == '\n') {
+                    got_newline = true;
+                    break;
+                }
+                if (ch != '\r') res_line.push_back(ch);
+                if (res_line.length() > 262144) {
+                    std::string err_msg = "{\"status\":\"ERROR\",\"error\":\"Oversized response payload (>256 KB)\"}";
+                    if (err_msg.length() >= out_buf_sz) return VINOX_STATUS_OUT_OF_RANGE;
+                    strncpy_s(out_buf, out_buf_sz, err_msg.c_str(), _TRUNCATE);
+                    return VINOX_STATUS_OUT_OF_RANGE;
+                }
+            }
+        } else {
+            // Deadline check (5000ms limit)
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_wait).count();
+            if (elapsed > 5000) {
+                std::string err_msg = "{\"status\":\"ERROR\",\"error\":\"Host pipe read execution deadline timeout (5000 ms)\"}";
+                if (err_msg.length() >= out_buf_sz) return VINOX_STATUS_OUT_OF_RANGE;
+                strncpy_s(out_buf, out_buf_sz, err_msg.c_str(), _TRUNCATE);
+                return VINOX_STATUS_RUNTIME_ERROR;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     }
 
     if (res_line.empty()) {
         std::string err_msg = "{\"status\":\"ERROR\",\"error\":\"Worker process EOF or process death\"}";
+        if (err_msg.length() >= out_buf_sz) return VINOX_STATUS_OUT_OF_RANGE;
         strncpy_s(out_buf, out_buf_sz, err_msg.c_str(), _TRUNCATE);
         return VINOX_STATUS_RUNTIME_ERROR;
     }
@@ -171,41 +221,55 @@ VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_exec_tool(vinox_sandbox_hos
     try {
         auto res_j = nlohmann::json::parse(res_line);
 
-        // Nephy Finding E.1: Validate JSON-RPC 2.0 id correlation
-        if (res_j.contains("id") && res_j["id"].is_number_integer()) {
-            if (res_j["id"].get<int>() != current_req_id) {
-                std::string err_msg = "{\"status\":\"ERROR\",\"error\":\"JSON-RPC request/response ID mismatch\"}";
-                strncpy_s(out_buf, out_buf_sz, err_msg.c_str(), _TRUNCATE);
-                return VINOX_STATUS_RUNTIME_ERROR;
-            }
+        // Nephy Finding 5: Validate jsonrpc == "2.0"
+        if (!res_j.contains("jsonrpc") || res_j["jsonrpc"].get<std::string>() != "2.0") {
+            std::string err_msg = "{\"status\":\"ERROR\",\"error\":\"Invalid JSON-RPC version envelope\"}";
+            if (err_msg.length() >= out_buf_sz) return VINOX_STATUS_OUT_OF_RANGE;
+            strncpy_s(out_buf, out_buf_sz, err_msg.c_str(), _TRUNCATE);
+            return VINOX_STATUS_RUNTIME_ERROR;
+        }
+
+        // Nephy Finding 5: Validate matching response id (missing id is rejected)
+        if (!res_j.contains("id") || !res_j["id"].is_number_integer() || res_j["id"].get<int>() != current_req_id) {
+            std::string err_msg = "{\"status\":\"ERROR\",\"error\":\"JSON-RPC request/response ID mismatch or missing ID\"}";
+            if (err_msg.length() >= out_buf_sz) return VINOX_STATUS_OUT_OF_RANGE;
+            strncpy_s(out_buf, out_buf_sz, err_msg.c_str(), _TRUNCATE);
+            return VINOX_STATUS_RUNTIME_ERROR;
         }
 
         // Nephy Finding D.1: Handle worker error response
         if (res_j.contains("error")) {
             std::string err_out = res_j["error"].dump();
             std::string err_msg = "{\"status\":\"ERROR\",\"error\":" + err_out + "}";
+            if (err_msg.length() >= out_buf_sz) return VINOX_STATUS_OUT_OF_RANGE;
             strncpy_s(out_buf, out_buf_sz, err_msg.c_str(), _TRUNCATE);
             return VINOX_STATUS_RUNTIME_ERROR;
         }
 
         if (res_j.contains("result")) {
             std::string result_str = res_j["result"].dump();
+            if (result_str.length() >= out_buf_sz) {
+                return VINOX_STATUS_OUT_OF_RANGE; // Return error instead of silent truncation!
+            }
             strncpy_s(out_buf, out_buf_sz, result_str.c_str(), _TRUNCATE);
             return VINOX_STATUS_OK;
         }
     } catch (...) {
         std::string err_msg = "{\"status\":\"ERROR\",\"error\":\"Invalid JSON-RPC response envelope\"}";
+        if (err_msg.length() >= out_buf_sz) return VINOX_STATUS_OUT_OF_RANGE;
         strncpy_s(out_buf, out_buf_sz, err_msg.c_str(), _TRUNCATE);
         return VINOX_STATUS_RUNTIME_ERROR;
     }
 
+    if (res_line.length() >= out_buf_sz) return VINOX_STATUS_OUT_OF_RANGE;
     strncpy_s(out_buf, out_buf_sz, res_line.c_str(), _TRUNCATE);
     return VINOX_STATUS_OK;
 #else
     std::string err_msg = "{\"status\":\"ERROR\",\"error\":\"Sandbox host worker not supported on non-Windows platforms\"}";
+    if (err_msg.length() >= out_buf_sz) return VINOX_STATUS_OUT_OF_RANGE;
     strncpy(out_buf, err_msg.c_str(), out_buf_sz - 1);
     out_buf[out_buf_sz - 1] = '\0';
-    return VINOX_STATUS_NOT_SUPPORTED;
+    return VINOX_STATUS_NOT_FOUND;
 #endif
 }
 

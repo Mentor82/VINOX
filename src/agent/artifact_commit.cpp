@@ -86,13 +86,14 @@ VINOX_API vinox_status VINOX_CALL vinox_artifact_commit_apply(const char* overla
 
     if (!fs::exists(overlay_path)) return VINOX_STATUS_OK;
 
-    // Nephy Finding F.3 & F.4: Transactional Staged Workspace Takeover Commit
+    // Nephy Finding 8: Truly Atomic Staged Workspace Takeover Commit (Backup & Rollback Protection)
     fs::path staging_tmp = target_path.string() + "_staging_tmp";
+    fs::path backup_tmp = target_path.string() + "_backup_tmp";
 
     try {
-        if (fs::exists(staging_tmp)) {
-            fs::remove_all(staging_tmp);
-        }
+        if (fs::exists(staging_tmp)) fs::remove_all(staging_tmp);
+        if (fs::exists(backup_tmp)) fs::remove_all(backup_tmp);
+
         fs::create_directories(staging_tmp);
 
         // 1. Copy existing target directory into staging directory
@@ -129,15 +130,34 @@ VINOX_API vinox_status VINOX_CALL vinox_artifact_commit_apply(const char* overla
             }
         }
 
-        // 3. Perform atomic commit / swap into target directory
+        // 3. Perform atomic backup & swap
         if (fs::exists(target_path)) {
-            fs::remove_all(target_path);
+            fs::rename(target_path, backup_tmp);
         }
-        fs::rename(staging_tmp, target_path);
+
+        try {
+            fs::rename(staging_tmp, target_path);
+        } catch (...) {
+            // Restore target from backup if staging rename fails!
+            if (fs::exists(backup_tmp)) {
+                fs::rename(backup_tmp, target_path);
+            }
+            if (fs::exists(staging_tmp)) {
+                fs::remove_all(staging_tmp);
+            }
+            return VINOX_STATUS_RUNTIME_ERROR;
+        }
+
+        // Clean up backup after successful swap
+        if (fs::exists(backup_tmp)) {
+            fs::remove_all(backup_tmp);
+        }
 
         return VINOX_STATUS_OK;
     } catch (...) {
-        // Rollback staging folder on any error to ensure target directory remains 100% untouched!
+        if (fs::exists(backup_tmp) && !fs::exists(target_path)) {
+            try { fs::rename(backup_tmp, target_path); } catch (...) {}
+        }
         if (fs::exists(staging_tmp)) {
             try { fs::remove_all(staging_tmp); } catch (...) {}
         }

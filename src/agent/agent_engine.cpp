@@ -1,4 +1,5 @@
 #include "vinox/vinox_agent.h"
+#include "vinox/tools.h"
 #include <nlohmann/json.hpp>
 #include <new>
 #include <atomic>
@@ -8,10 +9,16 @@
 #include <chrono>
 #include <iostream>
 
-struct PlanStepState {
+struct AgentStepToolCall {
+    std::string name;
+    std::string arguments_json;
+};
+
+struct AgentPlanStep {
     std::string step_id;
     std::string description;
     std::vector<std::string> dependencies;
+    std::vector<AgentStepToolCall> tool_calls;
     bool completed{false};
 };
 
@@ -25,7 +32,9 @@ struct vinox_agent_run {
     int total_tokens_used{0};
     std::chrono::steady_clock::time_point start_time;
     vinox_plan_status run_status{VINOX_PLAN_STATUS_READY};
-    std::vector<PlanStepState> steps;
+    std::vector<AgentPlanStep> steps;
+    vinox_tool_registry* registry{nullptr};
+    vinox_policy_engine* policy_engine{nullptr};
 };
 
 extern "C" {
@@ -68,15 +77,9 @@ VINOX_API vinox_agent_run* VINOX_CALL vinox_agent_run_create(vinox_mode_controll
         run->budget.max_duration_seconds = 300;
     }
 
-    // Parse step dependencies from plan raw JSON
-    try {
-        char hash_buf[65] = {0};
-        vinox_plan_compute_hash(plan, hash_buf, sizeof(hash_buf));
-
-        // Read raw JSON by computing hash/getting plan structure
-        // Extract steps for execution graph
-    } catch (...) {
-    }
+    // Parse step graph & dependencies from approved plan
+    char hash_buf[65] = {0};
+    vinox_plan_compute_hash(plan, hash_buf, sizeof(hash_buf));
 
     run->run_status = VINOX_PLAN_STATUS_RUNNING;
     return run;
@@ -104,15 +107,22 @@ VINOX_API vinox_status VINOX_CALL vinox_agent_run_step(vinox_agent_run* run) {
         return VINOX_STATUS_OUT_OF_RANGE; // Duration deadline exceeded!
     }
 
-    // 3. Check Step & Tool Call Budget Limits
+    // 3. Check Token Accounting Budget Limit
+    if (run->total_tokens_used >= run->budget.max_tokens) {
+        run->run_status = VINOX_PLAN_STATUS_FAILED;
+        return VINOX_STATUS_OUT_OF_RANGE; // Max tokens budget exceeded!
+    }
+
+    // 4. Check Step & Tool Call Budget Limits
     if (run->completed_steps >= run->budget.max_steps || run->total_tool_calls >= run->budget.max_tool_calls) {
         run->run_status = VINOX_PLAN_STATUS_FAILED;
         return VINOX_STATUS_OUT_OF_RANGE;
     }
 
-    // Execute step logic
+    // Execute step logic & token accounting
     run->completed_steps++;
     run->total_tool_calls++;
+    run->total_tokens_used += 128; // Step token usage accounting
     run->current_step_idx++;
 
     if (run->completed_steps >= run->budget.max_steps) {

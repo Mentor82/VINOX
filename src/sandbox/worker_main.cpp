@@ -23,7 +23,6 @@ static bool verify_path_containment(const fs::path& overlay_root, const fs::path
         std::string root_str = canonical_root.string();
         std::string target_str = target_path.string();
 
-        // Convert backslashes on Windows for consistent string prefix containment check
         std::replace(root_str.begin(), root_str.end(), '\\', '/');
         std::replace(target_str.begin(), target_str.end(), '\\', '/');
 
@@ -85,7 +84,7 @@ int main(int argc, char* argv[]) {
                 std::string tool_name = req["params"].value("name", "");
                 auto args = req["params"].value("arguments", nlohmann::json::object());
 
-                // Nephy Finding D.1: Unknown tools must fail closed with typed error
+                // Nephy Finding 7: Unknown tools must fail closed with typed error (zero synthetic text fallback!)
                 if (ALLOWED_SANDBOX_TOOLS.find(tool_name) == ALLOWED_SANDBOX_TOOLS.end()) {
                     res["error"]["code"] = -32601;
                     res["error"]["message"] = "Unknown sandbox tool: " + tool_name;
@@ -98,7 +97,6 @@ int main(int argc, char* argv[]) {
                         std::string content = args.value("content", "");
 
                         fs::path canonical_file;
-                        // Nephy Finding D.3 & D.4: Strict path containment verification
                         if (!verify_path_containment(fs::path(overlay_dir), fs::path(filename), canonical_file)) {
                             res["error"]["code"] = -32002;
                             res["error"]["message"] = "Path containment violation: attempt to escape sandbox overlay root";
@@ -113,9 +111,30 @@ int main(int argc, char* argv[]) {
                             res["result"]["target_path"] = canonical_file.string();
                         }
                     }
+                } else if (tool_name == "fs_read" || tool_name == "local_read.read") { // Real file read execution!
+                    if (!args.is_object() || !args.contains("filename") || !args["filename"].is_string()) {
+                        res["error"]["code"] = -32602;
+                        res["error"]["message"] = "Invalid or missing 'filename' argument";
+                    } else {
+                        std::string filename = args["filename"].get<std::string>();
+                        fs::path canonical_file;
+                        if (!verify_path_containment(fs::path(overlay_dir), fs::path(filename), canonical_file)) {
+                            res["error"]["code"] = -32002;
+                            res["error"]["message"] = "Path containment violation: attempt to escape sandbox overlay root";
+                        } else if (!fs::exists(canonical_file)) {
+                            res["error"]["code"] = -32001;
+                            res["error"]["message"] = "File not found in sandbox overlay";
+                        } else {
+                            std::ifstream in(canonical_file, std::ios::binary);
+                            std::string file_content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                            res["result"]["status"] = "OK";
+                            res["result"]["content"] = file_content;
+                            res["result"]["bytes_read"] = file_content.length();
+                        }
+                    }
                 } else {
-                    res["result"]["status"] = "OK";
-                    res["result"]["output"] = "Tool executed successfully in sandbox worker";
+                    res["error"]["code"] = -32601;
+                    res["error"]["message"] = "Unsupported sandbox tool: " + tool_name;
                 }
             } else if (method == "sandbox/shutdown") {
                 res["result"]["status"] = "shutdown_ack";

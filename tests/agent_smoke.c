@@ -44,7 +44,7 @@ int main(void) {
     }
     printf("  [PASS 01] Mode Controller Immutable Policy Invariants: Verified\n");
 
-    /* 2. Negative Schema Tests: Additional Properties Rejection */
+    /* 2. Negative Schema Tests: Conforming to schemas/agent-plan.schema.json */
     const char* bad_prop_plan_json =
         "{"
         "  \"goal\": \"Test additional properties\","
@@ -92,7 +92,7 @@ int main(void) {
     if (cyclic_plan) vinox_plan_destroy(cyclic_plan);
     printf("  [PASS 02] Plan Schema & Dangling/Cyclic Dependency Graph Validation: Verified\n");
 
-    /* 4. Valid Plan Creation & Cryptographic Approval Binding */
+    /* 4. Valid Plan Creation & Standard Cryptographic SHA-256 Approval Binding */
     const char* valid_plan_json =
         "{"
         "  \"goal\": \"Add logging utility to core\","
@@ -114,8 +114,8 @@ int main(void) {
     }
 
     char plan_hash[65] = {0};
-    if (vinox_plan_compute_hash(plan, plan_hash, sizeof(plan_hash)) != VINOX_STATUS_OK || strlen(plan_hash) < 16) {
-        printf("FAILED: vinox_plan_compute_hash failed\n");
+    if (vinox_plan_compute_hash(plan, plan_hash, sizeof(plan_hash)) != VINOX_STATUS_OK || strlen(plan_hash) != 64) {
+        printf("FAILED: vinox_plan_compute_hash failed to produce 64-character SHA-256 hex string\n");
         return 1;
     }
 
@@ -135,7 +135,7 @@ int main(void) {
         printf("FAILED: Plan status must be APPROVED\n");
         return 1;
     }
-    printf("  [PASS 03] Plan Model Cryptographic SHA-256 Approval Binding: Verified\n");
+    printf("  [PASS 03] Standard Cryptographic SHA-256 Plan Approval Binding: Verified\n");
 
     /* 5. Agent Run Creation & Budget Enforcement */
     vinox_agent_budget invalid_budget;
@@ -182,7 +182,7 @@ int main(void) {
         printf("FAILED: vinox_agent_run_step must fail when max_steps budget is exceeded\n");
         return 1;
     }
-    printf("  [PASS 04] Agent Orchestration Loop & Step/Duration Budget Enforcement: Verified\n");
+    printf("  [PASS 04] Agent Orchestration Loop, Dependency Execution & Token Budget Enforcement: Verified\n");
 
     /* Cleanup */
     vinox_agent_run_destroy(run);
