@@ -1060,7 +1060,7 @@ streamen, ohne interne Implementierungsdetails zu kennen.
 
 **Ergebnis:** Ein freigegebener Plan laeuft begrenzt in einer nachweislich isolierten Umgebung (`vinox_sandbox_worker.exe` mit Job-Object Binding) und kann nur gepruefte Artefakte zur atomaren Uebernahme vorschlagen. (Verifiziert mit `agent_smoke` & `sandbox_smoke`).
 
-### Phase 8: CLI — 🟢 abgeschlossen & gehärtet
+### Phase 8: CLI — 🟡 CLI shell + Core E2E umgesetzt (CLI-Härtung & LiNeP-Readiness in Arbeit für Issue #18)
 
 **Ziel:** Die CLI ist die erste vollstaendige Referenzoberflaeche fuer die bereits
 implementierten Core-, Storage-, Tool-, MCP- und Agent-Vertraege. Sie enthaelt
@@ -1082,6 +1082,7 @@ keine eigene Runtime- oder Governance-Logik.
     ist nicht nur die formatierte Human-Ausgabe
 - lokale und entfernte Capability-Unterschiede werden explizit gemeldet; es gibt
     keinen stillen Fallback zwischen beiden Modi
+- **LiNeP/LiNeP-SL Readiness**: Transport-Vertraege bleiben protokoll-neutral; `request_id`, `session_id`, `correlation_id`, `run_id`, Cancellation, Capability-Metadaten, Bounded Payloads (256 KB) und typisierte Terminal-Zustaende (`COMPLETED`, `FAILED`, `BLOCKED`, `PERMISSION_DENIED`, `CANCELLED`, `TIMED_OUT`, `INDETERMINATE`) bleiben ohne Entkopplung/Kopplung an HTTP/SSE/MCP repraesentierbar (Spezifikation: `docs/architecture/linep-readiness.md`)
 
 **Umfang:**
 
@@ -1116,6 +1117,7 @@ keine eigene Runtime- oder Governance-Logik.
   `Prompt -> Plan -> Approval -> Agent -> Sandbox write -> Diff -> Apply`
 - der E2E-Test prueft das erzeugte Artefakt und die Snapshot-Bindung tatsaechlich;
     PASS darf keinen lediglich vorhandenen Codepfad bescheinigen
+- `docs/architecture/linep-readiness.md` definiert die protokoll-neutrale LiNeP-Transport-Spezifikation
 
 **Ergebnis:** Vollstaendig nutzbare Terminal-Referenz fuer Entwicklung, Tests und
 die erste Ende-zu-Ende-Verifikation der gesamten VINOX-Ausfuehrungskette.
