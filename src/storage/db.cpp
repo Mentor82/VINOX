@@ -865,9 +865,25 @@ VINOX_API vinox_status vinox_storage_document_ingest(
     char* doc_id_out,
     size_t doc_id_out_size
 ) {
+    return vinox_storage_document_ingest_ex(engine, title, content, nullptr, doc_id_out, doc_id_out_size);
+}
+
+VINOX_API vinox_status vinox_storage_document_ingest_ex(
+    vinox_storage_engine* engine,
+    const char* title,
+    const char* content,
+    const void* cancel_token_ptr,
+    char* doc_id_out,
+    size_t doc_id_out_size
+) {
     if (!engine || !title || !content || !doc_id_out || doc_id_out_size < 33) {
         return fail_arg("Invalid argument for vinox_storage_document_ingest");
     }
+    const std::atomic<bool>* cancel_token = static_cast<const std::atomic<bool>*>(cancel_token_ptr);
+    if (cancel_token && cancel_token->load()) {
+        return fail_runtime("Operation cancelled before execution");
+    }
+
     std::lock_guard<std::recursive_mutex> lock(engine->mutex);
 
     std::string doc_id = generate_uuid();
@@ -912,6 +928,11 @@ VINOX_API vinox_status vinox_storage_document_ingest(
 
     const char* sql_chunk = "INSERT INTO chunks (id, document_id, chunk_index, content, token_count, created_at_ms) VALUES (?, ?, ?, ?, ?, ?);";
     for (size_t idx = 0; idx < chunks_list.size(); ++idx) {
+        if (cancel_token && cancel_token->load()) {
+            sqlite3_exec(engine->db, "ROLLBACK;", nullptr, nullptr, nullptr);
+            return fail_runtime("Operation aborted by in-flight cancellation token");
+        }
+
         std::string chunk_id = generate_uuid();
         sqlite3_stmt* c_stmt = nullptr;
         if (sqlite3_prepare_v2(engine->db, sql_chunk, -1, &c_stmt, nullptr) != SQLITE_OK) {
@@ -931,6 +952,26 @@ VINOX_API vinox_status vinox_storage_document_ingest(
             return fail_runtime("Failed to insert chunk");
         }
         sqlite3_finalize(c_stmt);
+    }
+
+    // In-flight delay simulation right before COMMIT to test in-flight cancellation/timeout
+    const char* env_inflight = std::getenv("VINOX_TEST_INFLIGHT_DELAY_MS");
+    if (env_inflight && strlen(env_inflight) > 0) {
+        int delay_ms = std::atoi(env_inflight);
+        int elapsed = 0;
+        while (elapsed < delay_ms) {
+            if (cancel_token && cancel_token->load()) {
+                sqlite3_exec(engine->db, "ROLLBACK;", nullptr, nullptr, nullptr);
+                return fail_runtime("Operation aborted by in-flight cancellation token");
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            elapsed += 50;
+        }
+    }
+
+    if (cancel_token && cancel_token->load()) {
+        sqlite3_exec(engine->db, "ROLLBACK;", nullptr, nullptr, nullptr);
+        return fail_runtime("Operation aborted by in-flight cancellation token");
     }
 
     if (sqlite3_exec(engine->db, "COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK) {
@@ -956,11 +997,28 @@ VINOX_API vinox_status vinox_storage_relation_create(
     const char* evidence_text,
     float confidence
 ) {
+    return vinox_storage_relation_create_ex(engine, source_id, target_id, relation_type, evidence_text, confidence, nullptr);
+}
+
+VINOX_API vinox_status vinox_storage_relation_create_ex(
+    vinox_storage_engine* engine,
+    const char* source_id,
+    const char* target_id,
+    const char* relation_type,
+    const char* evidence_text,
+    float confidence,
+    const void* cancel_token_ptr
+) {
     if (!engine || !source_id || source_id[0] == '\0' || !target_id || target_id[0] == '\0' || !relation_type || relation_type[0] == '\0') {
         return fail_arg("Invalid or empty required identifiers for relation creation");
     }
     if (confidence < 0.0f || confidence > 1.0f) {
         return fail_arg("Relation confidence out of range [0.0, 1.0]");
+    }
+
+    const std::atomic<bool>* cancel_token = static_cast<const std::atomic<bool>*>(cancel_token_ptr);
+    if (cancel_token && cancel_token->load()) {
+        return fail_runtime("Operation cancelled before execution");
     }
 
     std::lock_guard<std::recursive_mutex> lock(engine->mutex);
@@ -991,6 +1049,11 @@ VINOX_API vinox_status vinox_storage_relation_create(
     }
     sqlite3_finalize(stmt);
 
+    if (cancel_token && cancel_token->load()) {
+        sqlite3_exec(engine->db, "ROLLBACK;", nullptr, nullptr, nullptr);
+        return fail_runtime("Operation aborted by in-flight cancellation token");
+    }
+
     if (evidence_text && strlen(evidence_text) > 0) {
         std::string ev_id = generate_uuid();
         const char* sql_ev = "INSERT INTO evidence (id, relation_id, evidence_text, confidence, created_at_ms) VALUES (?, ?, ?, ?, ?);";
@@ -1010,6 +1073,11 @@ VINOX_API vinox_status vinox_storage_relation_create(
             return fail_runtime("Failed to insert evidence");
         }
         sqlite3_finalize(stmt);
+    }
+
+    if (cancel_token && cancel_token->load()) {
+        sqlite3_exec(engine->db, "ROLLBACK;", nullptr, nullptr, nullptr);
+        return fail_runtime("Operation aborted by in-flight cancellation token");
     }
 
     if (sqlite3_exec(engine->db, "COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK) {

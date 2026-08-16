@@ -139,6 +139,15 @@ VINOX_API vinox_status vinox_storage_document_ingest(
     size_t doc_id_out_size
 );
 
+VINOX_API vinox_status vinox_storage_document_ingest_ex(
+    vinox_storage_engine* engine,
+    const char* title,
+    const char* content,
+    const void* cancel_token_ptr,
+    char* doc_id_out,
+    size_t doc_id_out_size
+);
+
 VINOX_API vinox_status vinox_storage_relation_create(
     vinox_storage_engine* engine,
     const char* source_id,
@@ -146,6 +155,16 @@ VINOX_API vinox_status vinox_storage_relation_create(
     const char* relation_type,
     const char* evidence_text,
     float confidence
+);
+
+VINOX_API vinox_status vinox_storage_relation_create_ex(
+    vinox_storage_engine* engine,
+    const char* source_id,
+    const char* target_id,
+    const char* relation_type,
+    const char* evidence_text,
+    float confidence,
+    const void* cancel_token_ptr
 );
 
 VINOX_API vinox_status vinox_storage_relations_query_cte(

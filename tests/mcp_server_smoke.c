@@ -368,11 +368,11 @@ int main(void) {
     }
     printf("  - Server-Side C-ABI Policy Engine Denial (No --allow-write): Verified\n");
 
-    /* 8. Execution Timeout / Deadline Test with Storage Non-Mutation Verification */
+    /* 8. Execution Timeout / Deadline Test with In-Flight Storage Rollback Verification */
 #if defined(_WIN32)
-    _putenv("VINOX_TEST_TIMEOUT_SIM_MS=2500");
+    _putenv("VINOX_TEST_INFLIGHT_DELAY_MS=2500");
 #else
-    setenv("VINOX_TEST_TIMEOUT_SIM_MS", "2500", 1);
+    setenv("VINOX_TEST_INFLIGHT_DELAY_MS", "2500", 1);
 #endif
     vinox_mcp_server_config cfg_timeout;
     memset(&cfg_timeout, 0, sizeof(cfg_timeout));
@@ -387,7 +387,7 @@ int main(void) {
         if (vinox_mcp_client_connect(timeout_client) == VINOX_STATUS_OK) {
             call_req.call_id = "call_timeout_sim";
             call_req.tool_name = "vinox_mcp_timeout.vinox.document_ingest";
-            call_req.arguments_json = "{\"title\":\"Timed Out Doc\",\"content\":\"Test content that must NOT be saved\"}";
+            call_req.arguments_json = "{\"title\":\"Inflight Timed Out Doc\",\"content\":\"Inflight content that must NOT be saved\"}";
 
             memset(&call_res, 0, sizeof(call_res));
             call_res.struct_size = sizeof(call_res);
@@ -405,20 +405,20 @@ int main(void) {
         vinox_mcp_client_destroy(timeout_client);
     }
 #if defined(_WIN32)
-    _putenv("VINOX_TEST_TIMEOUT_SIM_MS=");
+    _putenv("VINOX_TEST_INFLIGHT_DELAY_MS=");
 #else
-    unsetenv("VINOX_TEST_TIMEOUT_SIM_MS");
+    unsetenv("VINOX_TEST_INFLIGHT_DELAY_MS");
 #endif
 
-    /* Verify that "Timed Out Doc" was NOT written to storage */
+    /* Verify that "Inflight Timed Out Doc" was NOT written to storage */
     if (vinox_mcp_client_list_resources(client, res_buf, sizeof(res_buf), &req_sz) != VINOX_STATUS_OK ||
-        strstr(res_buf, "Timed Out Doc") != NULL) {
-        printf("FAILED: Timed-out document ingest must NOT mutate canonical storage!\n");
+        strstr(res_buf, "Inflight Timed Out Doc") != NULL) {
+        printf("FAILED: Timed-out in-flight document ingest must NOT mutate canonical storage!\n");
         vinox_tool_registry_destroy(reg);
         vinox_mcp_client_destroy(client);
         return 1;
     }
-    printf("  - Tool Execution Timeout & Storage Non-Mutation Guarantee: Verified\n");
+    printf("  - In-Flight Tool Execution Timeout & Storage Non-Mutation Guarantee: Verified\n");
 
     /* 9. Cancellation Propagation Test with Storage Non-Mutation Verification */
 #if defined(_WIN32)

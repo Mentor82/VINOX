@@ -466,17 +466,10 @@ int main(int argc, char* argv[]) {
                                 });
                             }
                         } else if (name == "vinox.document_ingest") {
-                            if (cancel_token->load()) {
-                                inner_res["result"]["isError"] = true;
-                                inner_res["result"]["content"] = nlohmann::json::array({
-                                    {{"type", "text"}, {"text", "Tool execution cancelled: storage write aborted"}}
-                                });
-                                return inner_res;
-                            }
                             std::string title = args.value("title", "");
                             std::string content = args.value("content", "");
                             char doc_id_out[128] = {0};
-                            if (vinox_storage_document_ingest(storage, title.c_str(), content.c_str(), doc_id_out, sizeof(doc_id_out)) == VINOX_STATUS_OK) {
+                            if (vinox_storage_document_ingest_ex(storage, title.c_str(), content.c_str(), cancel_token.get(), doc_id_out, sizeof(doc_id_out)) == VINOX_STATUS_OK) {
                                 inner_res["result"]["content"] = nlohmann::json::array({
                                     {{"type", "text"}, {"text", "Document ingested successfully into VINOX storage with ID: " + std::string(doc_id_out)}}
                                 });
@@ -500,17 +493,10 @@ int main(int argc, char* argv[]) {
                                 });
                             }
                         } else if (name == "vinox.relation_create") {
-                            if (cancel_token->load()) {
-                                inner_res["result"]["isError"] = true;
-                                inner_res["result"]["content"] = nlohmann::json::array({
-                                    {{"type", "text"}, {"text", "Tool execution cancelled: storage write aborted"}}
-                                });
-                                return inner_res;
-                            }
                             std::string source = args.value("source", "");
                             std::string target = args.value("target", "");
                             std::string rel_type = args.value("type", "");
-                            if (vinox_storage_relation_create(storage, source.c_str(), target.c_str(), rel_type.c_str(), "MCP tool invocation", 1.0f) == VINOX_STATUS_OK) {
+                            if (vinox_storage_relation_create_ex(storage, source.c_str(), target.c_str(), rel_type.c_str(), "MCP tool invocation", 1.0f, cancel_token.get()) == VINOX_STATUS_OK) {
                                 inner_res["result"]["content"] = nlohmann::json::array({
                                     {{"type", "text"}, {"text", "Relation created successfully between " + source + " and " + target}}
                                 });
