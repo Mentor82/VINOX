@@ -315,7 +315,7 @@ int run_live_audit() {
     // AUDIT 09: VINOX Tool Registry, Policy Engine & OpenAI Tool Format
     // -------------------------------------------------------------
     vinox::tools::ToolRegistry tool_reg;
-    tool_reg.register_tool("vinox.search", "Hybrid Search", "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}", VINOX_SECURITY_CLASS_READ_ONLY);
+    tool_reg.register_tool("vinox.search", "Hybrid Search", "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"],\"additionalProperties\":false}", VINOX_SECURITY_CLASS_READ_ONLY);
 
     std::string args_err;
     if (tool_reg.validate_arguments("vinox.search", "{\"query\":\"openvino\"}", args_err) != VINOX_STATUS_OK) {
@@ -328,20 +328,57 @@ int run_live_audit() {
         return 9;
     }
 
+    // 1. Unconfigured Policy Engine MUST be Default-Deny
     vinox::tools::PolicyEngine policy_eng;
-    policy_eng.set_rule("vinox.*", VINOX_SECURITY_CLASS_READ_ONLY, VINOX_APPROVAL_AUTO_ALLOWED);
+    vinox_tool_call_request audit_req{};
+    audit_req.struct_size = sizeof(audit_req);
+    audit_req.call_id = "call_audit_001";
+    audit_req.tool_name = "vinox.search";
+    audit_req.arguments_json = "{\"query\":\"test\"}";
 
+    vinox_tool_definition audit_tool_def{};
+    audit_tool_def.struct_size = sizeof(audit_tool_def);
+    audit_tool_def.name = "vinox.search";
+    audit_tool_def.security_class = VINOX_SECURITY_CLASS_READ_ONLY;
+
+    vinox_policy_decision audit_dec{};
+    audit_dec.struct_size = sizeof(audit_dec);
+
+    if (vinox_policy_engine_evaluate(policy_eng.get(), &audit_req, &audit_tool_def, &audit_dec, nullptr, 0) != VINOX_STATUS_OK || audit_dec.allowed != 0) {
+        std::cerr << "[AUDIT 09] Unconfigured policy engine failed to enforce default-deny\n";
+        return 9;
+    }
+
+    // 2. Configure Allow Rule & Evaluate
+    policy_eng.set_rule("vinox.*", VINOX_SECURITY_CLASS_READ_ONLY, VINOX_APPROVAL_AUTO_ALLOWED);
+    if (vinox_policy_engine_evaluate(policy_eng.get(), &audit_req, &audit_tool_def, &audit_dec, nullptr, 0) != VINOX_STATUS_OK || audit_dec.allowed != 1) {
+        std::cerr << "[AUDIT 09] Configured policy evaluation failed to allow vinox.search\n";
+        return 9;
+    }
+
+    // 3. OpenAI Tool Schema Formatting & Tool Call Parsing Execution
     std::string openai_schema = tool_reg.format_openai_schema();
     if (openai_schema.find("vinox.search") == std::string::npos || openai_schema.find("function") == std::string::npos) {
         std::cerr << "[AUDIT 09] OpenAI Tool Schema formatting failed\n";
         return 9;
     }
 
+    char pool_buf[512];
+    vinox_tool_call_request parsed_req{};
+    parsed_req.struct_size = sizeof(parsed_req);
+    const char* sample_openai_call = "{\"id\":\"call_audit_99\",\"type\":\"function\",\"function\":{\"name\":\"vinox.search\",\"arguments\":\"{\\\"query\\\":\\\"vinox\\\"}\"}}";
+
+    if (vinox_tools_parse_openai_tool_call(sample_openai_call, &parsed_req, pool_buf, sizeof(pool_buf)) != VINOX_STATUS_OK ||
+        std::string(parsed_req.tool_name) != "vinox.search") {
+        std::cerr << "[AUDIT 09] OpenAI Tool Call parsing execution failed\n";
+        return 9;
+    }
+
     std::cout << "[AUDIT 09] VINOX Tool Registry, Policy Engine & OpenAI Tool Format .. [ PASS ]\n";
     std::cout << "  - Thread-Safe Tool Registration & Discovery: Verified\n";
-    std::cout << "  - Strict JSON Schema Argument Validation (Type Matching & Required Fields): Verified\n";
-    std::cout << "  - Tiered Policy Engine Evaluation (READ_ONLY Auto-Allowed vs Default-Deny): Verified\n";
-    std::cout << "  - OpenAI Tool Schema Formatting & Bidirectional Call Parsing: Verified\n";
+    std::cout << "  - Strict JSON Schema Argument Validation (Type Matching, Required & additionalProperties): Verified\n";
+    std::cout << "  - Tiered Policy Engine Evaluation (Default-Deny Fail-Closed & Configured Auto-Allow): Verified\n";
+    std::cout << "  - OpenAI Tool Schema Formatting & Live Bidirectional Call Parsing: Verified\n";
 
     std::cout << "================================================================================\n";
     std::cout << "                       RESULT: ALL AUDIT CHECKS PASSED 🟢🔒\n";

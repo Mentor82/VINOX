@@ -158,9 +158,14 @@ vinox_status vinox_tool_registry_find_tool(
     }
 
     const auto& entry = it->second;
+    size_t req_pool_sz = entry.name.length() + 1 + entry.description.length() + 1 + entry.parameters_json_schema.length() + 1;
+    if (req_pool_sz > pool_buf_size) {
+        set_tools_last_error("pool_buf is too small to copy tool definition");
+        return VINOX_STATUS_INVALID_ARGUMENT;
+    }
+
     size_t offset = 0;
     auto copy_str = [&](const std::string& str) -> const char* {
-        if (offset + str.length() + 1 > pool_buf_size) return nullptr;
         char* dst = pool_buf + offset;
         std::memcpy(dst, str.c_str(), str.length());
         dst[str.length()] = '\0';
@@ -171,11 +176,6 @@ vinox_status vinox_tool_registry_find_tool(
     const char* n = copy_str(entry.name);
     const char* d = copy_str(entry.description);
     const char* s = copy_str(entry.parameters_json_schema);
-
-    if (!n || !d || !s) {
-        set_tools_last_error("pool_buf is too small to copy tool definition");
-        return VINOX_STATUS_INVALID_ARGUMENT;
-    }
 
     tool_def_out->name = n;
     if (VINOX_FIELD_PRESENT_MEMBER(tool_def_out, description)) tool_def_out->description = d;
@@ -227,6 +227,24 @@ vinox_status vinox_tool_registry_validate_arguments(
         schema_j = nlohmann::json::object();
     }
 
+    // Check additionalProperties: false
+    bool allow_additional = true;
+    if (schema_j.contains("additionalProperties") && schema_j["additionalProperties"].is_boolean()) {
+        allow_additional = schema_j["additionalProperties"].get<bool>();
+    }
+
+    if (!allow_additional && schema_j.contains("properties") && schema_j["properties"].is_object()) {
+        const auto& props = schema_j["properties"];
+        for (auto it = args_j.begin(); it != args_j.end(); ++it) {
+            if (!props.contains(it.key())) {
+                std::string emsg = "Additional property '" + it.key() + "' is forbidden by schema";
+                set_tools_last_error(emsg);
+                if (err_buf && err_buf_size > 0) snprintf(err_buf, err_buf_size, "%s", emsg.c_str());
+                return VINOX_STATUS_INVALID_ARGUMENT;
+            }
+        }
+    }
+
     // Check required properties if specified in schema
     if (schema_j.contains("required") && schema_j["required"].is_array()) {
         for (const auto& req : schema_j["required"]) {
@@ -242,27 +260,47 @@ vinox_status vinox_tool_registry_validate_arguments(
         }
     }
 
-    // Check parameter type matching if properties defined in schema
+    // Check parameter type matching & enum constraints if properties defined in schema
     if (schema_j.contains("properties") && schema_j["properties"].is_object()) {
         const auto& props = schema_j["properties"];
         for (auto it = args_j.begin(); it != args_j.end(); ++it) {
             std::string key = it.key();
-            if (props.contains(key) && props[key].contains("type") && props[key]["type"].is_string()) {
-                std::string expected_type = props[key]["type"].get<std::string>();
-                const auto& val = it.value();
-                bool valid = true;
-                if (expected_type == "string" && !val.is_string()) valid = false;
-                else if (expected_type == "number" && !val.is_number()) valid = false;
-                else if (expected_type == "integer" && !val.is_number_integer()) valid = false;
-                else if (expected_type == "boolean" && !val.is_boolean()) valid = false;
-                else if (expected_type == "array" && !val.is_array()) valid = false;
-                else if (expected_type == "object" && !val.is_object()) valid = false;
+            if (props.contains(key) && props[key].is_object()) {
+                const auto& prop_spec = props[key];
+                if (prop_spec.contains("type") && prop_spec["type"].is_string()) {
+                    std::string expected_type = prop_spec["type"].get<std::string>();
+                    const auto& val = it.value();
+                    bool valid = true;
+                    if (expected_type == "string" && !val.is_string()) valid = false;
+                    else if (expected_type == "number" && !val.is_number()) valid = false;
+                    else if (expected_type == "integer" && !val.is_number_integer()) valid = false;
+                    else if (expected_type == "boolean" && !val.is_boolean()) valid = false;
+                    else if (expected_type == "array" && !val.is_array()) valid = false;
+                    else if (expected_type == "object" && !val.is_object()) valid = false;
 
-                if (!valid) {
-                    std::string emsg = "Parameter '" + key + "' expected type '" + expected_type + "'";
-                    set_tools_last_error(emsg);
-                    if (err_buf && err_buf_size > 0) snprintf(err_buf, err_buf_size, "%s", emsg.c_str());
-                    return VINOX_STATUS_INVALID_ARGUMENT;
+                    if (!valid) {
+                        std::string emsg = "Parameter '" + key + "' expected type '" + expected_type + "'";
+                        set_tools_last_error(emsg);
+                        if (err_buf && err_buf_size > 0) snprintf(err_buf, err_buf_size, "%s", emsg.c_str());
+                        return VINOX_STATUS_INVALID_ARGUMENT;
+                    }
+                }
+
+                if (prop_spec.contains("enum") && prop_spec["enum"].is_array()) {
+                    const auto& enum_arr = prop_spec["enum"];
+                    bool enum_match = false;
+                    for (const auto& enum_val : enum_arr) {
+                        if (enum_val == it.value()) {
+                            enum_match = true;
+                            break;
+                        }
+                    }
+                    if (!enum_match) {
+                        std::string emsg = "Value for parameter '" + key + "' is not one of the allowed enum values";
+                        set_tools_last_error(emsg);
+                        if (err_buf && err_buf_size > 0) snprintf(err_buf, err_buf_size, "%s", emsg.c_str());
+                        return VINOX_STATUS_INVALID_ARGUMENT;
+                    }
                 }
             }
         }
@@ -302,6 +340,17 @@ vinox_status vinox_policy_engine_set_rule(
         set_tools_last_error("engine and tool_name_pattern cannot be null");
         return VINOX_STATUS_INVALID_ARGUMENT;
     }
+
+    if (max_security_class > VINOX_SECURITY_CLASS_ADMIN) {
+        set_tools_last_error("Invalid max_security_class tier");
+        return VINOX_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (approval_mode == VINOX_APPROVAL_DENIED || approval_mode > VINOX_APPROVAL_APPROVED_PERMANENT) {
+        set_tools_last_error("Invalid approval_mode value");
+        return VINOX_STATUS_INVALID_ARGUMENT;
+    }
+
     std::lock_guard<std::mutex> lock(engine->mutex);
     engine->rules.push_back(PolicyRule{tool_name_pattern, max_security_class, approval_mode});
     return VINOX_STATUS_OK;
@@ -327,7 +376,21 @@ vinox_status vinox_policy_engine_evaluate(
         return VINOX_STATUS_INCOMPATIBLE_ABI;
     }
 
-    std::string tool_name = VINOX_FIELD_PRESENT_MEMBER(request, tool_name) && request->tool_name ? request->tool_name : "";
+    std::string req_tool_name = VINOX_FIELD_PRESENT_MEMBER(request, tool_name) && request->tool_name ? request->tool_name : "";
+    std::string def_tool_name = VINOX_FIELD_PRESENT_MEMBER(tool_def, name) && tool_def->name ? tool_def->name : "";
+
+    if (req_tool_name.empty() || req_tool_name != def_tool_name) {
+        std::string emsg = "Tool request name '" + req_tool_name + "' does not match tool definition name '" + def_tool_name + "'";
+        set_tools_last_error(emsg);
+        decision_out->allowed = 0;
+        if (VINOX_FIELD_PRESENT_MEMBER(decision_out, approval_mode)) decision_out->approval_mode = VINOX_APPROVAL_DENIED;
+        if (reason_buf && reason_buf_size > 0) {
+            snprintf(reason_buf, reason_buf_size, "%s", emsg.c_str());
+            if (VINOX_FIELD_PRESENT_MEMBER(decision_out, reason)) decision_out->reason = reason_buf;
+        }
+        return VINOX_STATUS_INVALID_ARGUMENT;
+    }
+
     uint32_t sec_class = VINOX_FIELD_PRESENT_MEMBER(tool_def, security_class) ? tool_def->security_class : VINOX_SECURITY_CLASS_READ_ONLY;
 
     std::lock_guard<std::mutex> lock(engine->mutex);
@@ -337,7 +400,7 @@ vinox_status vinox_policy_engine_evaluate(
 
     // Evaluate matching rules (last matching rule takes precedence if set)
     for (const auto& rule : engine->rules) {
-        if (match_pattern(rule.pattern, tool_name)) {
+        if (match_pattern(rule.pattern, req_tool_name)) {
             if (sec_class <= rule.max_security_class) {
                 allowed = (rule.approval_mode != VINOX_APPROVAL_DENIED);
                 app_mode = rule.approval_mode;
@@ -348,13 +411,6 @@ vinox_status vinox_policy_engine_evaluate(
                 reason = "Security class tier " + std::to_string(sec_class) + " exceeds allowed tier " + std::to_string(rule.max_security_class);
             }
         }
-    }
-
-    // Default built-in fallback: READ_ONLY tools auto-allowed if no explicit rules configured
-    if (engine->rules.empty() && sec_class == VINOX_SECURITY_CLASS_READ_ONLY) {
-        allowed = true;
-        app_mode = VINOX_APPROVAL_AUTO_ALLOWED;
-        reason = "Default policy: READ_ONLY tool auto-allowed";
     }
 
     decision_out->allowed = allowed ? 1 : 0;
@@ -461,9 +517,14 @@ vinox_status vinox_tools_parse_openai_tool_call(
         return VINOX_STATUS_INVALID_ARGUMENT;
     }
 
+    size_t req_pool_sz = call_id.length() + 1 + tool_name.length() + 1 + args_json.length() + 1;
+    if (req_pool_sz > pool_buf_size) {
+        set_tools_last_error("pool_buf is too small to copy parsed OpenAI tool call");
+        return VINOX_STATUS_INVALID_ARGUMENT;
+    }
+
     size_t offset = 0;
     auto copy_str = [&](const std::string& str) -> const char* {
-        if (offset + str.length() + 1 > pool_buf_size) return nullptr;
         char* dst = pool_buf + offset;
         std::memcpy(dst, str.c_str(), str.length());
         dst[str.length()] = '\0';
@@ -474,11 +535,6 @@ vinox_status vinox_tools_parse_openai_tool_call(
     const char* cid = copy_str(call_id);
     const char* tname = copy_str(tool_name);
     const char* args = copy_str(args_json);
-
-    if (!cid || !tname || !args) {
-        set_tools_last_error("pool_buf exhausted parsing OpenAI tool call");
-        return VINOX_STATUS_INVALID_ARGUMENT;
-    }
 
     request_out->call_id = cid;
     request_out->tool_name = tname;

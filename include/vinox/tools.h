@@ -39,7 +39,8 @@ typedef struct vinox_tool_definition {
     uint32_t security_class;            // vinox_security_class tier
 } vinox_tool_definition;
 
-#define VINOX_TOOL_DEFINITION_MIN_SIZE (sizeof(uint32_t) + sizeof(const char*) * 3 + sizeof(uint32_t))
+#define VINOX_TOOL_DEFINITION_MIN_SIZE \
+    ((uint32_t)(offsetof(vinox_tool_definition, security_class) + sizeof(uint32_t)))
 
 // Tool call request struct (Prefix-Layout ABI)
 typedef struct vinox_tool_call_request {
@@ -50,7 +51,8 @@ typedef struct vinox_tool_call_request {
     const vinox_correlation_context* correlation; // Optional correlation context
 } vinox_tool_call_request;
 
-#define VINOX_TOOL_CALL_REQUEST_MIN_SIZE (sizeof(uint32_t) + sizeof(const char*) * 3 + sizeof(const vinox_correlation_context*))
+#define VINOX_TOOL_CALL_REQUEST_MIN_SIZE \
+    ((uint32_t)(offsetof(vinox_tool_call_request, correlation) + sizeof(const vinox_correlation_context*)))
 
 // Policy decision result struct (Prefix-Layout ABI)
 typedef struct vinox_policy_decision {
@@ -60,7 +62,8 @@ typedef struct vinox_policy_decision {
     const char* reason;     // Human-readable policy evaluation decision reason
 } vinox_policy_decision;
 
-#define VINOX_POLICY_DECISION_MIN_SIZE (sizeof(uint32_t) + sizeof(int32_t) + sizeof(uint32_t) + sizeof(const char*))
+#define VINOX_POLICY_DECISION_MIN_SIZE \
+    ((uint32_t)(offsetof(vinox_policy_decision, reason) + sizeof(const char*)))
 
 // Tool call execution result struct (Prefix-Layout ABI)
 typedef struct vinox_tool_call_result {
@@ -72,7 +75,8 @@ typedef struct vinox_tool_call_result {
     uint64_t execution_duration_ms; // Execution duration in milliseconds
 } vinox_tool_call_result;
 
-#define VINOX_TOOL_CALL_RESULT_MIN_SIZE (sizeof(uint32_t) + sizeof(const char*) + sizeof(int32_t) + sizeof(const char*) * 2 + sizeof(uint64_t))
+#define VINOX_TOOL_CALL_RESULT_MIN_SIZE \
+    ((uint32_t)(offsetof(vinox_tool_call_result, execution_duration_ms) + sizeof(uint64_t)))
 
 // Opaque registry & policy engine handles
 typedef struct vinox_tool_registry vinox_tool_registry;

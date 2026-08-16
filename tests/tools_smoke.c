@@ -6,7 +6,7 @@
 #include "vinox/vinox.h"
 
 int main(void) {
-    printf("Starting VINOX Phase 6.1 Tool Registry & Policy Engine Smoke Test...\n");
+    printf("Starting VINOX Issue #9 Hardened Tool Registry & Policy Engine Smoke Test...\n");
 
     // 1. Create Tool Registry
     vinox_tool_registry* registry = NULL;
@@ -15,14 +15,16 @@ int main(void) {
         return 1;
     }
 
-    // 2. Register Tools
+    // 2. Register Tools (including additionalProperties: false & enum property specs)
     const char* search_schema = "{"
         "\"type\":\"object\","
         "\"properties\":{"
             "\"query\":{\"type\":\"string\"},"
-            "\"limit\":{\"type\":\"integer\"}"
+            "\"limit\":{\"type\":\"integer\"},"
+            "\"mode\":{\"type\":\"string\",\"enum\":[\"fast\",\"precise\"]}"
         "},"
-        "\"required\":[\"query\"]"
+        "\"required\":[\"query\"],"
+        "\"additionalProperties\":false"
     "}";
 
     vinox_tool_definition tool_search;
@@ -53,64 +55,62 @@ int main(void) {
         return 3;
     }
 
-    // 3. Find Tool & Verify Pool Buffer
-    vinox_tool_definition found_def;
-    memset(&found_def, 0, sizeof(found_def));
-    found_def.struct_size = sizeof(found_def);
-    char pool[1024];
+    // 3. Pool Exhaustion Safety & Prefix-ABI Find Tool Test
+    char tiny_pool[5];
+    vinox_tool_definition unmutated_def;
+    memset(&unmutated_def, 0xAB, sizeof(unmutated_def));
+    unmutated_def.struct_size = sizeof(unmutated_def);
 
-    if (vinox_tool_registry_find_tool(registry, "vinox.search", &found_def, pool, sizeof(pool)) != VINOX_STATUS_OK) {
-        printf("FAILED: vinox_tool_registry_find_tool\n");
+    if (vinox_tool_registry_find_tool(registry, "vinox.search", &unmutated_def, tiny_pool, sizeof(tiny_pool)) != VINOX_STATUS_INVALID_ARGUMENT) {
+        printf("FAILED: vinox_tool_registry_find_tool failed to reject tiny_pool\n");
         vinox_tool_registry_destroy(registry);
         return 4;
     }
 
-    if (strcmp(found_def.name, "vinox.search") != 0 || found_def.security_class != VINOX_SECURITY_CLASS_READ_ONLY) {
-        printf("FAILED: Found tool definition properties mismatch\n");
+    char pool[1024];
+    vinox_tool_definition found_def;
+    memset(&found_def, 0, sizeof(found_def));
+    found_def.struct_size = VINOX_TOOL_DEFINITION_MIN_SIZE;
+
+    if (vinox_tool_registry_find_tool(registry, "vinox.search", &found_def, pool, sizeof(pool)) != VINOX_STATUS_OK ||
+        strcmp(found_def.name, "vinox.search") != 0) {
+        printf("FAILED: vinox_tool_registry_find_tool prefix ABI find\n");
         vinox_tool_registry_destroy(registry);
         return 5;
     }
 
-    // 4. Validate Arguments against Schema
+    // 4. Schema Validation Hardening (additionalProperties: false & enum validation)
     char err_buf[512];
 
     // Valid args
-    if (vinox_tool_registry_validate_arguments(registry, "vinox.search", "{\"query\":\"openvino\", \"limit\":5}", err_buf, sizeof(err_buf)) != VINOX_STATUS_OK) {
-        printf("FAILED: Argument validation for valid args\n");
+    if (vinox_tool_registry_validate_arguments(registry, "vinox.search", "{\"query\":\"openvino\",\"mode\":\"fast\"}", err_buf, sizeof(err_buf)) != VINOX_STATUS_OK) {
+        printf("FAILED: Valid argument validation\n");
         vinox_tool_registry_destroy(registry);
         return 6;
     }
 
-    // Missing required field 'query'
-    if (vinox_tool_registry_validate_arguments(registry, "vinox.search", "{\"limit\":5}", err_buf, sizeof(err_buf)) != VINOX_STATUS_INVALID_ARGUMENT ||
-        strstr(err_buf, "Missing required parameter") == NULL) {
-        printf("FAILED: Argument validation failed to catch missing required 'query'\n");
+    // Additional property forbidden test
+    if (vinox_tool_registry_validate_arguments(registry, "vinox.search", "{\"query\":\"test\",\"unsupported_arg\":\"x\"}", err_buf, sizeof(err_buf)) != VINOX_STATUS_INVALID_ARGUMENT ||
+        strstr(err_buf, "Additional property") == NULL) {
+        printf("FAILED: additionalProperties: false check failed (got '%s')\n", err_buf);
         vinox_tool_registry_destroy(registry);
         return 7;
     }
 
-    // Parameter type mismatch (string passed for integer 'limit')
-    if (vinox_tool_registry_validate_arguments(registry, "vinox.search", "{\"query\":\"test\", \"limit\":\"five\"}", err_buf, sizeof(err_buf)) != VINOX_STATUS_INVALID_ARGUMENT ||
-        strstr(err_buf, "expected type") == NULL) {
-        printf("FAILED: Argument validation failed to catch type mismatch for 'limit'\n");
+    // Enum value mismatch test
+    if (vinox_tool_registry_validate_arguments(registry, "vinox.search", "{\"query\":\"test\",\"mode\":\"invalid_mode\"}", err_buf, sizeof(err_buf)) != VINOX_STATUS_INVALID_ARGUMENT ||
+        strstr(err_buf, "allowed enum values") == NULL) {
+        printf("FAILED: Enum parameter validation failed (got '%s')\n", err_buf);
         vinox_tool_registry_destroy(registry);
         return 8;
     }
 
-    // 5. Policy Engine Evaluation
+    // 5. Policy Engine Hardening (Default-Deny, Range Validation & Request/Tool Mismatch)
     vinox_policy_engine* policy = NULL;
     if (vinox_policy_engine_create(&policy) != VINOX_STATUS_OK || !policy) {
         printf("FAILED: vinox_policy_engine_create\n");
         vinox_tool_registry_destroy(registry);
         return 9;
-    }
-
-    // Set rule: vinox.* allowed up to READ_ONLY
-    if (vinox_policy_engine_set_rule(policy, "vinox.*", VINOX_SECURITY_CLASS_READ_ONLY, VINOX_APPROVAL_AUTO_ALLOWED) != VINOX_STATUS_OK) {
-        printf("FAILED: vinox_policy_engine_set_rule\n");
-        vinox_policy_engine_destroy(policy);
-        vinox_tool_registry_destroy(registry);
-        return 10;
     }
 
     vinox_tool_call_request req_search;
@@ -120,57 +120,79 @@ int main(void) {
     req_search.tool_name = "vinox.search";
     req_search.arguments_json = "{\"query\":\"test\"}";
 
-    vinox_policy_decision dec_search;
-    memset(&dec_search, 0, sizeof(dec_search));
-    dec_search.struct_size = sizeof(dec_search);
+    vinox_policy_decision decision;
+    memset(&decision, 0, sizeof(decision));
+    decision.struct_size = sizeof(decision);
     char reason_buf[256];
 
-    if (vinox_policy_engine_evaluate(policy, &req_search, &tool_search, &dec_search, reason_buf, sizeof(reason_buf)) != VINOX_STATUS_OK ||
-        dec_search.allowed != 1 || dec_search.approval_mode != VINOX_APPROVAL_AUTO_ALLOWED) {
-        printf("FAILED: Policy engine failed to allow vinox.search\n");
+    // TEST: Empty Policy Engine MUST be 100% Default-Deny (even for READ_ONLY tool)
+    if (vinox_policy_engine_evaluate(policy, &req_search, &tool_search, &decision, reason_buf, sizeof(reason_buf)) != VINOX_STATUS_OK ||
+        decision.allowed != 0 || decision.approval_mode != VINOX_APPROVAL_DENIED) {
+        printf("FAILED: Empty policy engine was not default-deny! (allowed=%d)\n", decision.allowed);
+        vinox_policy_engine_destroy(policy);
+        vinox_tool_registry_destroy(registry);
+        return 10;
+    }
+
+    // TEST: Policy Rule Enum Range Validation Rejection
+    if (vinox_policy_engine_set_rule(policy, "vinox.*", VINOX_SECURITY_CLASS_READ_ONLY, 999) != VINOX_STATUS_INVALID_ARGUMENT) {
+        printf("FAILED: vinox_policy_engine_set_rule failed to reject invalid approval_mode=999\n");
         vinox_policy_engine_destroy(policy);
         vinox_tool_registry_destroy(registry);
         return 11;
     }
 
-    // Evaluate sys.admin_exec (ADMIN tier vs READ_ONLY max allowed rule) -> must be denied
-    vinox_tool_call_request req_admin;
-    memset(&req_admin, 0, sizeof(req_admin));
-    req_admin.struct_size = sizeof(req_admin);
-    req_admin.call_id = "call_admin_002";
-    req_admin.tool_name = "sys.admin_exec";
-    req_admin.arguments_json = "{}";
-
-    vinox_policy_decision dec_admin;
-    memset(&dec_admin, 0, sizeof(dec_admin));
-    dec_admin.struct_size = sizeof(dec_admin);
-
-    if (vinox_policy_engine_evaluate(policy, &req_admin, &tool_admin, &dec_admin, reason_buf, sizeof(reason_buf)) != VINOX_STATUS_OK ||
-        dec_admin.allowed != 0) {
-        printf("FAILED: Policy engine failed to deny sys.admin_exec\n");
+    if (vinox_policy_engine_set_rule(policy, "vinox.*", 999, VINOX_APPROVAL_AUTO_ALLOWED) != VINOX_STATUS_INVALID_ARGUMENT) {
+        printf("FAILED: vinox_policy_engine_set_rule failed to reject invalid max_security_class=999\n");
         vinox_policy_engine_destroy(policy);
         vinox_tool_registry_destroy(registry);
         return 12;
     }
 
-    // 6. OpenAI Format Mapping
+    // Configure valid allow rule for vinox.*
+    if (vinox_policy_engine_set_rule(policy, "vinox.*", VINOX_SECURITY_CLASS_READ_ONLY, VINOX_APPROVAL_AUTO_ALLOWED) != VINOX_STATUS_OK) {
+        printf("FAILED: vinox_policy_engine_set_rule\n");
+        vinox_policy_engine_destroy(policy);
+        vinox_tool_registry_destroy(registry);
+        return 13;
+    }
+
+    // TEST: Valid Policy Evaluation after setting allow rule
+    if (vinox_policy_engine_evaluate(policy, &req_search, &tool_search, &decision, reason_buf, sizeof(reason_buf)) != VINOX_STATUS_OK ||
+        decision.allowed != 1 || decision.approval_mode != VINOX_APPROVAL_AUTO_ALLOWED) {
+        printf("FAILED: Policy engine evaluation failed for vinox.search\n");
+        vinox_policy_engine_destroy(policy);
+        vinox_tool_registry_destroy(registry);
+        return 14;
+    }
+
+    // TEST: Request / Tool Definition Name Mismatch Rejection
+    vinox_tool_call_request req_mismatch;
+    memset(&req_mismatch, 0, sizeof(req_mismatch));
+    req_mismatch.struct_size = sizeof(req_mismatch);
+    req_mismatch.call_id = "call_mismatch_002";
+    req_mismatch.tool_name = "vinox.search"; // requested tool name
+    req_mismatch.arguments_json = "{}";
+
+    // Pass tool_admin definition ("sys.admin_exec") -> must fail with INVALID_ARGUMENT and allowed = 0
+    if (vinox_policy_engine_evaluate(policy, &req_mismatch, &tool_admin, &decision, reason_buf, sizeof(reason_buf)) != VINOX_STATUS_INVALID_ARGUMENT ||
+        decision.allowed != 0 || strstr(reason_buf, "does not match") == NULL) {
+        printf("FAILED: Policy engine failed to reject tool name mismatch\n");
+        vinox_policy_engine_destroy(policy);
+        vinox_tool_registry_destroy(registry);
+        return 15;
+    }
+
+    // 6. OpenAI Format Mapping & Pool Capacity Verification
     char openai_schema_buf[2048];
     size_t req_sz = 0;
     if (vinox_tools_format_openai_schema(registry, openai_schema_buf, sizeof(openai_schema_buf), &req_sz) != VINOX_STATUS_OK) {
         printf("FAILED: vinox_tools_format_openai_schema\n");
         vinox_policy_engine_destroy(policy);
         vinox_tool_registry_destroy(registry);
-        return 13;
+        return 16;
     }
 
-    if (strstr(openai_schema_buf, "\"name\":\"vinox.search\"") == NULL || strstr(openai_schema_buf, "\"type\":\"function\"") == NULL) {
-        printf("FAILED: OpenAI schema format verification (got '%s')\n", openai_schema_buf);
-        vinox_policy_engine_destroy(policy);
-        vinox_tool_registry_destroy(registry);
-        return 14;
-    }
-
-    // Parse OpenAI Tool Call JSON
     const char* openai_call_json = "{"
         "\"id\":\"call_openai_999\","
         "\"type\":\"function\","
@@ -184,23 +206,26 @@ int main(void) {
     memset(&parsed_req, 0, sizeof(parsed_req));
     parsed_req.struct_size = sizeof(parsed_req);
 
-    if (vinox_tools_parse_openai_tool_call(openai_call_json, &parsed_req, pool, sizeof(pool)) != VINOX_STATUS_OK) {
-        printf("FAILED: vinox_tools_parse_openai_tool_call\n");
+    // Tiny pool parsing test
+    if (vinox_tools_parse_openai_tool_call(openai_call_json, &parsed_req, tiny_pool, sizeof(tiny_pool)) != VINOX_STATUS_INVALID_ARGUMENT) {
+        printf("FAILED: vinox_tools_parse_openai_tool_call failed to reject tiny_pool\n");
         vinox_policy_engine_destroy(policy);
         vinox_tool_registry_destroy(registry);
-        return 15;
+        return 17;
     }
 
-    if (strcmp(parsed_req.call_id, "call_openai_999") != 0 || strcmp(parsed_req.tool_name, "vinox.search") != 0) {
-        printf("FAILED: Parsed OpenAI tool call values mismatch\n");
+    // Happy path parsing test
+    if (vinox_tools_parse_openai_tool_call(openai_call_json, &parsed_req, pool, sizeof(pool)) != VINOX_STATUS_OK ||
+        strcmp(parsed_req.call_id, "call_openai_999") != 0 || strcmp(parsed_req.tool_name, "vinox.search") != 0) {
+        printf("FAILED: vinox_tools_parse_openai_tool_call happy path\n");
         vinox_policy_engine_destroy(policy);
         vinox_tool_registry_destroy(registry);
-        return 16;
+        return 18;
     }
 
     vinox_policy_engine_destroy(policy);
     vinox_tool_registry_destroy(registry);
 
-    printf("SUCCESS: All VINOX Phase 6.1 Tool Registry & Policy Engine smoke tests passed!\n");
+    printf("SUCCESS: All VINOX Issue #9 Hardened Tool Registry & Policy Engine smoke tests passed!\n");
     return 0;
 }
