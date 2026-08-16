@@ -40,31 +40,81 @@ namespace fs = std::filesystem;
 namespace {
 
 static std::string calculate_sha256(const std::string& input) {
-#if defined(_WIN32)
-    HCRYPTPROV hProv = 0;
-    HCRYPTHASH hHash = 0;
-    std::string result = "";
-    if (CryptAcquireContext(&hProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
-        if (CryptCreateHash(hProv, CALG_SHA_256, 0, 0, &hHash)) {
-            if (CryptHashData(hHash, (const BYTE*)input.data(), (DWORD)input.size(), 0)) {
-                DWORD hash_len = 32;
-                BYTE hash_buf[32];
-                if (CryptGetHashParam(hHash, HP_HASHVAL, hash_buf, &hash_len, 0)) {
-                    std::ostringstream ss;
-                    for (DWORD i = 0; i < hash_len; ++i) {
-                        ss << std::hex << std::setw(2) << std::setfill('0') << (int)hash_buf[i];
-                    }
-                    result = ss.str();
-                }
-            }
-            CryptDestroyHash(hHash);
-        }
-        CryptReleaseContext(hProv, 0);
+    uint32_t h[8] = {
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+    };
+    static const uint32_t k[64] = {
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+    };
+
+    auto right_rotate = [](uint32_t val, uint32_t count) {
+        return (val >> count) | (val << (32 - count));
+    };
+
+    std::vector<uint8_t> data(input.begin(), input.end());
+    uint64_t bit_len = static_cast<uint64_t>(input.size()) * 8;
+
+    data.push_back(0x80);
+    while ((data.size() % 64) != 56) {
+        data.push_back(0x00);
     }
-    return result;
-#else
-    return "0000000000000000000000000000000000000000000000000000000000000000";
-#endif
+
+    for (int i = 7; i >= 0; --i) {
+        data.push_back(static_cast<uint8_t>((bit_len >> (i * 8)) & 0xFF));
+    }
+
+    for (size_t chunk = 0; chunk < data.size(); chunk += 64) {
+        uint32_t w[64];
+        for (int i = 0; i < 16; ++i) {
+            w[i] = (static_cast<uint32_t>(data[chunk + i * 4]) << 24) |
+                   (static_cast<uint32_t>(data[chunk + i * 4 + 1]) << 16) |
+                   (static_cast<uint32_t>(data[chunk + i * 4 + 2]) << 8) |
+                   (static_cast<uint32_t>(data[chunk + i * 4 + 3]));
+        }
+        for (int i = 16; i < 64; ++i) {
+            uint32_t s0 = right_rotate(w[i - 15], 7) ^ right_rotate(w[i - 15], 18) ^ (w[i - 15] >> 3);
+            uint32_t s1 = right_rotate(w[i - 2], 17) ^ right_rotate(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+        }
+
+        uint32_t a = h[0], b = h[1], c = h[2], d = h[3];
+        uint32_t e = h[4], f = h[5], g = h[6], h_val = h[7];
+
+        for (int i = 0; i < 64; ++i) {
+            uint32_t S1 = right_rotate(e, 6) ^ right_rotate(e, 11) ^ right_rotate(e, 25);
+            uint32_t ch = (e & f) ^ ((~e) & g);
+            uint32_t temp1 = h_val + S1 + ch + k[i] + w[i];
+            uint32_t S0 = right_rotate(a, 2) ^ right_rotate(a, 13) ^ right_rotate(a, 22);
+            uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+            uint32_t temp2 = S0 + maj;
+
+            h_val = g;
+            g = f;
+            f = e;
+            e = d + temp1;
+            d = c;
+            c = b;
+            b = a;
+            a = temp1 + temp2;
+        }
+
+        h[0] += a; h[1] += b; h[2] += c; h[3] += d;
+        h[4] += e; h[5] += f; h[6] += g; h[7] += h_val;
+    }
+
+    std::ostringstream ss;
+    for (int i = 0; i < 8; ++i) {
+        ss << std::hex << std::setw(8) << std::setfill('0') << h[i];
+    }
+    return ss.str();
 }
 
 } // namespace
@@ -127,7 +177,7 @@ struct MessageEntry {
 
 struct vinox_storage_engine {
     sqlite3* db{nullptr};
-    std::mutex mutex;
+    std::recursive_mutex mutex;
     std::deque<ConversationEntry> conversation_pool;
     std::deque<MessageEntry> message_pool;
     std::deque<std::string> string_pool;
@@ -407,7 +457,7 @@ vinox_status vinox_storage_create_conversation(
         return fail_abi("info_out->struct_size is smaller than VINOX_CONVERSATION_INFO_MIN_SIZE");
     }
 
-    std::lock_guard<std::mutex> lock(engine->mutex);
+    std::lock_guard<std::recursive_mutex> lock(engine->mutex);
 
     ConversationEntry entry;
     entry.id = generate_uuid();
@@ -477,7 +527,7 @@ vinox_status vinox_storage_add_message_ex(
         return fail_arg("message required fields (conversation_id, role, content) cannot be null");
     }
 
-    std::lock_guard<std::mutex> lock(engine->mutex);
+    std::lock_guard<std::recursive_mutex> lock(engine->mutex);
 
     MessageEntry entry;
     entry.id = (message_in->id && message_in->id[0] != '\0') ? message_in->id : generate_uuid();
@@ -548,7 +598,7 @@ vinox_status vinox_storage_get_conversation_count(
         return fail_arg("count_out pointer cannot be null");
     }
 
-    std::lock_guard<std::mutex> lock(const_cast<vinox_storage_engine*>(engine)->mutex);
+    std::lock_guard<std::recursive_mutex> lock(const_cast<vinox_storage_engine*>(engine)->mutex);
 
     const char* sql = "SELECT COUNT(*) FROM conversations;";
     sqlite3_stmt* stmt = nullptr;
@@ -580,7 +630,7 @@ vinox_status vinox_storage_search_messages_fts(
         return fail_arg("search query cannot be null or empty");
     }
 
-    std::lock_guard<std::mutex> lock(const_cast<vinox_storage_engine*>(engine)->mutex);
+    std::lock_guard<std::recursive_mutex> lock(const_cast<vinox_storage_engine*>(engine)->mutex);
 
     const char* sql = "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH ?;";
     sqlite3_stmt* stmt = nullptr;
@@ -628,7 +678,7 @@ vinox_status vinox_storage_store_embedding(
     std::vector<float> vec(embedding_data, embedding_data + dim);
     vinox::storage::l2_normalize(vec);
 
-    std::lock_guard<std::mutex> lock(engine->mutex);
+    std::lock_guard<std::recursive_mutex> lock(engine->mutex);
 
     // FAIL-CLOSED BACKEND INTEGRITY: FAIL IMMEDIATELY IF VECTOR BACKEND WRITING FAILS
     std::string err;
@@ -689,7 +739,7 @@ vinox_status vinox_storage_search_hybrid(
         }
     }
 
-    std::lock_guard<std::mutex> lock(const_cast<vinox_storage_engine*>(engine)->mutex);
+    std::lock_guard<std::recursive_mutex> lock(const_cast<vinox_storage_engine*>(engine)->mutex);
 
     std::vector<float> q_vec;
     if (query_embedding && dim > 0) {
@@ -818,7 +868,7 @@ VINOX_API vinox_status vinox_storage_document_ingest(
     if (!engine || !title || !content || !doc_id_out || doc_id_out_size < 33) {
         return fail_arg("Invalid argument for vinox_storage_document_ingest");
     }
-    std::lock_guard<std::mutex> lock(engine->mutex);
+    std::lock_guard<std::recursive_mutex> lock(engine->mutex);
 
     std::string doc_id = generate_uuid();
     std::string content_str(content);
@@ -913,7 +963,7 @@ VINOX_API vinox_status vinox_storage_relation_create(
         return fail_arg("Relation confidence out of range [0.0, 1.0]");
     }
 
-    std::lock_guard<std::mutex> lock(engine->mutex);
+    std::lock_guard<std::recursive_mutex> lock(engine->mutex);
     sqlite3_exec(engine->db, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr);
 
     std::string rel_id = generate_uuid();
@@ -1027,7 +1077,7 @@ VINOX_API vinox_status vinox_storage_store_chunk_embedding(
     if (!engine || !chunk_id || chunk_id[0] == '\0' || !embedding_data || dim == 0) {
         return fail_arg("Invalid argument for vinox_storage_store_chunk_embedding");
     }
-    std::lock_guard<std::mutex> lock(engine->mutex);
+    std::lock_guard<std::recursive_mutex> lock(engine->mutex);
 
     std::vector<float> vec(embedding_data, embedding_data + dim);
     vinox::storage::l2_normalize(vec);
@@ -1052,8 +1102,16 @@ VINOX_API vinox_status vinox_storage_store_chunk_embedding(
     sqlite3_finalize(stmt);
 
     std::string err;
-    if (engine->vector_backend && (engine->index_dim == 0 || engine->index_dim == dim)) {
-        engine->vector_backend->store_embedding(engine->db, chunk_id, vec, err);
+    if (engine->vector_backend) {
+        if (engine->index_dim != 0 && engine->index_dim != dim) {
+            std::string mismatch_err = "Embedding dimension mismatch: query dim (" + std::to_string(dim) + ") != index dim (" + std::to_string(engine->index_dim) + ")";
+            return fail_arg(mismatch_err.c_str());
+        }
+        std::string vec_key = "chunk:" + std::string(chunk_id);
+        if (!engine->vector_backend->store_embedding(engine->db, vec_key, vec, err)) {
+            std::string fail_msg = "Vector backend store_embedding failed: " + err;
+            return fail_runtime(fail_msg.c_str());
+        }
     }
 
     return VINOX_STATUS_OK;
@@ -1069,7 +1127,7 @@ VINOX_API vinox_status vinox_storage_search_chunks_fts(
     if (!engine || !query || query[0] == '\0') {
         return fail_arg("Invalid argument for vinox_storage_search_chunks_fts");
     }
-    std::lock_guard<std::mutex> lock(const_cast<vinox_storage_engine*>(engine)->mutex);
+    std::lock_guard<std::recursive_mutex> lock(const_cast<vinox_storage_engine*>(engine)->mutex);
 
     const char* sql = "SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH ?;";
     sqlite3_stmt* stmt = nullptr;
@@ -1098,7 +1156,7 @@ VINOX_API vinox_status vinox_storage_backup_online(
     const char* backup_db_path
 ) {
     if (!engine || !backup_db_path) return fail_arg("Invalid argument for backup");
-    std::lock_guard<std::mutex> lock(engine->mutex);
+    std::lock_guard<std::recursive_mutex> lock(engine->mutex);
 
     sqlite3* target_db = nullptr;
     if (sqlite3_open(backup_db_path, &target_db) != SQLITE_OK) {
@@ -1225,11 +1283,23 @@ VINOX_API vinox_status vinox_storage_export_json(
         return item;
     });
 
-    root["chunk_embeddings"] = export_table("SELECT chunk_id, dim, created_at_ms FROM chunk_embeddings;", [](sqlite3_stmt* stmt) {
+    root["chunk_embeddings"] = export_table("SELECT chunk_id, embedding, dim, created_at_ms FROM chunk_embeddings;", [](sqlite3_stmt* stmt) {
         nlohmann::json item;
         item["chunk_id"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-        item["dim"] = sqlite3_column_int(stmt, 1);
-        item["created_at_ms"] = sqlite3_column_int64(stmt, 2);
+        const void* blob = sqlite3_column_blob(stmt, 1);
+        int blob_bytes = sqlite3_column_bytes(stmt, 1);
+        int dim = sqlite3_column_int(stmt, 2);
+        item["dim"] = dim;
+        item["created_at_ms"] = sqlite3_column_int64(stmt, 3);
+
+        nlohmann::json emb_arr = nlohmann::json::array();
+        if (blob && blob_bytes >= static_cast<int>(dim * sizeof(float))) {
+            const float* fptr = reinterpret_cast<const float*>(blob);
+            for (int i = 0; i < dim; ++i) {
+                emb_arr.push_back(fptr[i]);
+            }
+        }
+        item["embedding"] = emb_arr;
         return item;
     });
 
@@ -1255,7 +1325,7 @@ VINOX_API vinox_status vinox_storage_import_json(
     const char* json_str
 ) {
     if (!engine || !json_str) return fail_arg("Invalid argument for import");
-    std::lock_guard<std::mutex> lock(engine->mutex);
+    std::lock_guard<std::recursive_mutex> lock(engine->mutex);
 
     try {
         auto root = nlohmann::json::parse(json_str);
@@ -1422,6 +1492,29 @@ VINOX_API vinox_status vinox_storage_import_json(
                     sqlite3_reset(stmt);
                 }
                 sqlite3_finalize(stmt);
+            }
+        }
+
+        // 7. Chunk Embeddings UPSERT & Vector Index Re-materialization
+        if (root.contains("chunk_embeddings") && root["chunk_embeddings"].is_array()) {
+            for (const auto& item : root["chunk_embeddings"]) {
+                std::string chunk_id = item.value("chunk_id", "");
+                size_t dim = item.value("dim", 0);
+                if (chunk_id.empty() || dim == 0 || !item.contains("embedding") || !item["embedding"].is_array()) continue;
+
+                std::vector<float> vec;
+                vec.reserve(dim);
+                for (const auto& val : item["embedding"]) {
+                    vec.push_back(val.get<float>());
+                }
+                if (vec.size() == dim) {
+                    vinox_status st = vinox_storage_store_chunk_embedding(engine, chunk_id.c_str(), vec.data(), dim);
+                    if (st != VINOX_STATUS_OK) {
+                        sqlite3_exec(engine->db, "ROLLBACK;", nullptr, nullptr, nullptr);
+                        std::string err_msg = std::string("Failed to import chunk embedding: ") + vinox_last_error();
+                        return fail_runtime(err_msg.c_str());
+                    }
+                }
             }
         }
 

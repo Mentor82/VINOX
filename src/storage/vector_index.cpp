@@ -51,7 +51,16 @@ public:
     }
 
     bool store_embedding(sqlite3* db, const std::string& message_id, const std::vector<float>& vec, std::string& err_out) override {
-        const char* sql = "INSERT OR REPLACE INTO message_embeddings_vec (message_id, embedding) VALUES (?, ?);";
+        // vec0 virtual table compatibility: delete existing entry first to prevent UNIQUE constraint failure on UPSERT
+        const char* del_sql = "DELETE FROM message_embeddings_vec WHERE message_id = ?;";
+        sqlite3_stmt* del_stmt = nullptr;
+        if (sqlite3_prepare_v2(db, del_sql, -1, &del_stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(del_stmt, 1, message_id.c_str(), -1, SQLITE_STATIC);
+            sqlite3_step(del_stmt);
+            sqlite3_finalize(del_stmt);
+        }
+
+        const char* sql = "INSERT INTO message_embeddings_vec (message_id, embedding) VALUES (?, ?);";
         sqlite3_stmt* stmt = nullptr;
         if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
             err_out = sqlite3_errmsg(db);

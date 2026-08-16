@@ -486,6 +486,7 @@ int main(void) {
 
     float dummy_chunk_emb[1024];
     for (int i = 0; i < 1024; ++i) dummy_chunk_emb[i] = 0.5f;
+    printf("DEBUG actual_chunk_id='%s'\n", actual_chunk_id);
     if (strlen(actual_chunk_id) == 0 || vinox_storage_store_chunk_embedding(engine, actual_chunk_id, dummy_chunk_emb, 1024) != VINOX_STATUS_OK) {
         printf("FAILED: Chunk embedding storage failed: %s\n", vinox_storage_last_error());
         sqlite3_close(raw_db);
@@ -545,7 +546,7 @@ int main(void) {
     // -------------------------------------------------------------
     // TEST 13: Phase 5.4 Full 7-Table Versioned JSON Export & Non-Destructive UPSERT Import
     // -------------------------------------------------------------
-    char export_json[65536] = {0};
+    static char export_json[524288] = {0};
     size_t exp_req_sz = 0;
     if (vinox_storage_export_json(engine, export_json, sizeof(export_json), &exp_req_sz) != VINOX_STATUS_OK ||
         strstr(export_json, "conversations") == NULL ||
@@ -553,7 +554,8 @@ int main(void) {
         strstr(export_json, "documents") == NULL ||
         strstr(export_json, "chunks") == NULL ||
         strstr(export_json, "typed_relations") == NULL ||
-        strstr(export_json, "evidence") == NULL) {
+        strstr(export_json, "evidence") == NULL ||
+        strstr(export_json, "chunk_embeddings") == NULL) {
         printf("FAILED: Full 7-table JSON export failed: %s\n", vinox_storage_last_error());
         sqlite3_close(raw_db);
         vinox_storage_engine_close(engine);
