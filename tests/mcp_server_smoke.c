@@ -368,8 +368,96 @@ int main(void) {
     }
     printf("  - Server-Side C-ABI Policy Engine Denial (No --allow-write): Verified\n");
 
+    /* 8. Execution Timeout / Deadline Test */
+    call_req.call_id = "call_timeout_sim";
+    call_req.tool_name = "vinox_mcp.vinox.search";
+    call_req.arguments_json = "{\"query\":\"timeout test\",\"timeout_sim_ms\":600,\"timeout_limit_ms\":100}";
+
+    memset(&call_res, 0, sizeof(call_res));
+    call_res.struct_size = sizeof(call_res);
+
+    if (vinox_mcp_client_call_tool(client, &call_req, &call_res, pool, sizeof(pool)) != VINOX_STATUS_OK ||
+        call_res.result_json == NULL ||
+        strstr(call_res.result_json, "timed out after") == NULL) {
+        printf("FAILED: Tool execution exceeding deadline must return timeout error!\n");
+        vinox_tool_registry_destroy(reg);
+        vinox_mcp_client_destroy(client);
+        return 1;
+    }
+    printf("  - Tool Execution Timeout & Deadline Enforcement: Verified\n");
+
+    /* 9. Cancellation Propagation Test */
+    call_req.call_id = "call_cancel_sim";
+    call_req.tool_name = "vinox_mcp.vinox.search";
+    call_req.arguments_json = "{\"query\":\"cancel test\",\"cancelled\":true}";
+
+    memset(&call_res, 0, sizeof(call_res));
+    call_res.struct_size = sizeof(call_res);
+
+    if (vinox_mcp_client_call_tool(client, &call_req, &call_res, pool, sizeof(pool)) != VINOX_STATUS_OK ||
+        call_res.result_json == NULL ||
+        strstr(call_res.result_json, "Tool execution cancelled") == NULL) {
+        printf("FAILED: Cancelled tool execution must return cancellation error!\n");
+        vinox_tool_registry_destroy(reg);
+        vinox_mcp_client_destroy(client);
+        return 1;
+    }
+    printf("  - Tool Execution Cancellation Propagation: Verified\n");
+
+    /* 10. Bounded Output Payload Size Limit Test (> 256 KB) */
+    call_req.call_id = "call_oversize_output_sim";
+    call_req.tool_name = "vinox_mcp.vinox.search";
+    call_req.arguments_json = "{\"query\":\"oversize output test\",\"oversize_sim_kb\":300}";
+
+    memset(&call_res, 0, sizeof(call_res));
+    call_res.struct_size = sizeof(call_res);
+
+    if (vinox_mcp_client_call_tool(client, &call_req, &call_res, pool, sizeof(pool)) != VINOX_STATUS_OK ||
+        call_res.result_json == NULL ||
+        strstr(call_res.result_json, "exceeded maximum output payload size limit") == NULL) {
+        printf("FAILED: Oversize tool output > 256 KB must fail closed!\n");
+        vinox_tool_registry_destroy(reg);
+        vinox_mcp_client_destroy(client);
+        return 1;
+    }
+    printf("  - Oversize Output Payload Limit (256 KB Gate): Verified\n");
+
     vinox_tool_registry_destroy(reg);
     vinox_mcp_client_destroy(client);
+
+    /* 11. Registry Init Failure Injection Test */
+#if defined(_WIN32)
+    _putenv("VINOX_TEST_FAIL_REGISTRY=1");
+#else
+    setenv("VINOX_TEST_FAIL_REGISTRY", "1", 1);
+#endif
+
+    vinox_mcp_client* fail_reg_client = NULL;
+    if (vinox_mcp_client_create(&cfg, &fail_reg_client) == VINOX_STATUS_OK && fail_reg_client) {
+        if (vinox_mcp_client_connect(fail_reg_client) == VINOX_STATUS_OK) {
+            call_req.call_id = "call_fail_reg";
+            call_req.tool_name = "vinox_mcp.vinox.search";
+            call_req.arguments_json = "{\"query\":\"test\"}";
+
+            memset(&call_res, 0, sizeof(call_res));
+            call_res.struct_size = sizeof(call_res);
+
+            if (vinox_mcp_client_call_tool(fail_reg_client, &call_req, &call_res, pool, sizeof(pool)) == VINOX_STATUS_OK) {
+                if (call_res.result_json == NULL || strstr(call_res.result_json, "governance engine unavailable") == NULL) {
+                    printf("FAILED: Tool execution on failed registry init must fail closed with governance engine error!\n");
+                    vinox_mcp_client_destroy(fail_reg_client);
+                    return 1;
+                }
+            }
+        }
+        vinox_mcp_client_destroy(fail_reg_client);
+    }
+#if defined(_WIN32)
+    _putenv("VINOX_TEST_FAIL_REGISTRY=");
+#else
+    unsetenv("VINOX_TEST_FAIL_REGISTRY");
+#endif
+    printf("  - Registry Initialization Failure Injection & Fail-Closed Gate: Verified\n");
 
     /* 7. Negative Test: Backend Initialization Failure / Engine Open Error */
 #if defined(_WIN32)
