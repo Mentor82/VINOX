@@ -183,16 +183,24 @@ void print_json_event(const std::string& event_type, const std::string& status, 
     std::cout.flush();
 }
 
+struct StreamUserContext {
+    bool json_mode{false};
+    std::string accumulated_text;
+};
+
 int write_text_callback(const char* text, size_t text_size, void* user_data) {
     if (g_interrupted.load()) return -1;
 
-    bool json_mode = (user_data != nullptr) ? *static_cast<bool*>(user_data) : false;
-    if (json_mode) {
-        std::string chunk(text, text_size);
-        print_json_event("cli.generation_chunk", "OK", {{"chunk", chunk}});
-    } else {
-        std::cout.write(text, static_cast<std::streamsize>(text_size));
-        std::cout.flush();
+    StreamUserContext* ctx = static_cast<StreamUserContext*>(user_data);
+    std::string chunk(text, text_size);
+    if (ctx) {
+        ctx->accumulated_text += chunk;
+        if (ctx->json_mode) {
+            print_json_event("cli.generation_chunk", "OK", {{"chunk", chunk}});
+        } else {
+            std::cout.write(text, static_cast<std::streamsize>(text_size));
+            std::cout.flush();
+        }
     }
     return 0;
 }
@@ -228,6 +236,7 @@ struct CliSession {
     std::string overlay_dir{".cli_sandbox_overlay"};
     std::string target_dir{".cli_target_workspace"};
     std::string conversation_id;
+    std::vector<std::pair<std::string, std::string>> conversation_history;
     bool json_mode{false};
 };
 
@@ -263,6 +272,9 @@ void handle_slash_command(const std::string& line, CliSession& session, bool& sh
         if (out.is_open()) {
             out << "VINOX CLI Session Transcript\n";
             out << "Conversation ID: " << session.conversation_id << "\n";
+            for (const auto& msg : session.conversation_history) {
+                out << msg.first << ": " << msg.second << "\n";
+            }
             out.close();
             if (session.json_mode) {
                 print_json_event("cli.save", "OK", {{"filename", filename}});
@@ -444,8 +456,14 @@ void handle_slash_command(const std::string& line, CliSession& session, bool& sh
 
                 while (true) {
                     if (g_interrupted.load()) {
+                        vinox_agent_run_cancel(session.current_run);
                         run_failed = true;
                         failure_reason = "CANCELLED";
+                        break;
+                    }
+
+                    if (vinox_agent_run_get_status(session.current_run) == VINOX_PLAN_STATUS_COMPLETED) {
+                        run_failed = false;
                         break;
                     }
 
@@ -457,7 +475,18 @@ void handle_slash_command(const std::string& line, CliSession& session, bool& sh
                         } else {
                             std::cout << "  - Step completed. Total steps: " << completed << "\n";
                         }
+
+                        // Check if run completed right after the step!
+                        if (vinox_agent_run_get_status(session.current_run) == VINOX_PLAN_STATUS_COMPLETED) {
+                            run_failed = false;
+                            break;
+                        }
                     } else {
+                        if (vinox_agent_run_get_status(session.current_run) == VINOX_PLAN_STATUS_COMPLETED) {
+                            run_failed = false;
+                            break;
+                        }
+
                         run_failed = true;
                         if (st == VINOX_STATUS_PERMISSION_DENIED) {
                             failure_reason = "PERMISSION_DENIED";
@@ -763,7 +792,7 @@ int main(int argc, char* argv[]) {
             if (line[0] == '/') {
                 handle_slash_command(line, session, should_exit);
             } else {
-                // Real Local Prompt Execution & Session Persistence (Criteria A & F)
+                // Canonical Multi-Turn Session Chat & Persistence (Criteria A & F)
                 vinox_message_info user_msg{};
                 user_msg.struct_size = sizeof(user_msg);
                 user_msg.conversation_id = session.conversation_id.c_str();
@@ -771,21 +800,45 @@ int main(int argc, char* argv[]) {
                 user_msg.content = line.c_str();
                 user_msg.provenance_kind = VINOX_PROVENANCE_SOURCE_LITERAL;
                 vinox_storage_add_message(session.storage, &user_msg, nullptr);
+                session.conversation_history.push_back({"user", line});
 
                 if (session.model) {
                     if (!session.json_mode) std::cout << "[ASSISTANT] ";
 
+                    std::string multi_turn_prompt = "You are a helpful AI assistant in an interactive session.\n";
+                    for (const auto& msg : session.conversation_history) {
+                        if (msg.first == "user") {
+                            multi_turn_prompt += "User: " + msg.second + "\n";
+                        } else {
+                            multi_turn_prompt += "Assistant: " + msg.second + "\n";
+                        }
+                    }
+                    multi_turn_prompt += "Assistant:";
+
                     vinox_generation_options gen_opts{};
                     gen_opts.struct_size = sizeof(gen_opts);
-                    gen_opts.prompt = line.c_str();
+                    gen_opts.prompt = multi_turn_prompt.c_str();
                     gen_opts.max_new_tokens = arguments.max_new_tokens;
                     gen_opts.temperature = arguments.temperature;
                     gen_opts.top_p = arguments.top_p;
 
-                    vinox_status gen_st = vinox_model_generate(session.model, &gen_opts, write_text_callback, &session.json_mode);
+                    StreamUserContext stream_ctx;
+                    stream_ctx.json_mode = session.json_mode;
+
+                    vinox_status gen_st = vinox_model_generate(session.model, &gen_opts, write_text_callback, &stream_ctx);
                     if (gen_st == VINOX_STATUS_OK) {
+                        session.conversation_history.push_back({"assistant", stream_ctx.accumulated_text});
+
+                        vinox_message_info asst_msg{};
+                        asst_msg.struct_size = sizeof(asst_msg);
+                        asst_msg.conversation_id = session.conversation_id.c_str();
+                        asst_msg.role = "assistant";
+                        asst_msg.content = stream_ctx.accumulated_text.c_str();
+                        asst_msg.provenance_kind = VINOX_PROVENANCE_SOURCE_LITERAL;
+                        vinox_storage_add_message(session.storage, &asst_msg, nullptr);
+
                         if (session.json_mode) {
-                            print_json_event("cli.generation_complete", "OK", {{"status", "COMPLETED"}});
+                            print_json_event("cli.generation_complete", "OK", {{"status", "COMPLETED"}, {"response", stream_ctx.accumulated_text}});
                         } else {
                             std::cout << "\n";
                         }
@@ -832,11 +885,14 @@ int main(int argc, char* argv[]) {
     generation_options.temperature = arguments.temperature;
     generation_options.top_p = arguments.top_p;
 
+    StreamUserContext oneshot_ctx;
+    oneshot_ctx.json_mode = session.json_mode;
+
     const vinox_status generation_status = vinox_model_generate(
         session.model,
         &generation_options,
         write_text_callback,
-        &session.json_mode
+        &oneshot_ctx
     );
 
     if (session.model) vinox_model_destroy(session.model);

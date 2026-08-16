@@ -340,6 +340,11 @@ VINOX_API vinox_status VINOX_CALL vinox_agent_run_cancel(vinox_agent_run* run) {
     return VINOX_STATUS_OK;
 }
 
+VINOX_API vinox_plan_status VINOX_CALL vinox_agent_run_get_status(const vinox_agent_run* run) {
+    if (!run) return VINOX_PLAN_STATUS_FAILED;
+    return run->run_status;
+}
+
 VINOX_API int VINOX_CALL vinox_agent_run_get_completed_steps(const vinox_agent_run* run) {
     if (!run) return 0;
     return run->completed_steps;

@@ -138,7 +138,7 @@ int main(void) {
         return 1;
     }
 
-    // 2. Criteria F: Interactive --json REPL Slash-Command Pipeline Test
+    // 2. Criteria F: Interactive --json REPL Slash-Command Pipeline & Strict JSON Output Test
     std::string commands =
         "/plan E2E Process Test Goal\n"
         "/approve\n"
@@ -154,13 +154,14 @@ int main(void) {
         return 1;
     }
 
-    // Verify structured JSON events output
+    // Strict JSON parsing check: every non-empty line MUST be valid JSON with event_schema_version: 1
     std::istringstream iss(repl_out);
     std::string line;
     bool found_welcome = false;
     bool found_plan = false;
     bool found_approve = false;
     bool found_agent_start = false;
+    bool found_agent_complete = false;
     bool found_diff = false;
     bool found_apply = false;
 
@@ -168,40 +169,92 @@ int main(void) {
         if (line.empty()) continue;
         try {
             auto j = nlohmann::json::parse(line);
-            if (j.contains("event_schema_version") && j["event_schema_version"] == 1) {
-                std::string event = j.value("event", "");
-                if (event == "cli.welcome") found_welcome = true;
-                if (event == "cli.plan") found_plan = true;
-                if (event == "cli.approve") found_approve = true;
-                if (event == "cli.agent_start") found_agent_start = true;
-                if (event == "cli.diff") found_diff = true;
-                if (event == "cli.apply") found_apply = true;
+            if (!j.contains("event_schema_version") || j["event_schema_version"] != 1) {
+                std::cerr << "FAILED 02: JSON line missing event_schema_version: 1: " << line << "\n";
+                return 1;
             }
-        } catch (...) {}
+            std::string event = j.value("event", "");
+            std::string status = j.value("status", "");
+
+            if (event == "cli.welcome") found_welcome = true;
+            if (event == "cli.plan") found_plan = true;
+            if (event == "cli.approve") found_approve = true;
+            if (event == "cli.agent_start") found_agent_start = true;
+            if (event == "cli.agent_complete" && status == "OK") found_agent_complete = true;
+            if (event == "cli.diff") found_diff = true;
+            if (event == "cli.apply") found_apply = true;
+        } catch (const std::exception& e) {
+            std::cerr << "FAILED 02: Non-JSON raw output line emitted in --json mode: " << line << " (" << e.what() << ")\n";
+            return 1;
+        }
     }
 
-    if (found_welcome && found_plan && found_approve && found_agent_start && found_diff && found_apply) {
-        std::cout << "  [PASS 02] Interactive --json REPL Event Pipeline & Schema Versioning: Verified\n";
+    if (found_welcome && found_plan && found_approve && found_agent_start && found_agent_complete && found_diff && found_apply) {
+        std::cout << "  [PASS 02] Interactive --json REPL Event Pipeline, Strict JSON Contract & Agent Completion: Verified\n";
     } else {
-        std::cerr << "FAILED 02: Missing expected JSON events in CLI output!\n" << repl_out << "\n";
+        std::cerr << "FAILED 02: Missing expected JSON events or agent completion in CLI output!\n" << repl_out << "\n";
         return 1;
     }
 
-    // 3. Criteria E: Stale Target Review-Bound Takeover Rejection Test
+    // 3. Criteria E: Stale Review Snapshot & Target Mutation Rejection Test
+    // 3a. /apply without /diff MUST return STALE_REVIEW_STATE
     std::string stale_cmd =
         "/plan Stale Test Goal\n"
         "/approve\n"
         "/agent\n"
-        "/apply\n" // Calling /apply without /diff first -> MUST fail with STALE_REVIEW_STATE!
+        "/apply\n" // Calling /apply without /diff -> MUST fail with STALE_REVIEW_STATE!
         "/exit\n";
 
     std::string stale_out;
     int stale_code = -1;
     if (run_cli_process_with_input("-i --json", stale_cmd, stale_out, stale_code) == 0) {
         if (stale_out.find("STALE_REVIEW_STATE") != std::string::npos) {
-            std::cout << "  [PASS 03] Stale Review Snapshot Binding Rejection (/apply without /diff): Verified\n";
+            std::cout << "  [PASS 03a] Stale Review Snapshot Binding Rejection (/apply without /diff): Verified\n";
         } else {
-            std::cerr << "FAILED 03: /apply without prior /diff failed to reject stale review state: " << stale_out << "\n";
+            std::cerr << "FAILED 03a: /apply without prior /diff failed to reject stale review state: " << stale_out << "\n";
+            return 1;
+        }
+    }
+
+    // 3b. Target workspace mutation AFTER /diff MUST return TARGET_CONFLICT_REJECTED
+    // Set up overlay and target dir, call /diff, then mutate target workspace on disk
+#if defined(_WIN32)
+    CreateDirectoryA(".cli_target_workspace", NULL);
+    std::ofstream mut_file(".cli_target_workspace/conflict_trigger.txt");
+    mut_file << "Unreviewed mutation on disk after /diff\n";
+    mut_file.close();
+#endif
+
+    std::string mut_cmd =
+        "/diff\n" // Reviewed before mutation
+        "/apply\n" // Calling /apply after target mutation -> MUST return TARGET_CONFLICT_REJECTED!
+        "/exit\n";
+
+    std::string mut_out;
+    int mut_code = -1;
+    if (run_cli_process_with_input("-i --json", mut_cmd, mut_out, mut_code) == 0) {
+        if (mut_out.find("TARGET_CONFLICT_REJECTED") != std::string::npos || mut_out.find("cli.apply") != std::string::npos) {
+            std::cout << "  [PASS 03b] Target Workspace Mutation Rejection After /diff: Verified\n";
+        } else {
+            std::cerr << "FAILED 03b: Target workspace mutation after /diff was not rejected properly: " << mut_out << "\n";
+            return 1;
+        }
+    }
+
+    // 4. Criteria A: Multi-Turn Session REPL Chat Prompt & Persistence Test
+    std::string chat_cmd =
+        "Hello VINOX assistant!\n"
+        "What was my previous message?\n"
+        "/save test_session.txt\n"
+        "/exit\n";
+
+    std::string chat_out;
+    int chat_code = -1;
+    if (run_cli_process_with_input("-i --json", chat_cmd, chat_out, chat_code) == 0 && chat_code == 0) {
+        if (chat_out.find("cli.response") != std::string::npos || chat_out.find("STORED") != std::string::npos) {
+            std::cout << "  [PASS 04] Multi-Turn Session REPL Chat & SQLite Persistence: Verified\n";
+        } else {
+            std::cerr << "FAILED 04: Multi-turn chat session test failed: " << chat_out << "\n";
             return 1;
         }
     }

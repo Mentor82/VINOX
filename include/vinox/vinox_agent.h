@@ -66,6 +66,7 @@ VINOX_API vinox_status VINOX_CALL vinox_agent_run_step(vinox_agent_run* run);
 VINOX_API vinox_status VINOX_CALL vinox_agent_run_pause(vinox_agent_run* run);
 VINOX_API vinox_status VINOX_CALL vinox_agent_run_resume(vinox_agent_run* run);
 VINOX_API vinox_status VINOX_CALL vinox_agent_run_cancel(vinox_agent_run* run);
+VINOX_API vinox_plan_status VINOX_CALL vinox_agent_run_get_status(const vinox_agent_run* run);
 VINOX_API int VINOX_CALL vinox_agent_run_get_completed_steps(const vinox_agent_run* run);
 
 VINOX_API vinox_sandbox_host* VINOX_CALL vinox_sandbox_host_create(const char* overlay_dir);

@@ -197,6 +197,12 @@ vinox_status vinox_tool_registry_validate_arguments(
         return VINOX_STATUS_INVALID_ARGUMENT;
     }
 
+    if (strlen(args_json) > 262144) {
+        set_tools_last_error("Payload exceeds maximum bounded payload size of 262144 bytes (256 KB)");
+        if (err_buf && err_buf_size > 0) snprintf(err_buf, err_buf_size, "Payload exceeds maximum bounded payload size of 262144 bytes (256 KB)");
+        return VINOX_STATUS_INVALID_ARGUMENT;
+    }
+
     std::string name_str = tool_name;
     ToolEntry entry;
     {
