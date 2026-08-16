@@ -168,18 +168,20 @@ add_library(vinox_storage SHARED
     src/storage/db.cpp
     src/storage/embeddings.cpp
     src/storage/vector_index.cpp
+    src/storage/sqlite-vec/sqlite-vec.c
 )
 add_library(vinox::storage ALIAS vinox_storage)
 set_target_properties(vinox_storage PROPERTIES EXPORT_NAME storage)
 
 target_link_libraries(vinox_storage PRIVATE unofficial::sqlite3::sqlite3)
-target_compile_definitions(vinox_storage PRIVATE VINOX_BUILD_SHARED)
+target_compile_definitions(vinox_storage PRIVATE VINOX_BUILD_SHARED SQLITE_VEC_STATIC SQLITE_CORE)
 target_include_directories(vinox_storage
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     PRIVATE
         ${CMAKE_CURRENT_BINARY_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/storage
 )
 if(MSVC)
     target_compile_options(vinox_storage PRIVATE /W4 /permissive- /EHsc)

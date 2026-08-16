@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <chrono>
-
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -13,9 +12,13 @@
 #include <type_traits>
 #include <vector>
 
+#ifndef SQLITE_CORE
+#define SQLITE_CORE
+#endif
 #include <sqlite3.h>
 
 #include "generated/001_init_sql.h"
+#include "sqlite-vec/sqlite-vec.h"
 
 namespace fs = std::filesystem;
 
@@ -160,6 +163,13 @@ bool enforce_sqlite_invariants(sqlite3* db, const char* db_path, std::string& er
             err_out = "Failed to prepare PRAGMA journal_mode query";
             return false;
         }
+    }
+
+    // INITIALIZE SQLITE-VEC EXTENSION DIRECTLY ON THE CONNECTION
+    if (sqlite3_vec_init(db, &err_msg, nullptr) != SQLITE_OK) {
+        err_out = std::string("Failed to initialize sqlite-vec extension: ") + (err_msg ? err_msg : "unknown error");
+        if (err_msg) sqlite3_free(err_msg);
+        return false;
     }
 
     return true;
@@ -511,29 +521,11 @@ vinox_status vinox_storage_store_embedding(
 
     std::lock_guard<std::mutex> lock(engine->mutex);
 
+    // FAIL-CLOSED BACKEND INTEGRITY: FAIL IMMEDIATELY IF VECTOR BACKEND WRITING FAILS
     std::string err;
-    if (engine->vector_backend && engine->vector_backend->store_embedding(engine->db, message_id, vec, err)) {
-        engine->index_dim = dim;
-        last_error.clear();
-        return VINOX_STATUS_OK;
-    }
-
-    const char* sql = "INSERT OR REPLACE INTO message_embeddings (message_id, embedding, dim, created_at_ms) VALUES (?, ?, ?, ?);";
-    sqlite3_stmt* stmt = nullptr;
-    if (sqlite3_prepare_v2(engine->db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-        return fail_runtime(sqlite3_errmsg(engine->db));
-    }
-
-    sqlite3_bind_text(stmt, 1, message_id, -1, SQLITE_STATIC);
-    sqlite3_bind_blob(stmt, 2, vec.data(), static_cast<int>(vec.size() * sizeof(float)), SQLITE_STATIC);
-    sqlite3_bind_int(stmt, 3, static_cast<int>(dim));
-    sqlite3_bind_int64(stmt, 4, static_cast<sqlite3_int64>(current_timestamp_ms()));
-
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-
-    if (rc != SQLITE_DONE) {
-        return fail_runtime(sqlite3_errmsg(engine->db));
+    if (!engine->vector_backend || !engine->vector_backend->store_embedding(engine->db, message_id, vec, err)) {
+        std::string fail_msg = "Vector backend store_embedding failed: " + (err.empty() ? "unknown error" : err);
+        return fail_runtime(fail_msg.c_str());
     }
 
     engine->index_dim = dim;
@@ -620,27 +612,30 @@ vinox_status vinox_storage_search_hybrid(
         }
     }
 
-    // 2. VECTOR SEARCH VIA VECTOR INDEX BACKEND (sqlite-vec / vec0 or reference)
+    // 2. VECTOR SEARCH VIA ACTIVE VECTOR BACKEND (sqlite-vec / vec0) - FAIL CLOSED ON BACKEND ERROR
     if (!q_vec.empty()) {
         std::vector<vinox::storage::VectorMatch> vec_matches;
         std::string vec_err;
-        if (engine->vector_backend && engine->vector_backend->search_knn(engine->db, q_vec, max_results, vec_matches, vec_err)) {
-            for (const auto& vm : vec_matches) {
-                float norm_sim = vinox::storage::normalize_cosine_similarity(vm.similarity);
-                bool found = false;
-                for (auto& c : candidates) {
-                    if (c.message_id == vm.message_id) {
-                        c.vector_score = norm_sim;
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) {
-                    HybridCandidate c;
-                    c.message_id = vm.message_id;
+        if (!engine->vector_backend || !engine->vector_backend->search_knn(engine->db, q_vec, max_results, vec_matches, vec_err)) {
+            std::string fail_msg = "Vector backend search_knn failed: " + (vec_err.empty() ? "unknown error" : vec_err);
+            return fail_runtime(fail_msg.c_str());
+        }
+
+        for (const auto& vm : vec_matches) {
+            float norm_sim = vinox::storage::normalize_cosine_similarity(vm.similarity);
+            bool found = false;
+            for (auto& c : candidates) {
+                if (c.message_id == vm.message_id) {
                     c.vector_score = norm_sim;
-                    candidates.push_back(c);
+                    found = true;
+                    break;
                 }
+            }
+            if (!found) {
+                HybridCandidate c;
+                c.message_id = vm.message_id;
+                c.vector_score = norm_sim;
+                candidates.push_back(c);
             }
         }
     }

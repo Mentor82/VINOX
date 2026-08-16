@@ -249,12 +249,29 @@ int run_live_audit() {
         return 7;
     }
 
+    // LIVE EXECUTION OF NEGATIVE PATH ASSERTIONS IN AUDIT
+    vinox_status bad_alpha = vinox_storage_search_hybrid(storage, embedding.data(), 1024, "Audit", 1.5f, 5, h_results, &h_count);
+    if (bad_alpha != VINOX_STATUS_INVALID_ARGUMENT) {
+        std::cerr << "[AUDIT 07] Live Alpha Range Validation failed to reject invalid alpha\n";
+        vinox_storage_engine_close(storage);
+        return 7;
+    }
+
+    std::vector<float> bad_dim_emb(512, 1.0f);
+    vinox_status bad_dim = vinox_storage_search_hybrid(storage, bad_dim_emb.data(), 512, "Audit", 0.5f, 5, h_results, &h_count);
+    if (bad_dim != VINOX_STATUS_INVALID_ARGUMENT) {
+        std::cerr << "[AUDIT 07] Live Dimension Mismatch Rejection failed to reject wrong dimension\n";
+        vinox_storage_engine_close(storage);
+        return 7;
+    }
+
     std::cout << "[AUDIT 07] VINOX 1024-dim Vector Normalization & Hybrid Retrieval ...... [ PASS ]\n";
     std::cout << "  - Active Vector Backend: " << backend_name << "\n";
     std::cout << "  - In-place L2 Normalization (||v||2 = 1.000000): Verified\n";
     std::cout << "  - Real FTS5 BM25 Ranking Signal Variation (Top Score: " << h_results[0].bm25_score << " > Low Score: " << h_results[1].bm25_score << "): Verified\n";
     std::cout << "  - Hybrid Retrieval (BM25 + Cosine Vector, alpha=0.5): Score=" << h_results[0].hybrid_score << " (Target ID: " << h_results[0].message_id << ")\n";
-    std::cout << "  - Alpha Range Validation & Dimension Mismatch Rejection: Verified\n";
+    std::cout << "  - Live Alpha Range Validation (alpha=1.5 -> INVALID_ARGUMENT): Verified\n";
+    std::cout << "  - Live Dimension Mismatch Rejection (512 vs 1024 -> INVALID_ARGUMENT): Verified\n";
 
     vinox_storage_engine_close(storage);
     std::remove(audit_db_file);

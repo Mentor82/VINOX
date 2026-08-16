@@ -342,8 +342,8 @@ int main(void) {
     }
 
     uint32_t backend_kind = 0;
-    if (vinox_storage_get_vector_backend_kind(engine, &backend_kind) != VINOX_STATUS_OK || backend_kind == 0) {
-        printf("FAILED: Vector backend query: %s\n", vinox_storage_last_error());
+    if (vinox_storage_get_vector_backend_kind(engine, &backend_kind) != VINOX_STATUS_OK || backend_kind != VINOX_VECTOR_BACKEND_SQLITE_VEC) {
+        printf("FAILED: Vector backend query did not return VINOX_VECTOR_BACKEND_SQLITE_VEC (got %u): %s\n", backend_kind, vinox_storage_last_error());
         vinox_storage_engine_close(engine);
         return 29;
     }
