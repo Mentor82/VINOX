@@ -414,21 +414,76 @@ int main(void) {
     }
 
     // -------------------------------------------------------------
-    // TEST 10: Phase 5.3 Document Ingestion & Chunking
+    // TEST 10: Phase 5.3 Multi-Chunk Ingestion & SHA-256 Hash
     // -------------------------------------------------------------
     char doc_id[64] = {0};
-    if (vinox_storage_document_ingest(engine, "Architecture Manual", "OpenVINO C++ GenAI Infrastructure Architecture Document", doc_id, sizeof(doc_id)) != VINOX_STATUS_OK ||
+    char large_content[1501];
+    memset(large_content, 'A', 1500);
+    large_content[1500] = '\0';
+
+    if (vinox_storage_document_ingest(engine, "Large Manual", large_content, doc_id, sizeof(doc_id)) != VINOX_STATUS_OK ||
         strlen(doc_id) == 0) {
-        printf("FAILED: Document ingestion failed: %s\n", vinox_storage_last_error());
+        printf("FAILED: Document multi-chunk ingestion failed: %s\n", vinox_storage_last_error());
         vinox_storage_engine_close(engine);
         return 37;
     }
 
+    // Verify SHA-256 hash length in raw DB
+    sqlite3_stmt* doc_stmt = NULL;
+    if (sqlite3_prepare_v2(raw_db, "SELECT content_hash FROM documents WHERE id = ?;", -1, &doc_stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(doc_stmt, 1, doc_id, -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(doc_stmt) == SQLITE_ROW) {
+            const char* hash_str = (const char*)sqlite3_column_text(doc_stmt, 0);
+            if (!hash_str || strlen(hash_str) != 64) {
+                printf("FAILED: Document SHA-256 hash check (expected 64 chars hex, got %s)\n", hash_str ? hash_str : "NULL");
+                sqlite3_finalize(doc_stmt);
+                sqlite3_close(raw_db);
+                vinox_storage_engine_close(engine);
+                return 371;
+            }
+        }
+        sqlite3_finalize(doc_stmt);
+    }
+
+    // Verify multi-chunk creation (1500 chars / 500 = 3 chunks)
+    if (sqlite3_prepare_v2(raw_db, "SELECT COUNT(*) FROM chunks WHERE document_id = ?;", -1, &doc_stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(doc_stmt, 1, doc_id, -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(doc_stmt) == SQLITE_ROW) {
+            int chunk_count = sqlite3_column_int(doc_stmt, 0);
+            if (chunk_count != 3) {
+                printf("FAILED: Multi-chunk count check (expected 3 chunks, got %d)\n", chunk_count);
+                sqlite3_finalize(doc_stmt);
+                sqlite3_close(raw_db);
+                vinox_storage_engine_close(engine);
+                return 372;
+            }
+        }
+        sqlite3_finalize(doc_stmt);
+    }
+
     // -------------------------------------------------------------
-    // TEST 11: Phase 5.3 Typed Relations & Recursive CTE Query
+    // TEST 11: Phase 5.3 Typed Relations, Validation & CTE Graph Query
     // -------------------------------------------------------------
+    // Validation: Invalid confidence (1.5f -> VINOX_STATUS_INVALID_ARGUMENT)
+    if (vinox_storage_relation_create(engine, doc_id, "target_entity_101", "cites", "Evidence", 1.5f) != VINOX_STATUS_INVALID_ARGUMENT) {
+        printf("FAILED: Invalid relation confidence (1.5f) was not rejected\n");
+        sqlite3_close(raw_db);
+        vinox_storage_engine_close(engine);
+        return 381;
+    }
+
+    // Validation: Empty source_id -> VINOX_STATUS_INVALID_ARGUMENT
+    if (vinox_storage_relation_create(engine, "", "target_entity_101", "cites", "Evidence", 0.9f) != VINOX_STATUS_INVALID_ARGUMENT) {
+        printf("FAILED: Empty relation source_id was not rejected\n");
+        sqlite3_close(raw_db);
+        vinox_storage_engine_close(engine);
+        return 382;
+    }
+
+    // Valid relation creation
     if (vinox_storage_relation_create(engine, doc_id, "target_entity_101", "cites", "Section 4.1 Citation Evidence", 0.95f) != VINOX_STATUS_OK) {
         printf("FAILED: Relation creation failed: %s\n", vinox_storage_last_error());
+        sqlite3_close(raw_db);
         vinox_storage_engine_close(engine);
         return 38;
     }
@@ -437,6 +492,7 @@ int main(void) {
     if (vinox_storage_relations_query_cte(engine, doc_id, cte_json, sizeof(cte_json)) != VINOX_STATUS_OK ||
         strstr(cte_json, "target_entity_101") == NULL) {
         printf("FAILED: Recursive CTE graph relation query failed: %s\n", vinox_storage_last_error());
+        sqlite3_close(raw_db);
         vinox_storage_engine_close(engine);
         return 39;
     }
@@ -448,31 +504,82 @@ int main(void) {
     remove(backup_file);
     if (vinox_storage_backup_online(engine, backup_file) != VINOX_STATUS_OK) {
         printf("FAILED: Online backup failed: %s\n", vinox_storage_last_error());
+        sqlite3_close(raw_db);
         vinox_storage_engine_close(engine);
         return 40;
     }
     remove(backup_file);
 
     // -------------------------------------------------------------
-    // TEST 13: Phase 5.4 Versioned JSON Export & Import
+    // TEST 13: Phase 5.4 Full 7-Table Versioned JSON Export & Non-Destructive UPSERT Import
     // -------------------------------------------------------------
-    char export_json[2048] = {0};
+    char export_json[65536] = {0};
     size_t exp_req_sz = 0;
     if (vinox_storage_export_json(engine, export_json, sizeof(export_json), &exp_req_sz) != VINOX_STATUS_OK ||
-        strstr(export_json, "conversations") == NULL) {
-        printf("FAILED: JSON export failed: %s\n", vinox_storage_last_error());
+        strstr(export_json, "conversations") == NULL ||
+        strstr(export_json, "messages") == NULL ||
+        strstr(export_json, "documents") == NULL ||
+        strstr(export_json, "chunks") == NULL ||
+        strstr(export_json, "typed_relations") == NULL ||
+        strstr(export_json, "evidence") == NULL) {
+        printf("FAILED: Full 7-table JSON export failed: %s\n", vinox_storage_last_error());
+        sqlite3_close(raw_db);
         vinox_storage_engine_close(engine);
         return 41;
     }
 
-    if (vinox_storage_import_json(engine, export_json) != VINOX_STATUS_OK) {
-        printf("FAILED: JSON import failed: %s\n", vinox_storage_last_error());
+    // Test import into fresh target DB
+    const char* fresh_db_file = "test_vinox_storage_import_target.db";
+    remove(fresh_db_file);
+    vinox_storage_engine* fresh_engine = NULL;
+    if (vinox_storage_engine_open(fresh_db_file, &fresh_engine) != VINOX_STATUS_OK || !fresh_engine) {
+        printf("FAILED: Open fresh target DB for import test\n");
+        sqlite3_close(raw_db);
         vinox_storage_engine_close(engine);
         return 42;
     }
 
+    if (vinox_storage_import_json(fresh_engine, export_json) != VINOX_STATUS_OK) {
+        printf("FAILED: JSON import into fresh DB failed: %s\n", vinox_storage_last_error());
+        vinox_storage_engine_close(fresh_engine);
+        sqlite3_close(raw_db);
+        vinox_storage_engine_close(engine);
+        return 43;
+    }
+
+    // Test non-destructive UPSERT regression: Re-importing into existing engine must NOT delete messages
+    if (vinox_storage_import_json(engine, export_json) != VINOX_STATUS_OK) {
+        printf("FAILED: Non-destructive UPSERT re-import failed: %s\n", vinox_storage_last_error());
+        vinox_storage_engine_close(fresh_engine);
+        sqlite3_close(raw_db);
+        vinox_storage_engine_close(engine);
+        return 44;
+    }
+
+    // Verify messages count remained intact (NOT cascade-deleted by INSERT OR REPLACE!)
+    sqlite3_stmt* count_stmt = NULL;
+    if (sqlite3_prepare_v2(raw_db, "SELECT COUNT(*) FROM messages;", -1, &count_stmt, NULL) == SQLITE_OK) {
+        if (sqlite3_step(count_stmt) == SQLITE_ROW) {
+            int msg_cnt = sqlite3_column_int(count_stmt, 0);
+            if (msg_cnt == 0) {
+                printf("FAILED: Destructive CASCADE deletion detected during import! (message count dropped to 0)\n");
+                sqlite3_finalize(count_stmt);
+                vinox_storage_engine_close(fresh_engine);
+                sqlite3_close(raw_db);
+                vinox_storage_engine_close(engine);
+                return 45;
+            }
+        }
+        sqlite3_finalize(count_stmt);
+    }
+
+    vinox_storage_engine_close(fresh_engine);
+    remove(fresh_db_file);
+    sqlite3_close(raw_db);
     vinox_storage_engine_close(engine);
     remove(db_file);
-    printf("SUCCESS: All Phase 5.3 & Phase 5.4 Storage tests passed!\n");
+
+    printf("SUCCESS: All Issue #14 Storage Hardening tests passed!\n");
     return 0;
 }
+

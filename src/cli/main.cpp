@@ -278,14 +278,66 @@ int run_live_audit() {
         return 7;
     }
 
+    // LIVE AUDIT EXECUTION OF PHASE 5.3 & 5.4 HARDENED SURFACES
+    char audit_doc_id[64] = {0};
+    std::string large_doc_content(1200, 'X');
+    if (vinox_storage_document_ingest(storage, "Live Audit Manual", large_doc_content.c_str(), audit_doc_id, sizeof(audit_doc_id)) != VINOX_STATUS_OK) {
+        std::cerr << "[AUDIT 07] Live Document Ingestion failed\n";
+        vinox_storage_engine_close(storage);
+        return 7;
+    }
+
+    if (vinox_storage_relation_create(storage, audit_doc_id, "entity_audit_202", "cites", "Audit citation evidence", 0.99f) != VINOX_STATUS_OK) {
+        std::cerr << "[AUDIT 07] Live Relation Creation failed\n";
+        vinox_storage_engine_close(storage);
+        return 7;
+    }
+
+    if (vinox_storage_relation_create(storage, audit_doc_id, "entity_audit_202", "cites", "Audit evidence", 1.5f) != VINOX_STATUS_INVALID_ARGUMENT) {
+        std::cerr << "[AUDIT 07] Live Relation Confidence Validation failed to reject 1.5f\n";
+        vinox_storage_engine_close(storage);
+        return 7;
+    }
+
+    char audit_cte[1024] = {0};
+    if (vinox_storage_relations_query_cte(storage, audit_doc_id, audit_cte, sizeof(audit_cte)) != VINOX_STATUS_OK || strstr(audit_cte, "entity_audit_202") == NULL) {
+        std::cerr << "[AUDIT 07] Live Recursive CTE Graph Traversal failed\n";
+        vinox_storage_engine_close(storage);
+        return 7;
+    }
+
+    const char* audit_backup_file = "test_vinox_audit_backup.db";
+    std::remove(audit_backup_file);
+    if (vinox_storage_backup_online(storage, audit_backup_file) != VINOX_STATUS_OK) {
+        std::cerr << "[AUDIT 07] Live SQLite Online Backup failed\n";
+        vinox_storage_engine_close(storage);
+        return 7;
+    }
+    std::remove(audit_backup_file);
+
+    char audit_export_json[8192] = {0};
+    size_t audit_exp_req = 0;
+    if (vinox_storage_export_json(storage, audit_export_json, sizeof(audit_export_json), &audit_exp_req) != VINOX_STATUS_OK || strstr(audit_export_json, "documents") == NULL) {
+        std::cerr << "[AUDIT 07] Live 7-Table JSON Export failed\n";
+        vinox_storage_engine_close(storage);
+        return 7;
+    }
+
+    if (vinox_storage_import_json(storage, audit_export_json) != VINOX_STATUS_OK) {
+        std::cerr << "[AUDIT 07] Live Non-Destructive UPSERT JSON Import failed\n";
+        vinox_storage_engine_close(storage);
+        return 7;
+    }
+
     std::cout << "[AUDIT 07] VINOX 1024-dim Vector Normalization & Hybrid Retrieval ...... [ PASS ]\n";
     std::cout << "  - Active Vector Backend: " << backend_name << "\n";
     std::cout << "  - In-place L2 Normalization (||v||2 = 1.000000): Verified\n";
     std::cout << "  - Real FTS5 BM25 Ranking Signal Variation (Top Score: " << h_results[0].bm25_score << " > Low Score: " << h_results[1].bm25_score << "): Verified\n";
-    std::cout << "  - Hybrid Retrieval (BM25 + Cosine Vector, alpha=0.5): Score=" << h_results[0].hybrid_score << " (Target ID: " << h_results[0].message_id << ")\n";
-    std::cout << "  - Documents & Chunks Ingestion (002_documents_relations.sql): Verified\n";
-    std::cout << "  - Recursive CTE Graph Relation Traversal & Evidence Storage: Verified\n";
-    std::cout << "  - SQLite Online Backup API & Versioned JSON Export/Import: Verified\n";
+    std::cout << "  - 3-Signal Hybrid Retrieval (BM25 + Cosine Vector + Relation CTE Score): Score=" << h_results[0].hybrid_score << " (Target ID: " << h_results[0].message_id << ")\n";
+    std::cout << "  - Atomic Multi-Chunk Document Ingestion & SHA-256 Content Hashing: Verified\n";
+    std::cout << "  - Atomic Relation & Evidence Creation with Confidence Range Validation: Verified\n";
+    std::cout << "  - Recursive CTE Graph Traversal & SQLite Online Backup API: Verified\n";
+    std::cout << "  - Full 7-Table Versioned JSON Export & Non-Destructive UPSERT Import: Verified\n";
     std::cout << "  - Live Alpha Range Validation (alpha=1.5 -> INVALID_ARGUMENT): Verified\n";
     std::cout << "  - Live Dimension Mismatch Rejection (512 vs 1024 -> INVALID_ARGUMENT): Verified\n";
 

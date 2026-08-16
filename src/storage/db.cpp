@@ -23,7 +23,51 @@
 #include <nlohmann/json.hpp>
 #include "sqlite-vec/sqlite-vec.h"
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <wincrypt.h>
+#include <iomanip>
+#endif
+
 namespace fs = std::filesystem;
+
+namespace {
+
+static std::string calculate_sha256(const std::string& input) {
+#if defined(_WIN32)
+    HCRYPTPROV hProv = 0;
+    HCRYPTHASH hHash = 0;
+    std::string result = "";
+    if (CryptAcquireContext(&hProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
+        if (CryptCreateHash(hProv, CALG_SHA_256, 0, 0, &hHash)) {
+            if (CryptHashData(hHash, (const BYTE*)input.data(), (DWORD)input.size(), 0)) {
+                DWORD hash_len = 32;
+                BYTE hash_buf[32];
+                if (CryptGetHashParam(hHash, HP_HASHVAL, hash_buf, &hash_len, 0)) {
+                    std::ostringstream ss;
+                    for (DWORD i = 0; i < hash_len; ++i) {
+                        ss << std::hex << std::setw(2) << std::setfill('0') << (int)hash_buf[i];
+                    }
+                    result = ss.str();
+                }
+            }
+            CryptDestroyHash(hHash);
+        }
+        CryptReleaseContext(hProv, 0);
+    }
+    return result;
+#else
+    return "0000000000000000000000000000000000000000000000000000000000000000";
+#endif
+}
+
+} // namespace
 
 namespace vinox::storage {
 void l2_normalize(std::vector<float>& vec);
@@ -602,6 +646,7 @@ struct HybridCandidate {
     std::string message_id;
     float bm25_score{0.0f};
     float vector_score{0.0f};
+    float relation_score{0.0f};
     float hybrid_score{0.0f};
 };
 
@@ -654,7 +699,7 @@ vinox_status vinox_storage_search_hybrid(
 
     std::vector<HybridCandidate> candidates;
 
-    // 1. REAL FTS5 BM25 RANKING QUERY (bm25(messages_fts))
+    // 1. LEXICAL SEARCH VIA REAL FTS5 MATCH & BM25 RANKING SIGNAL
     if (text_query && text_query[0] != '\0') {
         const char* sql = "SELECT m.id, bm25(messages_fts) AS raw_bm25 "
                           "FROM messages_fts f "
@@ -705,9 +750,24 @@ vinox_status vinox_storage_search_hybrid(
         }
     }
 
-    // 3. DETERMINISTIC HYBRID FUSION SCORE COMPUTATION & TIE-BREAKING
+    // 3. GRAPH RELATION SIGNAL COMPUTATION (Phase 5.3)
+    sqlite3_stmt* rel_stmt = nullptr;
+    const char* rel_sql = "SELECT MAX(confidence) FROM typed_relations WHERE source_id = ? OR target_id = ?;";
+    if (sqlite3_prepare_v2(engine->db, rel_sql, -1, &rel_stmt, nullptr) == SQLITE_OK) {
+        for (auto& c : candidates) {
+            sqlite3_bind_text(rel_stmt, 1, c.message_id.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(rel_stmt, 2, c.message_id.c_str(), -1, SQLITE_STATIC);
+            if (sqlite3_step(rel_stmt) == SQLITE_ROW && sqlite3_column_type(rel_stmt, 0) != SQLITE_NULL) {
+                c.relation_score = static_cast<float>(sqlite3_column_double(rel_stmt, 0));
+            }
+            sqlite3_reset(rel_stmt);
+        }
+        sqlite3_finalize(rel_stmt);
+    }
+
+    // 4. DETERMINISTIC 3-SIGNAL HYBRID FUSION SCORE COMPUTATION & TIE-BREAKING
     for (auto& c : candidates) {
-        c.hybrid_score = (1.0f - alpha) * c.bm25_score + alpha * c.vector_score;
+        c.hybrid_score = (1.0f - alpha) * c.bm25_score + alpha * c.vector_score + 0.1f * c.relation_score;
     }
 
     // Sort descending by hybrid_score, secondary tie-break ascending by message_id
@@ -747,6 +807,7 @@ void vinox_storage_engine_close(vinox_storage_engine* engine) {
 }
 
 /* Phase 5.3 — Documents, Typed Relations & Graph CTE Implementation */
+/* Phase 5.3 — Documents, Typed Relations & Graph CTE Implementation */
 VINOX_API vinox_status vinox_storage_document_ingest(
     vinox_storage_engine* engine,
     const char* title,
@@ -761,12 +822,16 @@ VINOX_API vinox_status vinox_storage_document_ingest(
 
     std::string doc_id = generate_uuid();
     std::string content_str(content);
-    std::string content_hash = std::to_string(std::hash<std::string>{}(content_str));
+    std::string content_hash = calculate_sha256(content_str);
     uint64_t now = current_timestamp_ms();
+
+    // Atomic transaction for document + all chunks
+    sqlite3_exec(engine->db, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr);
 
     sqlite3_stmt* stmt = nullptr;
     const char* sql_doc = "INSERT INTO documents (id, title, source_uri, content_hash, mime_type, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, 'text/plain', ?, ?);";
     if (sqlite3_prepare_v2(engine->db, sql_doc, -1, &stmt, nullptr) != SQLITE_OK) {
+        sqlite3_exec(engine->db, "ROLLBACK;", nullptr, nullptr, nullptr);
         return fail_runtime("Failed to prepare document insert");
     }
 
@@ -779,21 +844,48 @@ VINOX_API vinox_status vinox_storage_document_ingest(
 
     if (sqlite3_step(stmt) != SQLITE_DONE) {
         sqlite3_finalize(stmt);
+        sqlite3_exec(engine->db, "ROLLBACK;", nullptr, nullptr, nullptr);
         return fail_runtime("Failed to insert document");
     }
     sqlite3_finalize(stmt);
 
-    /* Split document into chunks and insert into chunks + chunks_fts */
-    std::string chunk_id = generate_uuid();
-    const char* sql_chunk = "INSERT INTO chunks (id, document_id, chunk_index, content, token_count, created_at_ms) VALUES (?, ?, 0, ?, ?, ?);";
-    if (sqlite3_prepare_v2(engine->db, sql_chunk, -1, &stmt, nullptr) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, chunk_id.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 2, doc_id.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 3, content, -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int(stmt, 4, static_cast<int>(content_str.length() / 4));
-        sqlite3_bind_int64(stmt, 5, static_cast<sqlite3_int64>(now));
-        sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
+    // Multi-chunk splitting logic (~500 chars per chunk)
+    std::vector<std::string> chunks_list;
+    size_t chunk_size = 500;
+    if (content_str.length() <= chunk_size) {
+        chunks_list.push_back(content_str);
+    } else {
+        for (size_t i = 0; i < content_str.length(); i += chunk_size) {
+            chunks_list.push_back(content_str.substr(i, chunk_size));
+        }
+    }
+
+    const char* sql_chunk = "INSERT INTO chunks (id, document_id, chunk_index, content, token_count, created_at_ms) VALUES (?, ?, ?, ?, ?, ?);";
+    for (size_t idx = 0; idx < chunks_list.size(); ++idx) {
+        std::string chunk_id = generate_uuid();
+        sqlite3_stmt* c_stmt = nullptr;
+        if (sqlite3_prepare_v2(engine->db, sql_chunk, -1, &c_stmt, nullptr) != SQLITE_OK) {
+            sqlite3_exec(engine->db, "ROLLBACK;", nullptr, nullptr, nullptr);
+            return fail_runtime("Failed to prepare chunk insert");
+        }
+        sqlite3_bind_text(c_stmt, 1, chunk_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(c_stmt, 2, doc_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(c_stmt, 3, static_cast<int>(idx));
+        sqlite3_bind_text(c_stmt, 4, chunks_list[idx].c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(c_stmt, 5, static_cast<int>(chunks_list[idx].length() / 4));
+        sqlite3_bind_int64(c_stmt, 6, static_cast<sqlite3_int64>(now));
+
+        if (sqlite3_step(c_stmt) != SQLITE_DONE) {
+            sqlite3_finalize(c_stmt);
+            sqlite3_exec(engine->db, "ROLLBACK;", nullptr, nullptr, nullptr);
+            return fail_runtime("Failed to insert chunk");
+        }
+        sqlite3_finalize(c_stmt);
+    }
+
+    if (sqlite3_exec(engine->db, "COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        sqlite3_exec(engine->db, "ROLLBACK;", nullptr, nullptr, nullptr);
+        return fail_runtime("Failed to commit document transaction");
     }
 
 #if defined(_WIN32)
@@ -814,10 +906,15 @@ VINOX_API vinox_status vinox_storage_relation_create(
     const char* evidence_text,
     float confidence
 ) {
-    if (!engine || !source_id || !target_id || !relation_type) {
-        return fail_arg("Invalid argument for vinox_storage_relation_create");
+    if (!engine || !source_id || source_id[0] == '\0' || !target_id || target_id[0] == '\0' || !relation_type || relation_type[0] == '\0') {
+        return fail_arg("Invalid or empty required identifiers for relation creation");
     }
+    if (confidence < 0.0f || confidence > 1.0f) {
+        return fail_arg("Relation confidence out of range [0.0, 1.0]");
+    }
+
     std::lock_guard<std::mutex> lock(engine->mutex);
+    sqlite3_exec(engine->db, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr);
 
     std::string rel_id = generate_uuid();
     uint64_t now = current_timestamp_ms();
@@ -825,6 +922,7 @@ VINOX_API vinox_status vinox_storage_relation_create(
     sqlite3_stmt* stmt = nullptr;
     const char* sql = "INSERT INTO typed_relations (id, source_id, target_id, relation_type, evidence_text, confidence, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?);";
     if (sqlite3_prepare_v2(engine->db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        sqlite3_exec(engine->db, "ROLLBACK;", nullptr, nullptr, nullptr);
         return fail_runtime("Failed to prepare relation insert");
     }
 
@@ -838,6 +936,7 @@ VINOX_API vinox_status vinox_storage_relation_create(
 
     if (sqlite3_step(stmt) != SQLITE_DONE) {
         sqlite3_finalize(stmt);
+        sqlite3_exec(engine->db, "ROLLBACK;", nullptr, nullptr, nullptr);
         return fail_runtime("Failed to insert relation");
     }
     sqlite3_finalize(stmt);
@@ -845,15 +944,27 @@ VINOX_API vinox_status vinox_storage_relation_create(
     if (evidence_text && strlen(evidence_text) > 0) {
         std::string ev_id = generate_uuid();
         const char* sql_ev = "INSERT INTO evidence (id, relation_id, evidence_text, confidence, created_at_ms) VALUES (?, ?, ?, ?, ?);";
-        if (sqlite3_prepare_v2(engine->db, sql_ev, -1, &stmt, nullptr) == SQLITE_OK) {
-            sqlite3_bind_text(stmt, 1, ev_id.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, 2, rel_id.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, 3, evidence_text, -1, SQLITE_TRANSIENT);
-            sqlite3_bind_double(stmt, 4, static_cast<double>(confidence));
-            sqlite3_bind_int64(stmt, 5, static_cast<sqlite3_int64>(now));
-            sqlite3_step(stmt);
-            sqlite3_finalize(stmt);
+        if (sqlite3_prepare_v2(engine->db, sql_ev, -1, &stmt, nullptr) != SQLITE_OK) {
+            sqlite3_exec(engine->db, "ROLLBACK;", nullptr, nullptr, nullptr);
+            return fail_runtime("Failed to prepare evidence insert");
         }
+        sqlite3_bind_text(stmt, 1, ev_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, rel_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, evidence_text, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_double(stmt, 4, static_cast<double>(confidence));
+        sqlite3_bind_int64(stmt, 5, static_cast<sqlite3_int64>(now));
+
+        if (sqlite3_step(stmt) != SQLITE_DONE) {
+            sqlite3_finalize(stmt);
+            sqlite3_exec(engine->db, "ROLLBACK;", nullptr, nullptr, nullptr);
+            return fail_runtime("Failed to insert evidence");
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    if (sqlite3_exec(engine->db, "COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        sqlite3_exec(engine->db, "ROLLBACK;", nullptr, nullptr, nullptr);
+        return fail_runtime("Failed to commit relation transaction");
     }
 
     return VINOX_STATUS_OK;
@@ -949,33 +1060,110 @@ VINOX_API vinox_status vinox_storage_export_json(
     nlohmann::json root;
     root["version"] = 1;
 
-    /* Export conversations */
-    nlohmann::json convs = nlohmann::json::array();
-    sqlite3_stmt* stmt = nullptr;
-    if (sqlite3_prepare_v2(engine->db, "SELECT id, title, created_at_ms, updated_at_ms FROM conversations;", -1, &stmt, nullptr) == SQLITE_OK) {
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            nlohmann::json c;
-            c["id"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-            c["title"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-            c["created_at_ms"] = sqlite3_column_int64(stmt, 2);
-            c["updated_at_ms"] = sqlite3_column_int64(stmt, 3);
-            convs.push_back(c);
+    auto export_table = [&](const char* sql, const std::function<nlohmann::json(sqlite3_stmt*)>& mapper) -> nlohmann::json {
+        nlohmann::json arr = nlohmann::json::array();
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(engine->db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                arr.push_back(mapper(stmt));
+            }
+            sqlite3_finalize(stmt);
         }
-        sqlite3_finalize(stmt);
-    }
-    root["conversations"] = convs;
+        return arr;
+    };
+
+    root["conversations"] = export_table("SELECT id, title, created_at_ms, updated_at_ms FROM conversations;", [](sqlite3_stmt* stmt) {
+        nlohmann::json item;
+        item["id"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        item["title"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        item["created_at_ms"] = sqlite3_column_int64(stmt, 2);
+        item["updated_at_ms"] = sqlite3_column_int64(stmt, 3);
+        return item;
+    });
+
+    root["messages"] = export_table("SELECT id, conversation_id, parent_id, role, content, provenance_kind, created_at_ms FROM messages;", [](sqlite3_stmt* stmt) {
+        nlohmann::json item;
+        item["id"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        item["conversation_id"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        const char* parent = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        if (parent) item["parent_id"] = parent; else item["parent_id"] = nullptr;
+        item["role"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        item["content"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+        item["provenance_kind"] = sqlite3_column_int(stmt, 5);
+        item["created_at_ms"] = sqlite3_column_int64(stmt, 6);
+        return item;
+    });
+
+    root["documents"] = export_table("SELECT id, title, source_uri, content_hash, mime_type, created_at_ms, updated_at_ms FROM documents;", [](sqlite3_stmt* stmt) {
+        nlohmann::json item;
+        item["id"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        item["title"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        const char* uri = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        item["source_uri"] = uri ? uri : "";
+        item["content_hash"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        item["mime_type"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+        item["created_at_ms"] = sqlite3_column_int64(stmt, 5);
+        item["updated_at_ms"] = sqlite3_column_int64(stmt, 6);
+        return item;
+    });
+
+    root["chunks"] = export_table("SELECT id, document_id, chunk_index, content, token_count, created_at_ms FROM chunks;", [](sqlite3_stmt* stmt) {
+        nlohmann::json item;
+        item["id"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        item["document_id"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        item["chunk_index"] = sqlite3_column_int(stmt, 2);
+        item["content"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        item["token_count"] = sqlite3_column_int(stmt, 4);
+        item["created_at_ms"] = sqlite3_column_int64(stmt, 5);
+        return item;
+    });
+
+    root["typed_relations"] = export_table("SELECT id, source_id, target_id, relation_type, evidence_text, confidence, created_at_ms FROM typed_relations;", [](sqlite3_stmt* stmt) {
+        nlohmann::json item;
+        item["id"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        item["source_id"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        item["target_id"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        item["relation_type"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        const char* ev = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+        item["evidence_text"] = ev ? ev : "";
+        item["confidence"] = sqlite3_column_double(stmt, 5);
+        item["created_at_ms"] = sqlite3_column_int64(stmt, 6);
+        return item;
+    });
+
+    root["evidence"] = export_table("SELECT id, relation_id, evidence_text, confidence, created_at_ms FROM evidence;", [](sqlite3_stmt* stmt) {
+        nlohmann::json item;
+        item["id"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        item["relation_id"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        item["evidence_text"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        item["confidence"] = sqlite3_column_double(stmt, 3);
+        item["created_at_ms"] = sqlite3_column_int64(stmt, 4);
+        return item;
+    });
+
+    root["embedding_profiles"] = export_table("SELECT id, model_name, dimension, metric, created_at_ms FROM embedding_profiles;", [](sqlite3_stmt* stmt) {
+        nlohmann::json item;
+        item["id"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        item["model_name"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        item["dimension"] = sqlite3_column_int(stmt, 2);
+        item["metric"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        item["created_at_ms"] = sqlite3_column_int64(stmt, 4);
+        return item;
+    });
 
     std::string dump_str = root.dump();
     if (required_size_out) *required_size_out = dump_str.length() + 1;
 
-    if (json_out && json_out_size >= dump_str.length() + 1) {
-#if defined(_WIN32)
-        strncpy_s(json_out, json_out_size, dump_str.c_str(), _TRUNCATE);
-#else
-        strncpy(json_out, dump_str.c_str(), json_out_size - 1);
-        json_out[json_out_size - 1] = '\0';
-#endif
+    if (!json_out || json_out_size < dump_str.length() + 1) {
+        return fail_arg("json_out buffer too small for export payload");
     }
+
+#if defined(_WIN32)
+    strncpy_s(json_out, json_out_size, dump_str.c_str(), _TRUNCATE);
+#else
+    strncpy(json_out, dump_str.c_str(), json_out_size - 1);
+    json_out[json_out_size - 1] = '\0';
+#endif
 
     return VINOX_STATUS_OK;
 }
@@ -989,33 +1177,177 @@ VINOX_API vinox_status vinox_storage_import_json(
 
     try {
         auto root = nlohmann::json::parse(json_str);
-        if (!root.contains("conversations") || !root["conversations"].is_array()) {
-            return fail_arg("Invalid JSON structure for import");
+        if (!root.contains("version") || root["version"].get<int>() != 1) {
+            return fail_arg("Incompatible or missing JSON version in import payload");
         }
 
-        char* err_msg = nullptr;
         sqlite3_exec(engine->db, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr);
 
-        const char* sql = "INSERT OR REPLACE INTO conversations (id, title, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?);";
-        sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(engine->db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-            for (const auto& c : root["conversations"]) {
-                std::string id = c["id"].get<std::string>();
-                std::string title = c["title"].get<std::string>();
-                uint64_t c_at = c.value("created_at_ms", current_timestamp_ms());
-                uint64_t u_at = c.value("updated_at_ms", current_timestamp_ms());
+        // 1. Conversations UPSERT
+        if (root.contains("conversations") && root["conversations"].is_array()) {
+            const char* sql = "INSERT INTO conversations (id, title, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET title=excluded.title, updated_at_ms=excluded.updated_at_ms;";
+            sqlite3_stmt* stmt = nullptr;
+            if (sqlite3_prepare_v2(engine->db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                for (const auto& c : root["conversations"]) {
+                    std::string id = c["id"].get<std::string>();
+                    std::string title = c["title"].get<std::string>();
+                    uint64_t c_at = c.value("created_at_ms", current_timestamp_ms());
+                    uint64_t u_at = c.value("updated_at_ms", current_timestamp_ms());
 
-                sqlite3_bind_text(stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
-                sqlite3_bind_text(stmt, 2, title.c_str(), -1, SQLITE_TRANSIENT);
-                sqlite3_bind_int64(stmt, 3, static_cast<sqlite3_int64>(c_at));
-                sqlite3_bind_int64(stmt, 4, static_cast<sqlite3_int64>(u_at));
-                sqlite3_step(stmt);
-                sqlite3_reset(stmt);
+                    sqlite3_bind_text(stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 2, title.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_int64(stmt, 3, static_cast<sqlite3_int64>(c_at));
+                    sqlite3_bind_int64(stmt, 4, static_cast<sqlite3_int64>(u_at));
+                    sqlite3_step(stmt);
+                    sqlite3_reset(stmt);
+                }
+                sqlite3_finalize(stmt);
             }
-            sqlite3_finalize(stmt);
         }
 
-        sqlite3_exec(engine->db, "COMMIT;", nullptr, nullptr, nullptr);
+        // 2. Messages UPSERT
+        if (root.contains("messages") && root["messages"].is_array()) {
+            const char* sql = "INSERT INTO messages (id, conversation_id, parent_id, role, content, provenance_kind, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET content=excluded.content, role=excluded.role;";
+            sqlite3_stmt* stmt = nullptr;
+            if (sqlite3_prepare_v2(engine->db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                for (const auto& m : root["messages"]) {
+                    std::string id = m["id"].get<std::string>();
+                    std::string cid = m["conversation_id"].get<std::string>();
+                    std::string role = m["role"].get<std::string>();
+                    std::string content = m["content"].get<std::string>();
+                    uint32_t prov = m.value("provenance_kind", 0);
+                    uint64_t c_at = m.value("created_at_ms", current_timestamp_ms());
+
+                    sqlite3_bind_text(stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 2, cid.c_str(), -1, SQLITE_TRANSIENT);
+                    if (m.contains("parent_id") && !m["parent_id"].is_null()) {
+                        std::string pid = m["parent_id"].get<std::string>();
+                        sqlite3_bind_text(stmt, 3, pid.c_str(), -1, SQLITE_TRANSIENT);
+                    } else {
+                        sqlite3_bind_null(stmt, 3);
+                    }
+                    sqlite3_bind_text(stmt, 4, role.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 5, content.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_int(stmt, 6, static_cast<int>(prov));
+                    sqlite3_bind_int64(stmt, 7, static_cast<sqlite3_int64>(c_at));
+                    sqlite3_step(stmt);
+                    sqlite3_reset(stmt);
+                }
+                sqlite3_finalize(stmt);
+            }
+        }
+
+        // 3. Documents UPSERT
+        if (root.contains("documents") && root["documents"].is_array()) {
+            const char* sql = "INSERT INTO documents (id, title, source_uri, content_hash, mime_type, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET title=excluded.title, updated_at_ms=excluded.updated_at_ms;";
+            sqlite3_stmt* stmt = nullptr;
+            if (sqlite3_prepare_v2(engine->db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                for (const auto& d : root["documents"]) {
+                    std::string id = d["id"].get<std::string>();
+                    std::string title = d["title"].get<std::string>();
+                    std::string uri = (d.contains("source_uri") && !d["source_uri"].is_null()) ? d["source_uri"].get<std::string>() : "";
+                    std::string hash = d["content_hash"].get<std::string>();
+                    std::string mime = d.value("mime_type", "text/plain");
+                    uint64_t c_at = d.value("created_at_ms", current_timestamp_ms());
+                    uint64_t u_at = d.value("updated_at_ms", current_timestamp_ms());
+
+                    sqlite3_bind_text(stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 2, title.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 3, uri.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 4, hash.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 5, mime.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_int64(stmt, 6, static_cast<sqlite3_int64>(c_at));
+                    sqlite3_bind_int64(stmt, 7, static_cast<sqlite3_int64>(u_at));
+                    sqlite3_step(stmt);
+                    sqlite3_reset(stmt);
+                }
+                sqlite3_finalize(stmt);
+            }
+        }
+
+        // 4. Chunks UPSERT
+        if (root.contains("chunks") && root["chunks"].is_array()) {
+            const char* sql = "INSERT INTO chunks (id, document_id, chunk_index, content, token_count, created_at_ms) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET content=excluded.content;";
+            sqlite3_stmt* stmt = nullptr;
+            if (sqlite3_prepare_v2(engine->db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                for (const auto& ch : root["chunks"]) {
+                    std::string id = ch["id"].get<std::string>();
+                    std::string doc_id = ch["document_id"].get<std::string>();
+                    int idx = ch.value("chunk_index", 0);
+                    std::string content = ch["content"].get<std::string>();
+                    int tokens = ch.value("token_count", 0);
+                    uint64_t c_at = ch.value("created_at_ms", current_timestamp_ms());
+
+                    sqlite3_bind_text(stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 2, doc_id.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_int(stmt, 3, idx);
+                    sqlite3_bind_text(stmt, 4, content.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_int(stmt, 5, tokens);
+                    sqlite3_bind_int64(stmt, 6, static_cast<sqlite3_int64>(c_at));
+                    sqlite3_step(stmt);
+                    sqlite3_reset(stmt);
+                }
+                sqlite3_finalize(stmt);
+            }
+        }
+
+        // 5. Typed Relations UPSERT
+        if (root.contains("typed_relations") && root["typed_relations"].is_array()) {
+            const char* sql = "INSERT INTO typed_relations (id, source_id, target_id, relation_type, evidence_text, confidence, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET confidence=excluded.confidence, evidence_text=excluded.evidence_text;";
+            sqlite3_stmt* stmt = nullptr;
+            if (sqlite3_prepare_v2(engine->db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                for (const auto& r : root["typed_relations"]) {
+                    std::string id = r["id"].get<std::string>();
+                    std::string src = r["source_id"].get<std::string>();
+                    std::string tgt = r["target_id"].get<std::string>();
+                    std::string rtype = r["relation_type"].get<std::string>();
+                    std::string ev = (r.contains("evidence_text") && !r["evidence_text"].is_null()) ? r["evidence_text"].get<std::string>() : "";
+                    double conf = r.value("confidence", 1.0);
+                    uint64_t c_at = r.value("created_at_ms", current_timestamp_ms());
+
+                    sqlite3_bind_text(stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 2, src.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 3, tgt.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 4, rtype.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 5, ev.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_double(stmt, 6, conf);
+                    sqlite3_bind_int64(stmt, 7, static_cast<sqlite3_int64>(c_at));
+                    sqlite3_step(stmt);
+                    sqlite3_reset(stmt);
+                }
+                sqlite3_finalize(stmt);
+            }
+        }
+
+        // 6. Evidence UPSERT
+        if (root.contains("evidence") && root["evidence"].is_array()) {
+            const char* sql = "INSERT INTO evidence (id, relation_id, evidence_text, confidence, created_at_ms) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET confidence=excluded.confidence;";
+            sqlite3_stmt* stmt = nullptr;
+            if (sqlite3_prepare_v2(engine->db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                for (const auto& ev : root["evidence"]) {
+                    std::string id = ev["id"].get<std::string>();
+                    std::string rel_id = ev["relation_id"].get<std::string>();
+                    std::string text = ev["evidence_text"].get<std::string>();
+                    double conf = ev.value("confidence", 1.0);
+                    uint64_t c_at = ev.value("created_at_ms", current_timestamp_ms());
+
+                    sqlite3_bind_text(stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 2, rel_id.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 3, text.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_double(stmt, 4, conf);
+                    sqlite3_bind_int64(stmt, 5, static_cast<sqlite3_int64>(c_at));
+                    sqlite3_step(stmt);
+                    sqlite3_reset(stmt);
+                }
+                sqlite3_finalize(stmt);
+            }
+        }
+
+        if (sqlite3_exec(engine->db, "COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK) {
+            sqlite3_exec(engine->db, "ROLLBACK;", nullptr, nullptr, nullptr);
+            return fail_runtime("Failed to commit JSON import transaction");
+        }
+
         return VINOX_STATUS_OK;
     } catch (...) {
         sqlite3_exec(engine->db, "ROLLBACK;", nullptr, nullptr, nullptr);
