@@ -44,8 +44,7 @@ static std::atomic<bool> g_interrupted{false};
 
 void signal_handler(int sig) {
     if (sig == SIGINT) {
-        g_interrupted.store(true);
-        std::cout << "\n[CANCELLED] Operation interrupted by user signal (SIGINT).\n";
+        g_interrupted.store(true); // Signal-safe atomic store ONLY
     }
 }
 
@@ -236,7 +235,6 @@ struct CliSession {
     std::string overlay_dir{".cli_sandbox_overlay"};
     std::string target_dir{".cli_target_workspace"};
     std::string conversation_id;
-    std::vector<std::pair<std::string, std::string>> conversation_history;
     bool json_mode{false};
 };
 
@@ -272,8 +270,13 @@ void handle_slash_command(const std::string& line, CliSession& session, bool& sh
         if (out.is_open()) {
             out << "VINOX CLI Session Transcript\n";
             out << "Conversation ID: " << session.conversation_id << "\n";
-            for (const auto& msg : session.conversation_history) {
-                out << msg.first << ": " << msg.second << "\n";
+            std::vector<vinox_chat_message> history(64);
+            size_t history_count = 0;
+            if (session.storage) {
+                vinox_storage_get_conversation_messages(session.storage, session.conversation_id.c_str(), history.data(), history.size(), &history_count);
+            }
+            for (size_t i = 0; i < history_count; ++i) {
+                out << history[i].role << ": " << history[i].content << "\n";
             }
             out.close();
             if (session.json_mode) {
@@ -467,7 +470,27 @@ void handle_slash_command(const std::string& line, CliSession& session, bool& sh
                         break;
                     }
 
-                    vinox_status st = vinox_agent_run_step(session.current_run);
+                    // True In-Flight Agent Cancellation via Background Worker Thread (Blocker 1)
+                    struct StepExecResult {
+                        vinox_status st{VINOX_STATUS_OK};
+                    } step_res;
+
+                    std::atomic<bool> step_running{true};
+                    std::thread step_worker([&]() {
+                        step_res.st = vinox_agent_run_step(session.current_run);
+                        step_running.store(false);
+                    });
+
+                    while (step_running.load()) {
+                        if (g_interrupted.load()) {
+                            vinox_agent_run_cancel(session.current_run);
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    }
+
+                    if (step_worker.joinable()) step_worker.join();
+
+                    vinox_status st = step_res.st;
                     if (st == VINOX_STATUS_OK) {
                         int completed = vinox_agent_run_get_completed_steps(session.current_run);
                         if (session.json_mode) {
@@ -476,7 +499,6 @@ void handle_slash_command(const std::string& line, CliSession& session, bool& sh
                             std::cout << "  - Step completed. Total steps: " << completed << "\n";
                         }
 
-                        // Check if run completed right after the step!
                         if (vinox_agent_run_get_status(session.current_run) == VINOX_PLAN_STATUS_COMPLETED) {
                             run_failed = false;
                             break;
@@ -488,7 +510,9 @@ void handle_slash_command(const std::string& line, CliSession& session, bool& sh
                         }
 
                         run_failed = true;
-                        if (st == VINOX_STATUS_PERMISSION_DENIED) {
+                        if (g_interrupted.load() || vinox_agent_run_get_status(session.current_run) == VINOX_PLAN_STATUS_CANCELLED) {
+                            failure_reason = "CANCELLED";
+                        } else if (st == VINOX_STATUS_PERMISSION_DENIED) {
                             failure_reason = "PERMISSION_DENIED";
                         } else if (st == VINOX_STATUS_INVALID_STATE) {
                             failure_reason = "MISSING_EXECUTOR";
@@ -588,7 +612,6 @@ int run_live_audit() {
     std::cout << "                    VINOX SYSTEM ARCHITECTURE LIVE AUDIT\n";
     std::cout << "================================================================================\n";
 
-    // AUDIT 01: Core C-ABI
     vinox_version_info version{};
     version.struct_size = sizeof(version);
     if (vinox_get_version(&version) != VINOX_STATUS_OK) {
@@ -598,7 +621,6 @@ int run_live_audit() {
     std::cout << "[AUDIT 01] VINOX Core C-ABI Invariants ................................ [ PASS ]\n";
     std::cout << "  - Core Version: " << version.version_string << " (ABI Version: " << version.abi_version << ")\n";
 
-    // AUDIT 02: Serving Model Registry
     vinox_model_registry* registry = nullptr;
     if (vinox_model_registry_create(&registry) != VINOX_STATUS_OK || !registry) {
         std::cerr << "[AUDIT 02] VINOX Serving Model Registry ............................... [ FAIL ]\n";
@@ -609,12 +631,10 @@ int run_live_audit() {
     vinox_model_registry_destroy(registry);
     std::cout << "[AUDIT 02] VINOX Serving Model Registry (nlohmann/json) ............... [ PASS ]\n";
 
-    // AUDIT 03: OpenVINO Engine Interface
     const char* ov_err = vinox_openvino_last_error();
     std::cout << "[AUDIT 03] VINOX OpenVINO GenAI Engine Interface ...................... [ PASS ]\n";
     std::cout << "  - OpenVINO C-ABI Symbol Export: Verified (" << (ov_err ? ov_err : "Ready") << ")\n";
 
-    // AUDIT 04: Storage SQLite
     const char* audit_db_file = "vinox_audit_live.db";
     std::remove(audit_db_file);
     vinox_storage_engine* storage = nullptr;
@@ -624,7 +644,6 @@ int run_live_audit() {
     }
     std::cout << "[AUDIT 04] VINOX Storage Engine SQLite Invariants ..................... [ PASS ]\n";
 
-    // AUDIT 05: Agent Engine
     vinox_mode_controller* controller = vinox_mode_controller_create();
     vinox_mode_controller_set_mode(controller, VINOX_MODE_AGENT);
     if (vinox_mode_controller_can_execute_mutating_tool(controller) != 1) {
@@ -733,7 +752,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Load OpenVINO LLM pipeline if model path is provided
     if (!arguments.model_path.empty()) {
         vinox_model_options model_options{};
         model_options.struct_size = sizeof(model_options);
@@ -776,6 +794,11 @@ int main(int argc, char* argv[]) {
         while (!should_exit) {
             if (g_interrupted.load()) {
                 g_interrupted.store(false);
+                if (session.json_mode) {
+                    print_json_event("cli.interrupted", "CANCELLED", {{"reason", "SIGINT"}});
+                } else {
+                    std::cout << "\n[CANCELLED] Operation interrupted by user signal (SIGINT).\n";
+                }
             }
 
             if (!session.json_mode) {
@@ -792,7 +815,7 @@ int main(int argc, char* argv[]) {
             if (line[0] == '/') {
                 handle_slash_command(line, session, should_exit);
             } else {
-                // Canonical Multi-Turn Session Chat & Persistence (Criteria A & F)
+                // Canonical Multi-Turn Session Chat via Storage Engine Ownership (Blocker 3)
                 vinox_message_info user_msg{};
                 user_msg.struct_size = sizeof(user_msg);
                 user_msg.conversation_id = session.conversation_id.c_str();
@@ -800,17 +823,22 @@ int main(int argc, char* argv[]) {
                 user_msg.content = line.c_str();
                 user_msg.provenance_kind = VINOX_PROVENANCE_SOURCE_LITERAL;
                 vinox_storage_add_message(session.storage, &user_msg, nullptr);
-                session.conversation_history.push_back({"user", line});
+
+                std::vector<vinox_chat_message> history(64);
+                size_t history_count = 0;
+                vinox_storage_get_conversation_messages(session.storage, session.conversation_id.c_str(), history.data(), history.size(), &history_count);
 
                 if (session.model) {
                     if (!session.json_mode) std::cout << "[ASSISTANT] ";
 
                     std::string multi_turn_prompt = "You are a helpful AI assistant in an interactive session.\n";
-                    for (const auto& msg : session.conversation_history) {
-                        if (msg.first == "user") {
-                            multi_turn_prompt += "User: " + msg.second + "\n";
+                    for (size_t idx = 0; idx < history_count; ++idx) {
+                        std::string r(history[idx].role);
+                        std::string c(history[idx].content);
+                        if (r == "user") {
+                            multi_turn_prompt += "User: " + c + "\n";
                         } else {
-                            multi_turn_prompt += "Assistant: " + msg.second + "\n";
+                            multi_turn_prompt += "Assistant: " + c + "\n";
                         }
                     }
                     multi_turn_prompt += "Assistant:";
@@ -827,8 +855,6 @@ int main(int argc, char* argv[]) {
 
                     vinox_status gen_st = vinox_model_generate(session.model, &gen_opts, write_text_callback, &stream_ctx);
                     if (gen_st == VINOX_STATUS_OK) {
-                        session.conversation_history.push_back({"assistant", stream_ctx.accumulated_text});
-
                         vinox_message_info asst_msg{};
                         asst_msg.struct_size = sizeof(asst_msg);
                         asst_msg.conversation_id = session.conversation_id.c_str();
@@ -851,9 +877,9 @@ int main(int argc, char* argv[]) {
                     }
                 } else {
                     if (session.json_mode) {
-                        print_json_event("cli.response", "OK", {{"prompt", line}, {"mode", arguments.mode}, {"persistence", "STORED"}, {"llm", "OFFLINE"}});
+                        print_json_event("cli.response", "OK", {{"prompt", line}, {"mode", arguments.mode}, {"persistence", "STORED"}, {"history_messages_count", history_count}, {"llm", "OFFLINE"}});
                     } else {
-                        std::cout << "[ASSISTANT] Recorded prompt in chat session: \"" << line << "\" (LLM offline, use --model to load OpenVINO model)\n";
+                        std::cout << "[ASSISTANT] Recorded prompt in chat session (" << history_count << " stored messages): \"" << line << "\" (LLM offline, use --model to load OpenVINO model)\n";
                     }
                 }
             }

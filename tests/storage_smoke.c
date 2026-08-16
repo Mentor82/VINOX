@@ -18,7 +18,7 @@ int main(void) {
     size_t count = 0;
     size_t match_count = 0;
 
-    const char* db_file = "test_vinox_storage_target.db";
+    const char* db_file = "test_vinox_storage_smoke_isolated.db";
     remove(db_file);
 
     // -------------------------------------------------------------
@@ -146,12 +146,17 @@ int main(void) {
         return 13;
     }
 
-    // Assert FTS MATCH 'Delta' == 0
+    // Assert FTS MATCH 'Delta' == 0 after delete
     if (vinox_storage_search_messages_fts(engine, "Delta", 10, &match_count) != VINOX_STATUS_OK || match_count != 0) {
-        printf("FAILED: FTS5 MATCH search for 'Delta' after delete returned %zu (expected 0)\n", match_count);
-        sqlite3_close(raw_db);
+        printf("FAILED: FTS5 MATCH search for deleted term 'Delta' returned %zu (expected 0)\n", match_count);
+        if (raw_db) sqlite3_close(raw_db);
         vinox_storage_engine_close(engine);
-        return 14;
+        return 12;
+    }
+
+    if (raw_db) {
+        sqlite3_close(raw_db);
+        raw_db = NULL;
     }
 
     // -------------------------------------------------------------
@@ -648,7 +653,7 @@ int main(void) {
         printf("FAILED: Malformed JSON import should fail closed!\n");
         vinox_storage_engine_close(fresh_engine);
         remove(fresh_db_file);
-        sqlite3_close(raw_db);
+        if (raw_db) sqlite3_close(raw_db);
         vinox_storage_engine_close(engine);
         remove(db_file);
         return 48;

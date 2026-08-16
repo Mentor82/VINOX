@@ -617,6 +617,44 @@ vinox_status vinox_storage_get_conversation_count(
     return VINOX_STATUS_OK;
 }
 
+vinox_status vinox_storage_get_conversation_messages(
+    const vinox_storage_engine* engine,
+    const char* conversation_id,
+    vinox_chat_message* messages_out,
+    size_t max_messages,
+    size_t* count_out
+) {
+    if (engine == nullptr || engine->db == nullptr) {
+        return fail_arg("storage engine handle cannot be null");
+    }
+    if (conversation_id == nullptr || messages_out == nullptr || count_out == nullptr || max_messages == 0) {
+        return fail_arg("invalid arguments to vinox_storage_get_conversation_messages");
+    }
+
+    const char* sql = "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at_ms ASC LIMIT ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(engine->db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return fail_runtime(("Failed to prepare message query: " + std::string(sqlite3_errmsg(engine->db))).c_str());
+    }
+
+    sqlite3_bind_text(stmt, 1, conversation_id, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 2, static_cast<sqlite3_int64>(max_messages));
+
+    size_t idx = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW && idx < max_messages) {
+        const char* r = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        const char* c = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        if (r) strncpy_s(messages_out[idx].role, sizeof(messages_out[idx].role), r, _TRUNCATE);
+        if (c) strncpy_s(messages_out[idx].content, sizeof(messages_out[idx].content), c, _TRUNCATE);
+        idx++;
+    }
+    sqlite3_finalize(stmt);
+
+    *count_out = idx;
+    vinox_set_last_error(nullptr);
+    return VINOX_STATUS_OK;
+}
+
 vinox_status vinox_storage_search_messages_fts(
     const vinox_storage_engine* engine,
     const char* query,

@@ -112,21 +112,29 @@ static std::string calculate_sha256(const std::string& input) {
 
 // Compute deterministic SHA-256 snapshot hash of all regular files in a target directory
 static std::string compute_target_snapshot_hash(const fs::path& target_path) {
-    if (!fs::exists(target_path)) {
+    std::error_code ec;
+    fs::path abs_target = fs::absolute(target_path, ec);
+    if (ec || !fs::exists(abs_target)) {
         return calculate_sha256("EMPTY_TARGET_DIRECTORY");
     }
 
     std::map<std::string, std::string> file_entries;
     try {
-        for (const auto& entry : fs::recursive_directory_iterator(target_path)) {
+        for (const auto& entry : fs::recursive_directory_iterator(abs_target, ec)) {
+            if (ec) break;
             if (entry.is_regular_file()) {
-                fs::path rel = fs::relative(entry.path(), target_path);
+                fs::path rel = fs::relative(entry.path(), abs_target, ec);
+                std::string rel_str = ec ? entry.path().filename().string() : rel.generic_string();
                 std::ifstream in(entry.path(), std::ios::binary);
                 std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-                file_entries[rel.string()] = content;
+                file_entries[rel_str] = content;
             }
         }
     } catch (...) {}
+
+    if (file_entries.empty()) {
+        return calculate_sha256("EMPTY_TARGET_DIRECTORY");
+    }
 
     std::ostringstream ss;
     for (const auto& kv : file_entries) {

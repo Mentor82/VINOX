@@ -98,6 +98,19 @@ VINOX_API vinox_status vinox_storage_add_message_ex(
     vinox_message_info* message_out
 );
 
+typedef struct vinox_chat_message {
+    char role[32];
+    char content[2048];
+} vinox_chat_message;
+
+VINOX_API vinox_status vinox_storage_get_conversation_messages(
+    const vinox_storage_engine* engine,
+    const char* conversation_id,
+    vinox_chat_message* messages_out,
+    size_t max_messages,
+    size_t* count_out
+);
+
 VINOX_API vinox_status vinox_storage_get_conversation_count(
     const vinox_storage_engine* engine,
     size_t* count_out

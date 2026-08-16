@@ -16,7 +16,6 @@
 
 int run_cli_process_with_input(const std::string& cli_args, const std::string& input_text, std::string& output_text, int& exit_code) {
 #if defined(_WIN32)
-    // Prepend absolute build directory & vcpkg DLL directories to PATH for DLL discovery
     char abs_build_path[MAX_PATH] = {0};
     GetFullPathNameA("out\\windows-msvc-debug\\build", MAX_PATH, abs_build_path, NULL);
 
@@ -119,6 +118,170 @@ int run_cli_process_with_input(const std::string& cli_args, const std::string& i
 #endif
 }
 
+int test_target_mutation_after_review_in_persistent_process() {
+#if defined(_WIN32)
+    // Clean up test directories to ensure fresh state
+    std::error_code ec_clean;
+    std::filesystem::remove_all(".cli_target_workspace", ec_clean);
+    std::filesystem::remove_all(".cli_sandbox_overlay", ec_clean);
+
+    char abs_build_path[MAX_PATH] = {0};
+    GetFullPathNameA("out\\windows-msvc-debug\\build", MAX_PATH, abs_build_path, NULL);
+
+    char abs_vcpkg_dbg[MAX_PATH] = {0};
+    GetFullPathNameA("out\\windows-msvc-debug\\vcpkg_installed\\x64-windows\\debug\\bin", MAX_PATH, abs_vcpkg_dbg, NULL);
+
+    char abs_vcpkg_rel[MAX_PATH] = {0};
+    GetFullPathNameA("out\\windows-msvc-debug\\vcpkg_installed\\x64-windows\\bin", MAX_PATH, abs_vcpkg_rel, NULL);
+
+    std::string ov_genai_dbg = "C:\\ai\\openvino_genai_2026.2.1\\openvino_genai_windows_2026.2.1.0_x86_64\\runtime\\bin\\intel64\\Debug";
+    std::string ov_genai_rel = "C:\\ai\\openvino_genai_2026.2.1\\openvino_genai_windows_2026.2.1.0_x86_64\\runtime\\bin\\intel64\\Release";
+    std::string ov_genai_tbb = "C:\\ai\\openvino_genai_2026.2.1\\openvino_genai_windows_2026.2.1.0_x86_64\\runtime\\3rdparty\\tbb\\bin";
+
+    std::string ov_sdk = "C:\\ai\\openvino_sdk\\openvino_2024.6.0";
+    const char* env_ov = std::getenv("VINOX_OPENVINO_SDK_ROOT");
+    if (env_ov && strlen(env_ov) > 0) ov_sdk = env_ov;
+
+    std::string ov_bin = ov_sdk + "\\runtime\\bin\\intel64\\Debug";
+    std::string ov_tbb = ov_sdk + "\\runtime\\3rdparty\\tbb\\bin";
+
+    char old_path[8192] = {0};
+    GetEnvironmentVariableA("PATH", old_path, sizeof(old_path));
+    std::string new_path = std::string(abs_build_path) + ";" + std::string(abs_vcpkg_dbg) + ";" + std::string(abs_vcpkg_rel) + ";" + ov_genai_dbg + ";" + ov_genai_rel + ";" + ov_genai_tbb + ";" + ov_bin + ";" + ov_tbb + ";" + std::string(old_path);
+    SetEnvironmentVariableA("PATH", new_path.c_str());
+
+    HANDLE h_child_in_read = NULL;
+    HANDLE h_child_in_write = NULL;
+    HANDLE h_child_out_read = NULL;
+    HANDLE h_child_out_write = NULL;
+
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+    sa.bInheritHandle = TRUE;
+    sa.lpSecurityDescriptor = NULL;
+
+    if (!CreatePipe(&h_child_out_read, &h_child_out_write, &sa, 0) || !SetHandleInformation(h_child_out_read, HANDLE_FLAG_INHERIT, 0)) {
+        return -1;
+    }
+    if (!CreatePipe(&h_child_in_read, &h_child_in_write, &sa, 0) || !SetHandleInformation(h_child_in_write, HANDLE_FLAG_INHERIT, 0)) {
+        CloseHandle(h_child_out_read);
+        CloseHandle(h_child_out_write);
+        return -1;
+    }
+
+    PROCESS_INFORMATION pi{};
+    STARTUPINFOA si{};
+    si.cb = sizeof(STARTUPINFOA);
+    si.hStdError = h_child_out_write;
+    si.hStdOutput = h_child_out_write;
+    si.hStdInput = h_child_in_read;
+    si.dwFlags |= STARTF_USESTDHANDLES;
+
+    std::string exe_path = "vinox-cli.exe";
+    if (GetFileAttributesA(exe_path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        exe_path = ".\\out\\windows-msvc-debug\\build\\vinox-cli.exe";
+    }
+    std::string cmd = exe_path + " -i --json";
+    char cmd_buf[512];
+    strcpy_s(cmd_buf, sizeof(cmd_buf), cmd.c_str());
+
+    if (!CreateProcessA(NULL, cmd_buf, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
+        CloseHandle(h_child_out_read);
+        CloseHandle(h_child_out_write);
+        CloseHandle(h_child_in_read);
+        CloseHandle(h_child_in_write);
+        return -2;
+    }
+
+    CloseHandle(h_child_out_write);
+    CloseHandle(h_child_in_read);
+
+    // 1. Send plan, approve, agent, diff
+    std::string phase1_cmds = "/plan Mutation Process Test Goal\n/approve\n/agent\n/diff\n";
+    DWORD written = 0;
+    WriteFile(h_child_in_write, phase1_cmds.c_str(), static_cast<DWORD>(phase1_cmds.size()), &written, NULL);
+
+    // 2. Read output until cli.diff event
+    std::string accumulated;
+    char buf[512];
+    DWORD read_bytes = 0;
+    bool found_diff_event = false;
+
+    for (int attempts = 0; attempts < 50; ++attempts) {
+        DWORD avail = 0;
+        if (PeekNamedPipe(h_child_out_read, NULL, 0, NULL, &avail, NULL) && avail > 0) {
+            if (ReadFile(h_child_out_read, buf, sizeof(buf) - 1, &read_bytes, NULL) && read_bytes > 0) {
+                buf[read_bytes] = '\0';
+                accumulated += buf;
+                if (accumulated.find("cli.diff") != std::string::npos) {
+                    found_diff_event = true;
+                    break;
+                }
+            }
+        }
+        Sleep(50);
+    }
+
+    if (!found_diff_event) {
+        std::cerr << "FAILED 03b: Did not receive cli.diff event in persistent process: " << accumulated << "\n";
+        CloseHandle(h_child_in_write);
+        CloseHandle(h_child_out_read);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        return 1;
+    }
+
+    // 3. Mutate target workspace on disk WHILE subprocess is STILL RUNNING!
+    CreateDirectoryA(".cli_target_workspace", NULL);
+    std::ofstream mut_file(".cli_target_workspace/mutation_after_review.txt");
+    mut_file << "Unreviewed mutation on disk after /diff\n";
+    mut_file.close();
+
+    // 4. Send /apply to the SAME running subprocess
+    std::string apply_cmd = "/apply\n/exit\n";
+    WriteFile(h_child_in_write, apply_cmd.c_str(), static_cast<DWORD>(apply_cmd.size()), &written, NULL);
+    CloseHandle(h_child_in_write);
+
+    // 5. Read remaining output
+    while (ReadFile(h_child_out_read, buf, sizeof(buf) - 1, &read_bytes, NULL) && read_bytes > 0) {
+        buf[read_bytes] = '\0';
+        accumulated += buf;
+    }
+
+    WaitForSingleObject(pi.hProcess, 5000);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    CloseHandle(h_child_out_read);
+
+    // 6. Verify that /apply event HAS status "ERROR" and contains "TARGET_CONFLICT_REJECTED"!
+    std::istringstream iss(accumulated);
+    std::string line;
+    bool found_rejected_error = false;
+    bool found_successful_apply = false;
+
+    while (std::getline(iss, line)) {
+        if (line.find("cli.apply") != std::string::npos) {
+            if (line.find("\"status\":\"ERROR\"") != std::string::npos && line.find("TARGET_CONFLICT_REJECTED") != std::string::npos) {
+                found_rejected_error = true;
+            }
+            if (line.find("\"status\":\"OK\"") != std::string::npos) {
+                found_successful_apply = true;
+            }
+        }
+    }
+
+    if (found_rejected_error && !found_successful_apply) {
+        std::cout << "  [PASS 03b] Single-Process Target Mutation Rejection After /diff: Verified (TARGET_CONFLICT_REJECTED)\n";
+        return 0;
+    } else {
+        std::cerr << "FAILED 03b: Apply succeeded or failed to report TARGET_CONFLICT_REJECTED after target mutation! Output:\n" << accumulated << "\n";
+        return 1;
+    }
+#else
+    return 0;
+#endif
+}
+
 int main(void) {
     std::cout << "Starting VINOX Phase 8 CLI Process-Level E2E & Contract Verification Test...\n";
 
@@ -196,8 +359,7 @@ int main(void) {
         return 1;
     }
 
-    // 3. Criteria E: Stale Review Snapshot & Target Mutation Rejection Test
-    // 3a. /apply without /diff MUST return STALE_REVIEW_STATE
+    // 3a. Criteria E: Stale Review Snapshot Binding Rejection (/apply without /diff)
     std::string stale_cmd =
         "/plan Stale Test Goal\n"
         "/approve\n"
@@ -216,32 +378,12 @@ int main(void) {
         }
     }
 
-    // 3b. Target workspace mutation AFTER /diff MUST return TARGET_CONFLICT_REJECTED
-    // Set up overlay and target dir, call /diff, then mutate target workspace on disk
-#if defined(_WIN32)
-    CreateDirectoryA(".cli_target_workspace", NULL);
-    std::ofstream mut_file(".cli_target_workspace/conflict_trigger.txt");
-    mut_file << "Unreviewed mutation on disk after /diff\n";
-    mut_file.close();
-#endif
-
-    std::string mut_cmd =
-        "/diff\n" // Reviewed before mutation
-        "/apply\n" // Calling /apply after target mutation -> MUST return TARGET_CONFLICT_REJECTED!
-        "/exit\n";
-
-    std::string mut_out;
-    int mut_code = -1;
-    if (run_cli_process_with_input("-i --json", mut_cmd, mut_out, mut_code) == 0) {
-        if (mut_out.find("TARGET_CONFLICT_REJECTED") != std::string::npos || mut_out.find("cli.apply") != std::string::npos) {
-            std::cout << "  [PASS 03b] Target Workspace Mutation Rejection After /diff: Verified\n";
-        } else {
-            std::cerr << "FAILED 03b: Target workspace mutation after /diff was not rejected properly: " << mut_out << "\n";
-            return 1;
-        }
+    // 3b. Single Persistent Process Target Mutation After /diff Rejection Test
+    if (test_target_mutation_after_review_in_persistent_process() != 0) {
+        return 1;
     }
 
-    // 4. Criteria A: Multi-Turn Session REPL Chat Prompt & Persistence Test
+    // 4. Criteria A: Multi-Turn Session REPL Chat Prompt & SQLite Storage Ownership Test
     std::string chat_cmd =
         "Hello VINOX assistant!\n"
         "What was my previous message?\n"
@@ -251,8 +393,8 @@ int main(void) {
     std::string chat_out;
     int chat_code = -1;
     if (run_cli_process_with_input("-i --json", chat_cmd, chat_out, chat_code) == 0 && chat_code == 0) {
-        if (chat_out.find("cli.response") != std::string::npos || chat_out.find("STORED") != std::string::npos) {
-            std::cout << "  [PASS 04] Multi-Turn Session REPL Chat & SQLite Persistence: Verified\n";
+        if (chat_out.find("history_messages_count") != std::string::npos || chat_out.find("STORED") != std::string::npos) {
+            std::cout << "  [PASS 04] Multi-Turn Session REPL Chat & SQLite Storage History Ownership: Verified\n";
         } else {
             std::cerr << "FAILED 04: Multi-turn chat session test failed: " << chat_out << "\n";
             return 1;
