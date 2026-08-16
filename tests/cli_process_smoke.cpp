@@ -409,7 +409,7 @@ int main(void) {
     vinox_mode_controller* mode_ctrl = vinox_mode_controller_create();
     vinox_mode_controller_set_mode(mode_ctrl, VINOX_MODE_AGENT);
 
-    const char* cancel_plan_json = "{\"version\":1,\"goal\":\"Inflight Cancel Goal\",\"steps\":[{\"step_id\":\"step1\",\"description\":\"Inflight Tool Step\",\"dependencies\":[],\"tool_calls\":[{\"name\":\"local_write.write\",\"arguments_json\":\"{\\\"file_path\\\":\\\"cancel_test.txt\\\",\\\"content\\\":\\\"cancellation test\\\"}\"}]}]}";
+    const char* cancel_plan_json = "{\"version\":1,\"goal\":\"Inflight Cancel Goal\",\"steps\":[{\"step_id\":\"step1\",\"description\":\"Slow Sandbox Tool Step\",\"dependencies\":[],\"tool_calls\":[{\"name\":\"test_sleep\",\"arguments_json\":\"{\\\"delay_ms\\\":2000}\"}]}]}";
     vinox_plan* cancel_plan = vinox_plan_create(cancel_plan_json);
     char plan_hash[128] = {0};
     vinox_plan_compute_hash(cancel_plan, plan_hash, sizeof(plan_hash));
@@ -427,18 +427,22 @@ int main(void) {
     vinox_tool_registry_create(&reg);
     vinox_policy_engine_create(&pol);
 
-    vinox_tool_definition wdef{};
-    wdef.struct_size = sizeof(wdef);
-    wdef.name = "local_write.write";
-    wdef.description = "Write file";
-    wdef.security_class = 1;
-    wdef.parameters_json_schema = "{\"type\":\"object\"}";
-    vinox_tool_registry_register_tool(reg, &wdef);
+    vinox_tool_definition sdef{};
+    sdef.struct_size = sizeof(sdef);
+    sdef.name = "test_sleep";
+    sdef.description = "Slow test tool";
+    sdef.security_class = 1;
+    sdef.parameters_json_schema = "{\"type\":\"object\"}";
+    vinox_tool_registry_register_tool(reg, &sdef);
 
-    vinox_policy_engine_set_rule(pol, "*", 4, 0);
+    vinox_policy_engine_set_rule(pol, "*", 4, 1);
 
     vinox_sandbox_host* sb = vinox_sandbox_host_create(".cli_sandbox_overlay");
-    vinox_sandbox_host_start(sb, "out\\windows-msvc-debug\\build\\vinox_sandbox_worker.exe");
+    const char* worker_exe = "vinox_sandbox_worker.exe";
+    if (!std::filesystem::exists(worker_exe)) {
+        worker_exe = "out\\windows-msvc-debug\\build\\vinox_sandbox_worker.exe";
+    }
+    vinox_sandbox_host_start(sb, worker_exe);
 
     vinox_agent_run_set_governance(run, reg, pol);
     vinox_agent_run_set_sandbox(run, sb);
@@ -448,7 +452,10 @@ int main(void) {
         step_status.store(vinox_agent_run_step(run));
     });
 
-    // Immediate in-flight cancel
+    // Wait 100ms to guarantee test_sleep has been dispatched to sandbox worker and exec_tool is in read loop
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // Cancel in-flight AFTER real dispatch
     vinox_agent_run_cancel(run);
 
     if (worker.joinable()) worker.join();
@@ -463,10 +470,10 @@ int main(void) {
     vinox_plan_destroy(cancel_plan);
     vinox_mode_controller_destroy(mode_ctrl);
 
-    if (final_st == VINOX_PLAN_STATUS_CANCELLED && completed == 0) {
-        std::cout << "  [PASS 05] In-Flight Sandbox Subprocess Cancellation & Zero Step Completion: Verified (CANCELLED)\n";
+    if (final_st == VINOX_PLAN_STATUS_CANCELLED && completed == 0 && step_status.load() == VINOX_STATUS_CANCELLED) {
+        std::cout << "  [PASS 05] Deterministic In-Flight Sandbox Dispatch Cancellation & Zero Step Completion: Verified (CANCELLED)\n";
     } else {
-        std::cerr << "FAILED 05: In-flight cancellation test failed. Status: " << final_st << ", Completed steps: " << completed << "\n";
+        std::cerr << "FAILED 05: Deterministic in-flight cancellation test failed. Step status: " << step_status.load() << ", Run status: " << final_st << ", Completed steps: " << completed << "\n";
         return 1;
     }
 

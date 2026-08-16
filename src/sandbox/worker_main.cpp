@@ -12,6 +12,9 @@
 #  include <fcntl.h>
 #endif
 
+#include <thread>
+#include <chrono>
+
 namespace fs = std::filesystem;
 
 // Path containment verifier preventing sandbox overlay root escape
@@ -55,7 +58,8 @@ int main(int argc, char* argv[]) {
         "fs_write",
         "local_write.write",
         "fs_read",
-        "local_read.read"
+        "local_read.read",
+        "test_sleep"
     };
 
     std::string line;
@@ -132,6 +136,11 @@ int main(int argc, char* argv[]) {
                             res["result"]["bytes_read"] = file_content.length();
                         }
                     }
+                } else if (tool_name == "test_sleep") {
+                    int delay_ms = args.value("delay_ms", 2000);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+                    res["result"]["status"] = "OK";
+                    res["result"]["slept_ms"] = delay_ms;
                 } else {
                     res["error"]["code"] = -32601;
                     res["error"]["message"] = "Unsupported sandbox tool: " + tool_name;

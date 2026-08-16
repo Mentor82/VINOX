@@ -12,11 +12,14 @@
 #  include <windows.h>
 #endif
 
+#include <mutex>
+
 namespace fs = std::filesystem;
 
 struct vinox_sandbox_host {
     std::string overlay_dir;
     std::atomic<bool> cancel_requested{false};
+    std::mutex host_mutex;
 #if defined(_WIN32)
     HANDLE hProcess{NULL};
     HANDLE hThread{NULL};
@@ -141,7 +144,14 @@ VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_exec_tool(vinox_sandbox_hos
     }
 
 #if defined(_WIN32)
-    if (!host->hChildStdinWrite || !host->hChildStdoutRead) return VINOX_STATUS_INVALID_STATE;
+    HANDLE hWrite = NULL;
+    HANDLE hRead = NULL;
+    {
+        std::lock_guard<std::mutex> lock(host->host_mutex);
+        if (!host->hChildStdinWrite || !host->hChildStdoutRead) return VINOX_STATUS_INVALID_STATE;
+        hWrite = host->hChildStdinWrite;
+        hRead = host->hChildStdoutRead;
+    }
 
     int current_req_id = host->next_id++;
     nlohmann::json req;
@@ -175,7 +185,7 @@ VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_exec_tool(vinox_sandbox_hos
     }
 
     DWORD written = 0;
-    if (!WriteFile(host->hChildStdinWrite, req_str.c_str(), (DWORD)req_str.length(), &written, NULL)) {
+    if (!WriteFile(hWrite, req_str.c_str(), (DWORD)req_str.length(), &written, NULL)) {
         return VINOX_STATUS_RUNTIME_ERROR;
     }
 
@@ -185,15 +195,43 @@ VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_exec_tool(vinox_sandbox_hos
     bool got_newline = false;
 
     while (!got_newline) {
+        if (host->cancel_requested.load()) {
+            std::lock_guard<std::mutex> lock(host->host_mutex);
+            std::string err_msg = "{\"status\":\"ERROR\",\"error\":\"INDETERMINATE_OUTCOME_MUTATION_CANCELLED: Host execution cancelled in-flight. Subprocess terminated.\"}";
+            if (err_msg.length() < out_buf_sz) {
+                strncpy_s(out_buf, out_buf_sz, err_msg.c_str(), _TRUNCATE);
+            }
+            if (host->hProcess) {
+                TerminateProcess(host->hProcess, 1);
+                CloseHandle(host->hProcess);
+                if (host->hThread) CloseHandle(host->hThread);
+                host->hProcess = NULL;
+                host->hThread = NULL;
+            }
+            vinox_sandbox_host_start(host, "vinox_sandbox_worker.exe");
+            host->cancel_requested.store(false);
+            return VINOX_STATUS_CANCELLED;
+        }
+
         DWORD avail = 0;
-        if (!PeekNamedPipe(host->hChildStdoutRead, NULL, 0, NULL, &avail, NULL)) {
+        if (!PeekNamedPipe(hRead, NULL, 0, NULL, &avail, NULL)) {
+            if (host->cancel_requested.load()) {
+                std::lock_guard<std::mutex> lock(host->host_mutex);
+                std::string err_msg = "{\"status\":\"ERROR\",\"error\":\"INDETERMINATE_OUTCOME_MUTATION_CANCELLED: Host execution cancelled in-flight. Subprocess terminated.\"}";
+                if (err_msg.length() < out_buf_sz) {
+                    strncpy_s(out_buf, out_buf_sz, err_msg.c_str(), _TRUNCATE);
+                }
+                vinox_sandbox_host_start(host, "vinox_sandbox_worker.exe");
+                host->cancel_requested.store(false);
+                return VINOX_STATUS_CANCELLED;
+            }
             return VINOX_STATUS_RUNTIME_ERROR;
         }
 
         if (avail > 0) {
             char ch = 0;
             DWORD read_bytes = 0;
-            if (ReadFile(host->hChildStdoutRead, &ch, 1, &read_bytes, NULL) && read_bytes > 0) {
+            if (ReadFile(hRead, &ch, 1, &read_bytes, NULL) && read_bytes > 0) {
                 if (ch == '\n') {
                     got_newline = true;
                     break;
@@ -210,12 +248,15 @@ VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_exec_tool(vinox_sandbox_hos
             // Deadline check (5000ms limit)
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_wait).count();
             if (elapsed > 5000) {
+                std::lock_guard<std::mutex> lock(host->host_mutex);
                 // Terminate runaway worker process to prevent background mutating execution
-                TerminateProcess(host->hProcess, 1);
-                CloseHandle(host->hProcess);
-                CloseHandle(host->hThread);
-                host->hProcess = NULL;
-                host->hThread = NULL;
+                if (host->hProcess) {
+                    TerminateProcess(host->hProcess, 1);
+                    CloseHandle(host->hProcess);
+                    if (host->hThread) CloseHandle(host->hThread);
+                    host->hProcess = NULL;
+                    host->hThread = NULL;
+                }
 
                 std::string err_msg = "{\"status\":\"ERROR\",\"error\":\"INDETERMINATE_OUTCOME_MUTATION_CANCELLED: Host pipe read execution deadline timeout (5000 ms). Subprocess terminated.\"}";
                 if (err_msg.length() >= out_buf_sz) return VINOX_STATUS_OUT_OF_RANGE;
@@ -296,6 +337,7 @@ VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_stop(vinox_sandbox_host* ho
     if (!host) return VINOX_STATUS_INVALID_ARGUMENT;
 
 #if defined(_WIN32)
+    std::lock_guard<std::mutex> lock(host->host_mutex);
     if (host->hChildStdinWrite) {
         nlohmann::json req;
         req["jsonrpc"] = "2.0";
@@ -307,7 +349,7 @@ VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_stop(vinox_sandbox_host* ho
     }
 
     if (host->hProcess) {
-        WaitForSingleObject(host->hProcess, 1000);
+        WaitForSingleObject(host->hProcess, 500);
         TerminateProcess(host->hProcess, 0);
         CloseHandle(host->hProcess);
         host->hProcess = NULL;
@@ -341,9 +383,10 @@ VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_cancel(vinox_sandbox_host* 
     if (!host) return VINOX_STATUS_INVALID_ARGUMENT;
     host->cancel_requested.store(true);
 #if defined(_WIN32)
+    std::lock_guard<std::mutex> lock(host->host_mutex);
     if (host->hProcess) {
         TerminateProcess(host->hProcess, 1);
-        if (host->hProcess) CloseHandle(host->hProcess);
+        CloseHandle(host->hProcess);
         if (host->hThread) CloseHandle(host->hThread);
         host->hProcess = NULL;
         host->hThread = NULL;
