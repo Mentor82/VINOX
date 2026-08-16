@@ -2,13 +2,15 @@
 
 ## Overview
 
-This specification establishes the architectural invariants required to ensure VINOX Core, Serving, Storage, Tool, MCP, and Agent contracts remain strictly protocol-neutral and ready for future LiNeP (Lightweight Network Protocol) and LiNeP-SL (Lightweight Network Protocol - Stream Layer) integration without altering runtime execution or governance.
+This specification establishes the architectural invariants required to ensure VINOX Core, Serving, Storage, Tool, MCP, and Agent contracts remain strictly protocol-neutral and ready for future LiNeP integration without altering runtime execution or governance.
 
 LiNeP integration is explicitly optional. VINOX remains fully functional as a standalone runtime without LiNeP or LiNeP-SL present.
 
+LiNeP-SL means **LiNeP Security Layer**. It is not the stream layer and not the generic serialization/codec layer.
+
 ---
 
-## 0. Integration Boundary: Plugin vs. Codec
+## 0. Integration Boundary: Plugin, Codec, and Security Layer
 
 LiNeP is integrated into VINOX as an **optional transport plugin / protocol adapter**, not as a Core dependency and not merely as a codec.
 
@@ -29,8 +31,10 @@ VINOX Core / Serving / Agent / Tools
                          v
               optional LiNeP plugin
                          |
-                         v
-                  LiNeP-SL codec
+             +-----------+-----------+
+             |                       |
+             v                       v
+      LiNeP wire/codec         LiNeP-SL Security Layer
 ```
 
 A future implementation may use a package/artifact name such as `vinox_transport_linep` for the optional adapter.
@@ -38,10 +42,11 @@ A future implementation may use a package/artifact name such as `vinox_transport
 **Definitions:**
 
 - **LiNeP plugin / adapter**: owns protocol/session integration, identity mapping, capability exchange, cancellation mapping, transport evidence, connection lifecycle, and the bridge between VINOX canonical envelopes and LiNeP.
-- **LiNeP-SL codec**: lives inside or below that adapter and owns wire framing, serialization/deserialization, fragmentation/reassembly, and stream-layer representation.
-- **VINOX Core**: remains unaware of LiNeP frame formats, session headers, connection APIs, or codec implementation details.
+- **LiNeP wire/codec component**: owns serialization/deserialization, framing, fragmentation/reassembly, and wire representation as required by LiNeP. This component is distinct from LiNeP-SL.
+- **LiNeP-SL Security Layer**: owns the LiNeP-specific security contract and security metadata/processing required by LiNeP-SL. It must not become a VINOX governance engine and must not bypass local authorization, policy, or resource governance.
+- **VINOX Core**: remains unaware of LiNeP frame formats, session headers, connection APIs, codec implementation details, or LiNeP-SL internals.
 
-**Invariant**: LiNeP may extend transport reach, but it may not become a second execution engine, governance layer, scheduler authority, or business-logic implementation.
+**Invariant**: LiNeP may extend transport reach, and LiNeP-SL may secure that transport, but neither may become a second execution engine, governance layer, scheduler authority, or business-logic implementation.
 
 ---
 
@@ -54,7 +59,7 @@ All VINOX execution envelopes and events must maintain transport-neutral identit
 - `correlation_id`: End-to-end tracing identifier spanning across CLI, HTTP, MCP, and LiNeP process boundaries.
 - `run_id` / `operation_id`: Unique identifier for Agent runs and long-running background tasks.
 
-**Invariant**: Neither Core logic nor Governance Policy Engines may depend on HTTP headers (`X-Request-ID`, `Authorization`), MCP JSON-RPC headers, or LiNeP frame headers to establish identity. Identifiers are extracted by transport adapters into the canonical `vinox_correlation_context` structure.
+**Invariant**: Neither Core logic nor Governance Policy Engines may depend on HTTP headers (`X-Request-ID`, `Authorization`), MCP JSON-RPC headers, or LiNeP frame/security headers to establish identity. Identifiers are extracted by transport adapters into the canonical `vinox_correlation_context` structure.
 
 ---
 
@@ -80,7 +85,7 @@ All execution paths (Inference, Tools, Agent Steps, Sandbox Actions) emit canoni
 
 Cancellation is a runtime execution contract, not a UI or transport event:
 
-- Interrupt signals (`SIGINT`, `Ctrl+C`), HTTP connection drops, MCP request cancellations, or LiNeP `CANCEL` frames trigger cancellation on the active `vinox_agent_run` or `vinox_model_generate` context.
+- Interrupt signals (`SIGINT`, `Ctrl+C`), HTTP connection drops, MCP request cancellations, or LiNeP cancellation semantics trigger cancellation on the active `vinox_agent_run` or `vinox_model_generate` context.
 - Cancellation propagates fail-closed down to model generation pipelines, MCP client transports, and Windows Sandbox worker subprocesses (`TerminateProcess`).
 - Cancellation outcome is recorded as `CANCELLED` or `INDETERMINATE_OUTCOME_MUTATION_CANCELLED`.
 
@@ -110,19 +115,19 @@ A discovered or advertised hardware capability means only that a host **can** pr
 
 ---
 
-## 5. Payload Bounding vs. Transport Fragmentation
+## 5. Payload Bounding vs. Transport Framing
 
 - **Payload Bounding**: VINOX enforces a strict 256 KB (262,144 bytes) payload limit on tool argument JSON payloads and step outputs at the governance boundary (`vinox_tool_registry_validate_arguments`).
-- **Transport Fragmentation**: LiNeP-SL stream-layer framing or HTTP chunking operates strictly below the governance boundary. Reassembled frames are validated against the 256 KB limit before reaching execution engines.
-- **Invariant**: Transport-level fragmentation/reassembly NEVER alters canonical operation identity, payload bounds, or policy evaluation.
-
-LiNeP-SL therefore acts as the **codec / stream representation layer** beneath the optional LiNeP transport plugin. Fragmentation semantics are transport concerns and must not leak into VINOX business or governance contracts.
+- **Transport Framing / Fragmentation**: LiNeP wire framing or HTTP chunking operates strictly below the governance boundary. Reassembled payloads are validated against the 256 KB limit before reaching execution engines.
+- **Security Processing**: LiNeP-SL security processing is orthogonal to payload framing. Security wrapping/unwrapping must not alter canonical operation identity, payload bounds, or VINOX policy evaluation.
+- **Invariant**: Transport-level framing/reassembly and LiNeP-SL security processing NEVER widen permissions or bypass canonical governance.
 
 ---
 
 ## 6. Governance & Permissions Preservation
 
 - Remote transport adapters (HTTP, MCP, LiNeP) cannot widen, override, or bypass VINOX tool registries, schema validators, or policy engines.
+- LiNeP-SL establishes transport/security guarantees but does not grant VINOX execution permission by itself.
 - All remote operations execute under the same immutable Mode Controller policies (`CHAT`, `PLAN`, `AGENT`) and default-deny policy rules as local CLI calls.
 - Remote discovery of a capability never grants permission to consume it.
 - A LiNeP peer cannot raise host resource limits, change execution priority, or override local admission decisions.
@@ -150,7 +155,8 @@ Adapters for:
 2. **HTTP/SSE (Phase 9)**: Maps envelopes to `text/event-stream` SSE events and OpenAI DTOs.
 3. **MCP (Phase 6)**: Maps envelopes to JSON-RPC 2.0 notifications/responses.
 4. **LiNeP (Future, optional plugin)**: Maps canonical envelopes to LiNeP protocol operations.
-5. **LiNeP-SL (inside/below LiNeP plugin)**: Encodes/decodes stream frames and transport fragmentation without owning VINOX execution semantics.
+5. **LiNeP wire/codec (inside/below LiNeP plugin)**: Encodes/decodes wire representation and fragmentation without owning VINOX execution semantics.
+6. **LiNeP-SL Security Layer (optional LiNeP security component)**: Secures LiNeP communication while remaining separate from VINOX execution/governance semantics.
 
 **Invariant**: LiNeP/LiNeP-SL support remains optional and introduces no hard build or runtime dependency into VINOX Core, CLI, Server, GUI, Tool, or Agent binaries.
 
