@@ -568,7 +568,8 @@ vinox_status vinox_mcp_client_call_tool(
     try {
         call_req["params"]["arguments"] = nlohmann::json::parse(args);
     } catch (...) {
-        call_req["params"]["arguments"] = nlohmann::json::object();
+        set_mcp_last_error("arguments_json is malformed JSON");
+        return VINOX_STATUS_INVALID_ARGUMENT;
     }
 
     nlohmann::json call_res;

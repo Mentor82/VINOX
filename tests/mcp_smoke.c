@@ -78,6 +78,16 @@ int main(void) {
         return 6;
     }
 
+    // 3b. Negative Test: Malformed arguments_json MUST Fail Closed
+    vinox_tool_call_request bad_call_req = call_req;
+    bad_call_req.arguments_json = "{invalid_json_str";
+    if (vinox_mcp_client_call_tool(client, &bad_call_req, &call_res, pool, sizeof(pool)) != VINOX_STATUS_INVALID_ARGUMENT) {
+        printf("FAILED: vinox_mcp_client_call_tool failed to reject malformed arguments_json\n");
+        vinox_tool_registry_destroy(registry);
+        vinox_mcp_client_destroy(client);
+        return 6;
+    }
+
     // 4. Real Resources Primitive API over Stdio Wire Pipes
     char json_buf[1024];
     size_t req_sz = 0;
