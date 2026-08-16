@@ -346,6 +346,7 @@ if(BUILD_TESTING)
 
         add_executable(vinox_qwen2_5_eval_smoke tests/qwen2_5_eval_smoke.cpp)
         target_link_libraries(vinox_qwen2_5_eval_smoke PRIVATE vinox::core vinox::openvino vinox::serving vinox::storage nlohmann_json::nlohmann_json)
+        file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/tests/corpus DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/tests)
         add_test(NAME qwen2_5_eval_smoke COMMAND vinox_qwen2_5_eval_smoke)
 
         if(WIN32 AND VINOX_OPENVINO_SDK_ROOT)
