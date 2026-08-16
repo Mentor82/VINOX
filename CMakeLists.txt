@@ -175,6 +175,22 @@ inline constexpr const char* CANONICAL_MIGRATION_001_SQL = R"(
 
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/generated/001_init_sql.h" "${GENERATED_001_INIT_HEADER}")
 
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/schemas/database/002_documents_relations.sql" CANONICAL_MIGRATION_002_CONTENT)
+string(CONFIGURE [[
+#ifndef VINOX_CANONICAL_MIGRATION_002_H
+#define VINOX_CANONICAL_MIGRATION_002_H
+
+namespace vinox::storage {
+inline constexpr const char* CANONICAL_MIGRATION_002_SQL = R"(
+@CANONICAL_MIGRATION_002_CONTENT@
+)";
+}
+
+#endif
+]] GENERATED_002_DOCS_REL_HEADER @ONLY)
+
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/generated/002_documents_relations_sql.h" "${GENERATED_002_DOCS_REL_HEADER}")
+
 add_library(vinox_storage SHARED
     src/storage/db.cpp
     src/storage/embeddings.cpp

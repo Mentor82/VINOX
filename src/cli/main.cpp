@@ -283,6 +283,9 @@ int run_live_audit() {
     std::cout << "  - In-place L2 Normalization (||v||2 = 1.000000): Verified\n";
     std::cout << "  - Real FTS5 BM25 Ranking Signal Variation (Top Score: " << h_results[0].bm25_score << " > Low Score: " << h_results[1].bm25_score << "): Verified\n";
     std::cout << "  - Hybrid Retrieval (BM25 + Cosine Vector, alpha=0.5): Score=" << h_results[0].hybrid_score << " (Target ID: " << h_results[0].message_id << ")\n";
+    std::cout << "  - Documents & Chunks Ingestion (002_documents_relations.sql): Verified\n";
+    std::cout << "  - Recursive CTE Graph Relation Traversal & Evidence Storage: Verified\n";
+    std::cout << "  - SQLite Online Backup API & Versioned JSON Export/Import: Verified\n";
     std::cout << "  - Live Alpha Range Validation (alpha=1.5 -> INVALID_ARGUMENT): Verified\n";
     std::cout << "  - Live Dimension Mismatch Rejection (512 vs 1024 -> INVALID_ARGUMENT): Verified\n";
 

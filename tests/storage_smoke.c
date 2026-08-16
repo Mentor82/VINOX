@@ -413,8 +413,66 @@ int main(void) {
         return 36;
     }
 
+    // -------------------------------------------------------------
+    // TEST 10: Phase 5.3 Document Ingestion & Chunking
+    // -------------------------------------------------------------
+    char doc_id[64] = {0};
+    if (vinox_storage_document_ingest(engine, "Architecture Manual", "OpenVINO C++ GenAI Infrastructure Architecture Document", doc_id, sizeof(doc_id)) != VINOX_STATUS_OK ||
+        strlen(doc_id) == 0) {
+        printf("FAILED: Document ingestion failed: %s\n", vinox_storage_last_error());
+        vinox_storage_engine_close(engine);
+        return 37;
+    }
+
+    // -------------------------------------------------------------
+    // TEST 11: Phase 5.3 Typed Relations & Recursive CTE Query
+    // -------------------------------------------------------------
+    if (vinox_storage_relation_create(engine, doc_id, "target_entity_101", "cites", "Section 4.1 Citation Evidence", 0.95f) != VINOX_STATUS_OK) {
+        printf("FAILED: Relation creation failed: %s\n", vinox_storage_last_error());
+        vinox_storage_engine_close(engine);
+        return 38;
+    }
+
+    char cte_json[1024] = {0};
+    if (vinox_storage_relations_query_cte(engine, doc_id, cte_json, sizeof(cte_json)) != VINOX_STATUS_OK ||
+        strstr(cte_json, "target_entity_101") == NULL) {
+        printf("FAILED: Recursive CTE graph relation query failed: %s\n", vinox_storage_last_error());
+        vinox_storage_engine_close(engine);
+        return 39;
+    }
+
+    // -------------------------------------------------------------
+    // TEST 12: Phase 5.4 Online Backup API
+    // -------------------------------------------------------------
+    const char* backup_file = "test_vinox_storage_backup.db";
+    remove(backup_file);
+    if (vinox_storage_backup_online(engine, backup_file) != VINOX_STATUS_OK) {
+        printf("FAILED: Online backup failed: %s\n", vinox_storage_last_error());
+        vinox_storage_engine_close(engine);
+        return 40;
+    }
+    remove(backup_file);
+
+    // -------------------------------------------------------------
+    // TEST 13: Phase 5.4 Versioned JSON Export & Import
+    // -------------------------------------------------------------
+    char export_json[2048] = {0};
+    size_t exp_req_sz = 0;
+    if (vinox_storage_export_json(engine, export_json, sizeof(export_json), &exp_req_sz) != VINOX_STATUS_OK ||
+        strstr(export_json, "conversations") == NULL) {
+        printf("FAILED: JSON export failed: %s\n", vinox_storage_last_error());
+        vinox_storage_engine_close(engine);
+        return 41;
+    }
+
+    if (vinox_storage_import_json(engine, export_json) != VINOX_STATUS_OK) {
+        printf("FAILED: JSON import failed: %s\n", vinox_storage_last_error());
+        vinox_storage_engine_close(engine);
+        return 42;
+    }
+
     vinox_storage_engine_close(engine);
     remove(db_file);
-    printf("SUCCESS: All Issue #6 Storage tests passed!\n");
+    printf("SUCCESS: All Phase 5.3 & Phase 5.4 Storage tests passed!\n");
     return 0;
 }

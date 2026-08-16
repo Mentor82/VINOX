@@ -19,6 +19,8 @@
 #include <sqlite3.h>
 
 #include "generated/001_init_sql.h"
+#include "generated/002_documents_relations_sql.h"
+#include <nlohmann/json.hpp>
 #include "sqlite-vec/sqlite-vec.h"
 
 namespace fs = std::filesystem;
@@ -224,6 +226,54 @@ bool run_canonical_migrations(sqlite3* db, std::string& err_out) {
         rc = sqlite3_exec(db, "COMMIT;", nullptr, nullptr, &err_msg);
         if (rc != SQLITE_OK) {
             err_out = std::string("Failed to commit migration 001: ") + (err_msg ? err_msg : "unknown error");
+            if (err_msg) sqlite3_free(err_msg);
+            sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+            return false;
+        }
+    }
+
+    /* Migration 002: Documents, Chunks, Typed Relations & Evidence */
+    stmt = nullptr;
+    rc = sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM schema_migrations WHERE version = 2;", -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        err_out = std::string("Failed to check migration 002 version: ") + sqlite3_errmsg(db);
+        return false;
+    }
+
+    bool m2_applied = false;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        m2_applied = (sqlite3_column_int(stmt, 0) > 0);
+    }
+    sqlite3_finalize(stmt);
+
+    if (!m2_applied) {
+        rc = sqlite3_exec(db, "BEGIN TRANSACTION;", nullptr, nullptr, &err_msg);
+        if (rc != SQLITE_OK) {
+            err_out = std::string("Failed to begin migration 002 transaction: ") + (err_msg ? err_msg : "unknown error");
+            if (err_msg) sqlite3_free(err_msg);
+            return false;
+        }
+
+        rc = sqlite3_exec(db, vinox::storage::CANONICAL_MIGRATION_002_SQL, nullptr, nullptr, &err_msg);
+        if (rc != SQLITE_OK) {
+            err_out = std::string("Canonical migration 002 failed: ") + (err_msg ? err_msg : "unknown error");
+            if (err_msg) sqlite3_free(err_msg);
+            sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+            return false;
+        }
+
+        std::string record_sql = "INSERT INTO schema_migrations (version, applied_at_ms) VALUES (2, " + std::to_string(current_timestamp_ms()) + ");";
+        rc = sqlite3_exec(db, record_sql.c_str(), nullptr, nullptr, &err_msg);
+        if (rc != SQLITE_OK) {
+            err_out = std::string("Failed to record migration 002: ") + (err_msg ? err_msg : "unknown error");
+            if (err_msg) sqlite3_free(err_msg);
+            sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+            return false;
+        }
+
+        rc = sqlite3_exec(db, "COMMIT;", nullptr, nullptr, &err_msg);
+        if (rc != SQLITE_OK) {
+            err_out = std::string("Failed to commit migration 002: ") + (err_msg ? err_msg : "unknown error");
             if (err_msg) sqlite3_free(err_msg);
             sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
             return false;
@@ -696,6 +746,284 @@ void vinox_storage_engine_close(vinox_storage_engine* engine) {
     }
 }
 
+/* Phase 5.3 — Documents, Typed Relations & Graph CTE Implementation */
+VINOX_API vinox_status vinox_storage_document_ingest(
+    vinox_storage_engine* engine,
+    const char* title,
+    const char* content,
+    char* doc_id_out,
+    size_t doc_id_out_size
+) {
+    if (!engine || !title || !content || !doc_id_out || doc_id_out_size < 33) {
+        return fail_arg("Invalid argument for vinox_storage_document_ingest");
+    }
+    std::lock_guard<std::mutex> lock(engine->mutex);
+
+    std::string doc_id = generate_uuid();
+    std::string content_str(content);
+    std::string content_hash = std::to_string(std::hash<std::string>{}(content_str));
+    uint64_t now = current_timestamp_ms();
+
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql_doc = "INSERT INTO documents (id, title, source_uri, content_hash, mime_type, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, 'text/plain', ?, ?);";
+    if (sqlite3_prepare_v2(engine->db, sql_doc, -1, &stmt, nullptr) != SQLITE_OK) {
+        return fail_runtime("Failed to prepare document insert");
+    }
+
+    sqlite3_bind_text(stmt, 1, doc_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, title, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, "file://internal", -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, content_hash.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 5, static_cast<sqlite3_int64>(now));
+    sqlite3_bind_int64(stmt, 6, static_cast<sqlite3_int64>(now));
+
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        sqlite3_finalize(stmt);
+        return fail_runtime("Failed to insert document");
+    }
+    sqlite3_finalize(stmt);
+
+    /* Split document into chunks and insert into chunks + chunks_fts */
+    std::string chunk_id = generate_uuid();
+    const char* sql_chunk = "INSERT INTO chunks (id, document_id, chunk_index, content, token_count, created_at_ms) VALUES (?, ?, 0, ?, ?, ?);";
+    if (sqlite3_prepare_v2(engine->db, sql_chunk, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, chunk_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, doc_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, content, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 4, static_cast<int>(content_str.length() / 4));
+        sqlite3_bind_int64(stmt, 5, static_cast<sqlite3_int64>(now));
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+
+#if defined(_WIN32)
+    strncpy_s(doc_id_out, doc_id_out_size, doc_id.c_str(), _TRUNCATE);
+#else
+    strncpy(doc_id_out, doc_id.c_str(), doc_id_out_size - 1);
+    doc_id_out[doc_id_out_size - 1] = '\0';
+#endif
+
+    return VINOX_STATUS_OK;
+}
+
+VINOX_API vinox_status vinox_storage_relation_create(
+    vinox_storage_engine* engine,
+    const char* source_id,
+    const char* target_id,
+    const char* relation_type,
+    const char* evidence_text,
+    float confidence
+) {
+    if (!engine || !source_id || !target_id || !relation_type) {
+        return fail_arg("Invalid argument for vinox_storage_relation_create");
+    }
+    std::lock_guard<std::mutex> lock(engine->mutex);
+
+    std::string rel_id = generate_uuid();
+    uint64_t now = current_timestamp_ms();
+
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "INSERT INTO typed_relations (id, source_id, target_id, relation_type, evidence_text, confidence, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?);";
+    if (sqlite3_prepare_v2(engine->db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return fail_runtime("Failed to prepare relation insert");
+    }
+
+    sqlite3_bind_text(stmt, 1, rel_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, source_id, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, target_id, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, relation_type, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, evidence_text ? evidence_text : "", -1, SQLITE_TRANSIENT);
+    sqlite3_bind_double(stmt, 6, static_cast<double>(confidence));
+    sqlite3_bind_int64(stmt, 7, static_cast<sqlite3_int64>(now));
+
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        sqlite3_finalize(stmt);
+        return fail_runtime("Failed to insert relation");
+    }
+    sqlite3_finalize(stmt);
+
+    if (evidence_text && strlen(evidence_text) > 0) {
+        std::string ev_id = generate_uuid();
+        const char* sql_ev = "INSERT INTO evidence (id, relation_id, evidence_text, confidence, created_at_ms) VALUES (?, ?, ?, ?, ?);";
+        if (sqlite3_prepare_v2(engine->db, sql_ev, -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, ev_id.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, 2, rel_id.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, 3, evidence_text, -1, SQLITE_TRANSIENT);
+            sqlite3_bind_double(stmt, 4, static_cast<double>(confidence));
+            sqlite3_bind_int64(stmt, 5, static_cast<sqlite3_int64>(now));
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        }
+    }
+
+    return VINOX_STATUS_OK;
+}
+
+VINOX_API vinox_status vinox_storage_relations_query_cte(
+    const vinox_storage_engine* engine,
+    const char* entity_id,
+    char* json_out,
+    size_t json_out_size
+) {
+    if (!engine || !entity_id || !json_out || json_out_size < 2) {
+        return fail_arg("Invalid argument for vinox_storage_relations_query_cte");
+    }
+
+    const char* cte_sql =
+        "WITH RECURSIVE graph(id, target_id, relation_type, depth) AS ("
+        "  SELECT source_id, target_id, relation_type, 1 FROM typed_relations WHERE source_id = ?"
+        "  UNION ALL "
+        "  SELECT r.source_id, r.target_id, r.relation_type, g.depth + 1 "
+        "  FROM typed_relations r JOIN graph g ON r.source_id = g.target_id "
+        "  WHERE g.depth < 3"
+        ") SELECT id, target_id, relation_type, depth FROM graph;";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(engine->db, cte_sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return fail_runtime("Failed to prepare recursive CTE query");
+    }
+
+    sqlite3_bind_text(stmt, 1, entity_id, -1, SQLITE_TRANSIENT);
+
+    nlohmann::json rels = nlohmann::json::array();
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        nlohmann::json item;
+        item["source_id"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        item["target_id"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        item["relation_type"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        item["depth"] = sqlite3_column_int(stmt, 3);
+        rels.push_back(item);
+    }
+    sqlite3_finalize(stmt);
+
+    std::string res = rels.dump();
+#if defined(_WIN32)
+    strncpy_s(json_out, json_out_size, res.c_str(), _TRUNCATE);
+#else
+    strncpy(json_out, res.c_str(), json_out_size - 1);
+    json_out[json_out_size - 1] = '\0';
+#endif
+
+    return VINOX_STATUS_OK;
+}
+
+/* Phase 5.4 — Storage Lifecycle, Online Backup & Portability Implementation */
+VINOX_API vinox_status vinox_storage_backup_online(
+    vinox_storage_engine* engine,
+    const char* backup_db_path
+) {
+    if (!engine || !backup_db_path) return fail_arg("Invalid argument for backup");
+    std::lock_guard<std::mutex> lock(engine->mutex);
+
+    sqlite3* target_db = nullptr;
+    if (sqlite3_open(backup_db_path, &target_db) != SQLITE_OK) {
+        if (target_db) sqlite3_close(target_db);
+        return fail_runtime("Failed to open target database for backup");
+    }
+
+    sqlite3_backup* backup = sqlite3_backup_init(target_db, "main", engine->db, "main");
+    if (!backup) {
+        sqlite3_close(target_db);
+        return fail_runtime("Failed to initialize SQLite online backup");
+    }
+
+    int rc = sqlite3_backup_step(backup, -1);
+    sqlite3_backup_finish(backup);
+    sqlite3_close(target_db);
+
+    if (rc != SQLITE_DONE) {
+        return fail_runtime("Backup step failed to complete cleanly");
+    }
+
+    return VINOX_STATUS_OK;
+}
+
+VINOX_API vinox_status vinox_storage_export_json(
+    const vinox_storage_engine* engine,
+    char* json_out,
+    size_t json_out_size,
+    size_t* required_size_out
+) {
+    if (!engine) return fail_arg("Invalid engine for export");
+
+    nlohmann::json root;
+    root["version"] = 1;
+
+    /* Export conversations */
+    nlohmann::json convs = nlohmann::json::array();
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(engine->db, "SELECT id, title, created_at_ms, updated_at_ms FROM conversations;", -1, &stmt, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            nlohmann::json c;
+            c["id"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+            c["title"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+            c["created_at_ms"] = sqlite3_column_int64(stmt, 2);
+            c["updated_at_ms"] = sqlite3_column_int64(stmt, 3);
+            convs.push_back(c);
+        }
+        sqlite3_finalize(stmt);
+    }
+    root["conversations"] = convs;
+
+    std::string dump_str = root.dump();
+    if (required_size_out) *required_size_out = dump_str.length() + 1;
+
+    if (json_out && json_out_size >= dump_str.length() + 1) {
+#if defined(_WIN32)
+        strncpy_s(json_out, json_out_size, dump_str.c_str(), _TRUNCATE);
+#else
+        strncpy(json_out, dump_str.c_str(), json_out_size - 1);
+        json_out[json_out_size - 1] = '\0';
+#endif
+    }
+
+    return VINOX_STATUS_OK;
+}
+
+VINOX_API vinox_status vinox_storage_import_json(
+    vinox_storage_engine* engine,
+    const char* json_str
+) {
+    if (!engine || !json_str) return fail_arg("Invalid argument for import");
+    std::lock_guard<std::mutex> lock(engine->mutex);
+
+    try {
+        auto root = nlohmann::json::parse(json_str);
+        if (!root.contains("conversations") || !root["conversations"].is_array()) {
+            return fail_arg("Invalid JSON structure for import");
+        }
+
+        char* err_msg = nullptr;
+        sqlite3_exec(engine->db, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr);
+
+        const char* sql = "INSERT OR REPLACE INTO conversations (id, title, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?);";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(engine->db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            for (const auto& c : root["conversations"]) {
+                std::string id = c["id"].get<std::string>();
+                std::string title = c["title"].get<std::string>();
+                uint64_t c_at = c.value("created_at_ms", current_timestamp_ms());
+                uint64_t u_at = c.value("updated_at_ms", current_timestamp_ms());
+
+                sqlite3_bind_text(stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 2, title.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_int64(stmt, 3, static_cast<sqlite3_int64>(c_at));
+                sqlite3_bind_int64(stmt, 4, static_cast<sqlite3_int64>(u_at));
+                sqlite3_step(stmt);
+                sqlite3_reset(stmt);
+            }
+            sqlite3_finalize(stmt);
+        }
+
+        sqlite3_exec(engine->db, "COMMIT;", nullptr, nullptr, nullptr);
+        return VINOX_STATUS_OK;
+    } catch (...) {
+        sqlite3_exec(engine->db, "ROLLBACK;", nullptr, nullptr, nullptr);
+        return fail_runtime("JSON import parse or execution error");
+    }
+}
+
 const char* vinox_storage_last_error(void) {
     return vinox_last_error();
 }
+

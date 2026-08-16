@@ -130,6 +130,49 @@ VINOX_API vinox_status vinox_storage_search_hybrid(
 
 VINOX_API void vinox_storage_engine_close(vinox_storage_engine* engine);
 
+/* Phase 5.3 — Documents, Typed Relations & Graph CTE API */
+VINOX_API vinox_status vinox_storage_document_ingest(
+    vinox_storage_engine* engine,
+    const char* title,
+    const char* content,
+    char* doc_id_out,
+    size_t doc_id_out_size
+);
+
+VINOX_API vinox_status vinox_storage_relation_create(
+    vinox_storage_engine* engine,
+    const char* source_id,
+    const char* target_id,
+    const char* relation_type,
+    const char* evidence_text,
+    float confidence
+);
+
+VINOX_API vinox_status vinox_storage_relations_query_cte(
+    const vinox_storage_engine* engine,
+    const char* entity_id,
+    char* json_out,
+    size_t json_out_size
+);
+
+/* Phase 5.4 — Storage Lifecycle, Online Backup & Portability API */
+VINOX_API vinox_status vinox_storage_backup_online(
+    vinox_storage_engine* engine,
+    const char* backup_db_path
+);
+
+VINOX_API vinox_status vinox_storage_export_json(
+    const vinox_storage_engine* engine,
+    char* json_out,
+    size_t json_out_size,
+    size_t* required_size_out
+);
+
+VINOX_API vinox_status vinox_storage_import_json(
+    vinox_storage_engine* engine,
+    const char* json_str
+);
+
 VINOX_API const char* vinox_storage_last_error(void);
 
 #ifdef __cplusplus
