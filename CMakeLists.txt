@@ -236,6 +236,16 @@ else()
     target_compile_options(vinox_sandbox_worker PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+add_executable(vinox_mcp_server
+    src/mcp/server_main.cpp
+)
+target_link_libraries(vinox_mcp_server PRIVATE vinox::core nlohmann_json::nlohmann_json)
+if(MSVC)
+    target_compile_options(vinox_mcp_server PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(vinox_mcp_server PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 add_executable(vinox_cli
     src/cli/main.cpp
 )
@@ -291,6 +301,11 @@ if(BUILD_TESTING)
 
     add_executable(vinox_docker_mcp_live_test tests/docker_mcp_live_test.cpp)
     target_link_libraries(vinox_docker_mcp_live_test PRIVATE vinox::core nlohmann_json::nlohmann_json)
+
+    add_executable(vinox_mcp_server_smoke tests/mcp_server_smoke.c)
+    target_link_libraries(vinox_mcp_server_smoke PRIVATE vinox::core)
+    add_dependencies(vinox_mcp_server_smoke vinox_mcp_server)
+    add_test(NAME mcp_server_smoke COMMAND vinox_mcp_server_smoke)
 
     add_executable(vinox_agent_smoke tests/agent_smoke.c)
     target_link_libraries(vinox_agent_smoke PRIVATE vinox::agent)

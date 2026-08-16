@@ -470,11 +470,34 @@ int run_live_audit() {
     }
 #endif
 
+    /* AUDIT 10b: Phase 6.3 Standalone VINOX MCP Server */
+    vinox::mcp::McpClient native_mcp_server("vinox_mcp_native", VINOX_MCP_TRANSPORT_STDIO, "vinox_mcp_server.exe", VINOX_MCP_VERSION_2026_07_28);
+    if (native_mcp_server.connect() != VINOX_STATUS_OK || native_mcp_server.list_tools(tool_reg) != VINOX_STATUS_OK) {
+        std::cerr << "[AUDIT 10b] Standalone vinox_mcp_server.exe connection or list_tools failed\n";
+        return 10;
+    }
+
+    vinox_tool_call_request native_call{};
+    native_call.struct_size = sizeof(native_call);
+    native_call.call_id = "call_native_1";
+    native_call.tool_name = "vinox_mcp_native.vinox.search";
+    native_call.arguments_json = "{\"query\":\"hybrid vector search\"}";
+
+    memset(&audit_mcp_res, 0, sizeof(audit_mcp_res));
+    audit_mcp_res.struct_size = sizeof(audit_mcp_res);
+    if (vinox_mcp_client_call_tool(native_mcp_server.get(), &native_call, &audit_mcp_res, audit_pool, sizeof(audit_pool)) != VINOX_STATUS_OK ||
+        audit_mcp_res.result_json == NULL ||
+        std::string(audit_mcp_res.result_json).find("VINOX Hybrid Search Result") == std::string::npos) {
+        std::cerr << "[AUDIT 10b] Native VINOX MCP Server vinox.search execution failed\n";
+        return 10;
+    }
+
     std::cout << "[AUDIT 10] VINOX MCP Client, JSON-RPC 2.0 Engine & Transports .. [ PASS ]\n";
     std::cout << "  - Primary Modern MCP 2026-07-28 Stateless Routing & Streamable HTTP: Verified\n";
     std::cout << "  - Legacy MCP 2024-11-05 Handshake & GET-SSE Session Pinning Compatibility: Verified\n";
     std::cout << "  - Real Stdio Subprocess Windows Pipe Framing & JSON-RPC 2.0 Wire Round-Trips: Verified\n";
     std::cout << "  - Real Streamable HTTP WinHTTP Routing (Mcp-Method, Mcp-Name, Mcp-Protocol-Version): Verified\n";
+    std::cout << "  - Standalone VINOX MCP Server (vinox_mcp_server.exe) Wire Interoperability: Verified\n";
     std::cout << "  - Live Tool Discovery, Namespacing (<server>.<tool>) & Policy Engine Registration: Verified\n";
     std::cout << "  - Real Wire MCP Resources (list/read) & Prompts (list/get) Execution: Verified\n";
 
