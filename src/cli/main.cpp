@@ -431,25 +431,40 @@ int run_live_audit() {
     PROCESS_INFORMATION pi_audit_http{};
     char audit_http_cmd[] = "vinox_mcp_http_fixture_server.exe 18081";
 
-    if (CreateProcessA(NULL, audit_http_cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si_audit_http, &pi_audit_http)) {
-        Sleep(500);
+    if (!CreateProcessA(NULL, audit_http_cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si_audit_http, &pi_audit_http)) {
+        std::cerr << "[AUDIT 10] Failed to start HTTP fixture server process\n";
+        return 10;
+    }
+    Sleep(500);
 
-        vinox::mcp::McpClient mcp_http("http_sqlite", VINOX_MCP_TRANSPORT_STREAMABLE_HTTP, "http://127.0.0.1:18081/mcp", VINOX_MCP_VERSION_2026_07_28);
-        if (mcp_http.connect() == VINOX_STATUS_OK && mcp_http.list_tools(tool_reg) == VINOX_STATUS_OK) {
-            vinox_tool_call_request audit_http_call{};
-            audit_http_call.struct_size = sizeof(audit_http_call);
-            audit_http_call.call_id = "call_audit_http";
-            audit_http_call.tool_name = "http_sqlite.query";
-            audit_http_call.arguments_json = "{\"sql\":\"SELECT 1\"}";
-
-            memset(&audit_mcp_res, 0, sizeof(audit_mcp_res));
-            audit_mcp_res.struct_size = sizeof(audit_mcp_res);
-            vinox_mcp_client_call_tool(mcp_http.get(), &audit_http_call, &audit_mcp_res, audit_pool, sizeof(audit_pool));
-        }
-
+    vinox::mcp::McpClient mcp_http("http_sqlite", VINOX_MCP_TRANSPORT_STREAMABLE_HTTP, "http://127.0.0.1:18081/mcp", VINOX_MCP_VERSION_2026_07_28);
+    if (mcp_http.connect() != VINOX_STATUS_OK || mcp_http.list_tools(tool_reg) != VINOX_STATUS_OK) {
         TerminateProcess(pi_audit_http.hProcess, 0);
         CloseHandle(pi_audit_http.hProcess);
         CloseHandle(pi_audit_http.hThread);
+        std::cerr << "[AUDIT 10] HTTP MCP client connect or list_tools failed: " << vinox_mcp_last_error() << "\n";
+        return 10;
+    }
+
+    vinox_tool_call_request audit_http_call{};
+    audit_http_call.struct_size = sizeof(audit_http_call);
+    audit_http_call.call_id = "call_audit_http";
+    audit_http_call.tool_name = "http_sqlite.query";
+    audit_http_call.arguments_json = "{\"sql\":\"SELECT 1\"}";
+
+    memset(&audit_mcp_res, 0, sizeof(audit_mcp_res));
+    audit_mcp_res.struct_size = sizeof(audit_mcp_res);
+    vinox_status http_call_st = vinox_mcp_client_call_tool(mcp_http.get(), &audit_http_call, &audit_mcp_res, audit_pool, sizeof(audit_pool));
+
+    TerminateProcess(pi_audit_http.hProcess, 0);
+    CloseHandle(pi_audit_http.hProcess);
+    CloseHandle(pi_audit_http.hThread);
+
+    if (http_call_st != VINOX_STATUS_OK || audit_mcp_res.status_code != 0 ||
+        audit_mcp_res.result_json == NULL ||
+        std::string(audit_mcp_res.result_json).find("Executed HTTP query successfully") == std::string::npos) {
+        std::cerr << "[AUDIT 10] Real MCP tool call execution over Streamable HTTP wire failed\n";
+        return 10;
     }
 #endif
 

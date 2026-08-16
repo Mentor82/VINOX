@@ -3,6 +3,7 @@
 #include <sstream>
 #include <vector>
 #include <atomic>
+#include <cstdlib>
 #include <nlohmann/json.hpp>
 
 #if defined(_WIN32)
@@ -51,14 +52,32 @@ void run_http_server(int port) {
         SOCKET client_sock = accept(listen_sock, NULL, NULL);
         if (client_sock == INVALID_SOCKET) continue;
 
+        std::string raw_req;
         char buf[4096];
-        int bytes = recv(client_sock, buf, sizeof(buf) - 1, 0);
-        if (bytes <= 0) {
+        while (true) {
+            int bytes = recv(client_sock, buf, sizeof(buf) - 1, 0);
+            if (bytes <= 0) break;
+            buf[bytes] = '\0';
+            raw_req.append(buf, bytes);
+
+            size_t body_pos = raw_req.find("\r\n\r\n");
+            if (body_pos != std::string::npos) {
+                size_t cl_pos = raw_req.find("Content-Length:");
+                if (cl_pos == std::string::npos) cl_pos = raw_req.find("content-length:");
+                if (cl_pos != std::string::npos) {
+                    size_t cl_end = raw_req.find("\r\n", cl_pos);
+                    int clen = std::atoi(raw_req.substr(cl_pos + 15, cl_end - (cl_pos + 15)).c_str());
+                    if (raw_req.length() - (body_pos + 4) >= static_cast<size_t>(clen)) break;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        if (raw_req.empty()) {
             closesocket(client_sock);
             continue;
         }
-        buf[bytes] = '\0';
-        std::string raw_req(buf, bytes);
 
         std::istringstream stream(raw_req);
         std::string req_line;
@@ -150,6 +169,7 @@ void run_http_server(int port) {
         }
 
         send(client_sock, http_res.c_str(), static_cast<int>(http_res.length()), 0);
+        shutdown(client_sock, SD_SEND);
         closesocket(client_sock);
     }
 

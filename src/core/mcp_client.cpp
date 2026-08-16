@@ -469,27 +469,30 @@ vinox_status vinox_mcp_client_connect(vinox_mcp_client* client) {
 
     client->connected.store(true);
 
-    // Execute initialize handshake
-    nlohmann::json init_req;
-    init_req["jsonrpc"] = "2.0";
-    init_req["id"] = client->request_id_counter.fetch_add(1);
-    init_req["method"] = "initialize";
-    std::string ver_str = (client->protocol_version == VINOX_MCP_VERSION_2026_07_28) ? "2026-07-28" : "2024-11-05";
-    init_req["params"]["protocolVersion"] = ver_str;
-    init_req["params"]["clientInfo"]["name"] = "VINOX";
-    init_req["params"]["clientInfo"]["version"] = "0.1.0";
-    init_req["params"]["capabilities"] = nlohmann::json::object();
-
-    nlohmann::json init_res;
-    vinox_status st = client->exchange_json_rpc(init_req, init_res, "initialize");
-    if (st != VINOX_STATUS_OK && client->protocol_version == VINOX_MCP_VERSION_2026_07_28) {
-        // Automatic negotiation fallback for legacy servers requiring 2024-11-05
-        client->protocol_version = VINOX_MCP_VERSION_2024_11_05;
+    // Legacy initialize handshake (MCP 2024-11-05 or explicit legacy handshake mode)
+    if (client->legacy_handshake_enabled || client->protocol_version == VINOX_MCP_VERSION_2024_11_05) {
+        nlohmann::json init_req;
+        init_req["jsonrpc"] = "2.0";
+        init_req["id"] = client->request_id_counter.fetch_add(1);
+        init_req["method"] = "initialize";
         init_req["params"]["protocolVersion"] = "2024-11-05";
-        st = client->exchange_json_rpc(init_req, init_res, "initialize");
-    }
+        init_req["params"]["clientInfo"]["name"] = "VINOX";
+        init_req["params"]["clientInfo"]["version"] = "0.1.0";
+        init_req["params"]["capabilities"] = nlohmann::json::object();
 
-    if (st == VINOX_STATUS_OK && init_res.contains("result")) {
+        nlohmann::json init_res;
+        vinox_status st = client->exchange_json_rpc(init_req, init_res, "initialize");
+        if (st != VINOX_STATUS_OK) {
+            client->connected.store(false);
+            return st;
+        }
+
+        if (!init_res.contains("result")) {
+            set_mcp_last_error("Legacy initialize handshake response invalid");
+            client->connected.store(false);
+            return VINOX_STATUS_RUNTIME_ERROR;
+        }
+
         nlohmann::json notif;
         notif["jsonrpc"] = "2.0";
         notif["method"] = "notifications/initialized";

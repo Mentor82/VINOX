@@ -149,7 +149,7 @@ int main(void) {
                 if (vinox_mcp_client_call_tool(http_client, &http_call, &call_res, pool, sizeof(pool)) != VINOX_STATUS_OK ||
                     call_res.result_json == NULL ||
                     strstr(call_res.result_json, "Executed HTTP query successfully") == NULL) {
-                    printf("FAILED: vinox_mcp_client_call_tool over real Streamable HTTP wire\n");
+                    printf("FAILED: vinox_mcp_client_call_tool over real Streamable HTTP wire: %s\n", vinox_mcp_last_error());
                 }
                 printf("[DEBUG 8] call_tool http ok\n"); fflush(stdout);
 
