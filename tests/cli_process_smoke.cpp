@@ -1,0 +1,211 @@
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#if defined(_WIN32)
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+#endif
+
+#include <nlohmann/json.hpp>
+
+int run_cli_process_with_input(const std::string& cli_args, const std::string& input_text, std::string& output_text, int& exit_code) {
+#if defined(_WIN32)
+    // Prepend absolute build directory & vcpkg DLL directories to PATH for DLL discovery
+    char abs_build_path[MAX_PATH] = {0};
+    GetFullPathNameA("out\\windows-msvc-debug\\build", MAX_PATH, abs_build_path, NULL);
+
+    char abs_vcpkg_dbg[MAX_PATH] = {0};
+    GetFullPathNameA("out\\windows-msvc-debug\\vcpkg_installed\\x64-windows\\debug\\bin", MAX_PATH, abs_vcpkg_dbg, NULL);
+
+    char abs_vcpkg_rel[MAX_PATH] = {0};
+    GetFullPathNameA("out\\windows-msvc-debug\\vcpkg_installed\\x64-windows\\bin", MAX_PATH, abs_vcpkg_rel, NULL);
+
+    std::string ov_genai_dbg = "C:\\ai\\openvino_genai_2026.2.1\\openvino_genai_windows_2026.2.1.0_x86_64\\runtime\\bin\\intel64\\Debug";
+    std::string ov_genai_rel = "C:\\ai\\openvino_genai_2026.2.1\\openvino_genai_windows_2026.2.1.0_x86_64\\runtime\\bin\\intel64\\Release";
+    std::string ov_genai_tbb = "C:\\ai\\openvino_genai_2026.2.1\\openvino_genai_windows_2026.2.1.0_x86_64\\runtime\\3rdparty\\tbb\\bin";
+
+    std::string ov_sdk = "C:\\ai\\openvino_sdk\\openvino_2024.6.0";
+    const char* env_ov = std::getenv("VINOX_OPENVINO_SDK_ROOT");
+    if (env_ov && strlen(env_ov) > 0) ov_sdk = env_ov;
+
+    std::string ov_bin = ov_sdk + "\\runtime\\bin\\intel64\\Debug";
+    std::string ov_tbb = ov_sdk + "\\runtime\\3rdparty\\tbb\\bin";
+
+    char old_path[8192] = {0};
+    GetEnvironmentVariableA("PATH", old_path, sizeof(old_path));
+    std::string new_path = std::string(abs_build_path) + ";" + std::string(abs_vcpkg_dbg) + ";" + std::string(abs_vcpkg_rel) + ";" + ov_genai_dbg + ";" + ov_genai_rel + ";" + ov_genai_tbb + ";" + ov_bin + ";" + ov_tbb + ";" + std::string(old_path);
+    SetEnvironmentVariableA("PATH", new_path.c_str());
+
+    HANDLE h_child_in_read = NULL;
+    HANDLE h_child_in_write = NULL;
+    HANDLE h_child_out_read = NULL;
+    HANDLE h_child_out_write = NULL;
+
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+    sa.bInheritHandle = TRUE;
+    sa.lpSecurityDescriptor = NULL;
+
+    if (!CreatePipe(&h_child_out_read, &h_child_out_write, &sa, 0) || !SetHandleInformation(h_child_out_read, HANDLE_FLAG_INHERIT, 0)) {
+        return -1;
+    }
+    if (!CreatePipe(&h_child_in_read, &h_child_in_write, &sa, 0) || !SetHandleInformation(h_child_in_write, HANDLE_FLAG_INHERIT, 0)) {
+        CloseHandle(h_child_out_read);
+        CloseHandle(h_child_out_write);
+        return -1;
+    }
+
+    PROCESS_INFORMATION pi{};
+    STARTUPINFOA si{};
+    si.cb = sizeof(STARTUPINFOA);
+    si.hStdError = h_child_out_write;
+    si.hStdOutput = h_child_out_write;
+    si.hStdInput = h_child_in_read;
+    si.dwFlags |= STARTF_USESTDHANDLES;
+
+    std::string exe_path = "vinox-cli.exe";
+    if (GetFileAttributesA(exe_path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        exe_path = ".\\out\\windows-msvc-debug\\build\\vinox-cli.exe";
+    }
+    if (GetFileAttributesA(exe_path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        exe_path = ".\\vinox-cli.exe";
+    }
+
+    std::string cmd = exe_path + " " + cli_args;
+    char cmd_buf[512];
+    strcpy_s(cmd_buf, sizeof(cmd_buf), cmd.c_str());
+
+    if (!CreateProcessA(NULL, cmd_buf, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
+        CloseHandle(h_child_out_read);
+        CloseHandle(h_child_out_write);
+        CloseHandle(h_child_in_read);
+        CloseHandle(h_child_in_write);
+        return -2;
+    }
+
+    CloseHandle(h_child_out_write);
+    CloseHandle(h_child_in_read);
+
+    if (!input_text.empty()) {
+        DWORD written = 0;
+        WriteFile(h_child_in_write, input_text.c_str(), static_cast<DWORD>(input_text.size()), &written, NULL);
+    }
+    CloseHandle(h_child_in_write);
+
+    char buf[1024];
+    DWORD read_bytes = 0;
+    while (ReadFile(h_child_out_read, buf, sizeof(buf) - 1, &read_bytes, NULL) && read_bytes > 0) {
+        buf[read_bytes] = '\0';
+        output_text += buf;
+    }
+
+    WaitForSingleObject(pi.hProcess, 10000);
+    DWORD code = 0;
+    GetExitCodeProcess(pi.hProcess, &code);
+    exit_code = static_cast<int>(code);
+
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    CloseHandle(h_child_out_read);
+    return 0;
+#else
+    return -1;
+#endif
+}
+
+int main(void) {
+    std::cout << "Starting VINOX Phase 8 CLI Process-Level E2E & Contract Verification Test...\n";
+
+    // 1. Criteria B: Fail-Closed Remote Mode Test
+    std::string remote_out;
+    int remote_code = -1;
+    int res = run_cli_process_with_input("--remote http://127.0.0.1:8080 --json", "", remote_out, remote_code);
+    if (res == 0) {
+        if (remote_code == 1 && remote_out.find("NOT_SUPPORTED") != std::string::npos) {
+            std::cout << "  [PASS 01] Fail-Closed Remote Mode Rejection: Verified (Code 1, NOT_SUPPORTED)\n";
+        } else {
+            std::cerr << "FAILED 01: Remote mode did not reject properly (code " << remote_code << "): " << remote_out << "\n";
+            return 1;
+        }
+    } else {
+        std::cerr << "FAILED 01: Process creation failed with error code: " << res << "\n";
+        return 1;
+    }
+
+    // 2. Criteria F: Interactive --json REPL Slash-Command Pipeline Test
+    std::string commands =
+        "/plan E2E Process Test Goal\n"
+        "/approve\n"
+        "/agent\n"
+        "/diff\n"
+        "/apply\n"
+        "/exit\n";
+
+    std::string repl_out;
+    int repl_code = -1;
+    if (run_cli_process_with_input("-i --json", commands, repl_out, repl_code) != 0 || repl_code != 0) {
+        std::cerr << "FAILED 02: CLI Process execution failed with code " << repl_code << ": " << repl_out << "\n";
+        return 1;
+    }
+
+    // Verify structured JSON events output
+    std::istringstream iss(repl_out);
+    std::string line;
+    bool found_welcome = false;
+    bool found_plan = false;
+    bool found_approve = false;
+    bool found_agent_start = false;
+    bool found_diff = false;
+    bool found_apply = false;
+
+    while (std::getline(iss, line)) {
+        if (line.empty()) continue;
+        try {
+            auto j = nlohmann::json::parse(line);
+            if (j.contains("event_schema_version") && j["event_schema_version"] == 1) {
+                std::string event = j.value("event", "");
+                if (event == "cli.welcome") found_welcome = true;
+                if (event == "cli.plan") found_plan = true;
+                if (event == "cli.approve") found_approve = true;
+                if (event == "cli.agent_start") found_agent_start = true;
+                if (event == "cli.diff") found_diff = true;
+                if (event == "cli.apply") found_apply = true;
+            }
+        } catch (...) {}
+    }
+
+    if (found_welcome && found_plan && found_approve && found_agent_start && found_diff && found_apply) {
+        std::cout << "  [PASS 02] Interactive --json REPL Event Pipeline & Schema Versioning: Verified\n";
+    } else {
+        std::cerr << "FAILED 02: Missing expected JSON events in CLI output!\n" << repl_out << "\n";
+        return 1;
+    }
+
+    // 3. Criteria E: Stale Target Review-Bound Takeover Rejection Test
+    std::string stale_cmd =
+        "/plan Stale Test Goal\n"
+        "/approve\n"
+        "/agent\n"
+        "/apply\n" // Calling /apply without /diff first -> MUST fail with STALE_REVIEW_STATE!
+        "/exit\n";
+
+    std::string stale_out;
+    int stale_code = -1;
+    if (run_cli_process_with_input("-i --json", stale_cmd, stale_out, stale_code) == 0) {
+        if (stale_out.find("STALE_REVIEW_STATE") != std::string::npos) {
+            std::cout << "  [PASS 03] Stale Review Snapshot Binding Rejection (/apply without /diff): Verified\n";
+        } else {
+            std::cerr << "FAILED 03: /apply without prior /diff failed to reject stale review state: " << stale_out << "\n";
+            return 1;
+        }
+    }
+
+    std::cout << "SUCCESS: All VINOX Phase 8 CLI Process-Level E2E & Contract Verification tests passed! 🟢🔒\n";
+    return 0;
+}

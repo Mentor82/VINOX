@@ -12,10 +12,10 @@
 #endif
 
 int main(void) {
-    printf("Starting VINOX Phase 8 System E2E & CLI Reference Smoke Test...\n");
+    printf("Starting VINOX Core System E2E Pipeline Regression Smoke Test...\n");
 
-    const char* overlay_dir = ".cli_e2e_overlay";
-    const char* target_dir = ".cli_e2e_target";
+    const char* overlay_dir = ".core_e2e_overlay";
+    const char* target_dir = ".core_e2e_target";
 
     /* 1. Mode Controller Invariant Check */
     vinox_mode_controller* controller = vinox_mode_controller_create();
@@ -58,7 +58,7 @@ int main(void) {
     /* 4. Create & Validate Plan Draft */
     const char* plan_json =
         "{"
-        "  \"goal\": \"System E2E Verification Workflow\","
+        "  \"goal\": \"Core System E2E Verification Workflow\","
         "  \"steps\": ["
         "    {\"step_id\": \"step_1\", \"description\": \"Write artifact in sandbox\", \"tool_calls\": [{\"name\": \"local_write.write\", \"arguments\": {\"filename\": \"e2e_artifact.txt\", \"content\": \"VINOX E2E Success!\"}}]},"
         "    {\"step_id\": \"step_2\", \"description\": \"Finalize step\", \"dependencies\": [\"step_1\"]}"
@@ -114,7 +114,7 @@ int main(void) {
     char snapshot_hash[65] = {0};
     const char* snap_ptr = strstr(diff_buf, "SNAPSHOT:");
     if (snap_ptr) {
-        sscanf(snap_ptr, "SNAPSHOT:%64s", snapshot_hash);
+        sscanf_s(snap_ptr, "SNAPSHOT:%64s", snapshot_hash, (unsigned)sizeof(snapshot_hash));
     }
     printf("  [PASS 05] Truthful Artifact Unified Diff & Target Snapshot Calculation: Verified\n");
 
@@ -125,7 +125,8 @@ int main(void) {
     }
 
     /* Verify file exists in target workspace disk and content is accurate */
-    FILE* f = fopen(".cli_e2e_target/e2e_artifact.txt", "rb");
+    FILE* f = NULL;
+    fopen_s(&f, ".core_e2e_target/e2e_artifact.txt", "rb");
     if (!f) {
         printf("FAILED: Artifact file does not exist in target workspace!\n");
         return 1;
@@ -149,6 +150,6 @@ int main(void) {
     vinox_tool_registry_destroy(registry);
     vinox_mode_controller_destroy(controller);
 
-    printf("SUCCESS: All VINOX Phase 8 System E2E & CLI Reference smoke tests passed! 🟢🔒\n");
+    printf("SUCCESS: All VINOX Core System E2E smoke tests passed! 🟢🔒\n");
     return 0;
 }

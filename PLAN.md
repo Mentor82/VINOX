@@ -1060,7 +1060,7 @@ streamen, ohne interne Implementierungsdetails zu kennen.
 
 **Ergebnis:** Ein freigegebener Plan laeuft begrenzt in einer nachweislich isolierten Umgebung (`vinox_sandbox_worker.exe` mit Job-Object Binding) und kann nur gepruefte Artefakte zur atomaren Uebernahme vorschlagen. (Verifiziert mit `agent_smoke` & `sandbox_smoke`).
 
-### Phase 8: CLI — 🟢 abgeschlossen
+### Phase 8: CLI — 🟢 abgeschlossen & gehärtet
 
 **Ziel:** Die CLI ist die erste vollstaendige Referenzoberflaeche fuer die bereits
 implementierten Core-, Storage-, Tool-, MCP- und Agent-Vertraege. Sie enthaelt

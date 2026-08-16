@@ -332,14 +332,19 @@ if(BUILD_TESTING)
     add_dependencies(vinox_sandbox_smoke vinox_sandbox_worker)
     add_test(NAME sandbox_smoke COMMAND vinox_sandbox_smoke)
 
-    add_executable(vinox_cli_smoke tests/cli_smoke.c)
-    target_link_libraries(vinox_cli_smoke PRIVATE vinox::agent vinox::storage vinox::core)
-    add_dependencies(vinox_cli_smoke vinox_sandbox_worker vinox_cli)
-    add_test(NAME cli_smoke COMMAND vinox_cli_smoke)
+    add_executable(vinox_core_e2e_smoke tests/core_e2e_smoke.c)
+    target_link_libraries(vinox_core_e2e_smoke PRIVATE vinox::agent vinox::storage vinox::core)
+    add_dependencies(vinox_core_e2e_smoke vinox_sandbox_worker vinox_cli)
+    add_test(NAME core_e2e_smoke COMMAND vinox_core_e2e_smoke)
+
+    add_executable(vinox_cli_process_smoke tests/cli_process_smoke.cpp)
+    target_link_libraries(vinox_cli_process_smoke PRIVATE nlohmann_json::nlohmann_json)
+    add_dependencies(vinox_cli_process_smoke vinox_cli vinox_sandbox_worker)
+    add_test(NAME cli_process_smoke COMMAND vinox_cli_process_smoke)
 
     add_test(NAME audit_smoke COMMAND vinox_cli --audit)
     if(WIN32 AND VINOX_OPENVINO_SDK_ROOT)
-        set_tests_properties(audit_smoke PROPERTIES ENVIRONMENT
+        set_tests_properties(audit_smoke cli_process_smoke PROPERTIES ENVIRONMENT
             "PATH=${VINOX_OPENVINO_SDK_ROOT}/runtime/bin/intel64/$<CONFIG>\\\;${VINOX_OPENVINO_SDK_ROOT}/runtime/3rdparty/tbb/bin\\\;$ENV{PATH}"
         )
     endif()
