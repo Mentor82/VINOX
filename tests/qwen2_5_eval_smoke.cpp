@@ -19,11 +19,11 @@
 #include "vinox/serving.h"
 #include "vinox/storage.h"
 
-// Portable SHA256 Implementation
+// Portable Content Hash Implementation (SHA-256 on Windows CryptoAPI, FNV-64 Hash on POSIX)
 #ifdef _WIN32
 #include <windows.h>
 #include <wincrypt.h>
-static std::string compute_file_sha256(const std::string& filepath) {
+static std::string compute_file_content_hash(const std::string& filepath) {
     HCRYPTPROV hProv = 0;
     HCRYPTHASH hHash = 0;
     std::ifstream file(filepath, std::ios::binary);
@@ -62,10 +62,9 @@ static std::string compute_file_sha256(const std::string& filepath) {
     return oss.str();
 }
 #else
-static std::string compute_file_sha256(const std::string& filepath) {
+static std::string compute_file_content_hash(const std::string& filepath) {
     std::ifstream file(filepath, std::ios::binary);
     if (!file.is_open()) return "FILE_NOT_FOUND";
-    // Fallback pseudo-hash for non-Windows POSIX environment
     size_t hash_val = 14695981039346656037ULL;
     char c;
     while (file.get(c)) {
@@ -78,7 +77,7 @@ static std::string compute_file_sha256(const std::string& filepath) {
 }
 #endif
 
-// Helper to check if a string is strictly pure JSON (without surrounding prose)
+// Helper to check if a string is strictly pure JSON (without surrounding conversational prose)
 static bool is_strict_pure_json(const std::string& str) {
     size_t start = str.find_first_not_of(" \t\n\r");
     size_t end = str.find_last_not_of(" \t\n\r");
@@ -167,6 +166,7 @@ int main(int argc, char* argv[]) {
         const char* name;
         const char* description;
         const char* schema_json;
+        const char* sample_args_json;
         vinox_security_class sec_class;
     };
 
@@ -175,30 +175,35 @@ int main(int argc, char* argv[]) {
             "vinox.search",
             "VINOX Hybrid Retrieval (BM25 FTS5 Text Search + Optional 1024-dim Cosine Vector Search)",
             "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"embedding\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}}},\"required\":[\"query\"],\"additionalProperties\":false}",
+            "{\"query\":\"VINOX\"}",
             VINOX_SECURITY_CLASS_READ_ONLY
         },
         {
             "vinox.conversation_get",
             "Retrieve VINOX Conversation History Branch",
             "{\"type\":\"object\",\"properties\":{\"conversation_id\":{\"type\":\"string\"},\"leaf_message_id\":{\"type\":\"string\"}},\"required\":[\"conversation_id\"],\"additionalProperties\":false}",
+            "{\"conversation_id\":\"conv-123\"}",
             VINOX_SECURITY_CLASS_READ_ONLY
         },
         {
             "vinox.document_ingest",
             "Ingest and index document into VINOX storage",
             "{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"title\",\"content\"],\"additionalProperties\":false}",
+            "{\"content\":\"VINOX Core API\",\"title\":\"Architektur\"}",
             VINOX_SECURITY_CLASS_LOCAL_WRITE
         },
         {
             "vinox.relations_query",
             "Query graph entity relations and paths",
             "{\"type\":\"object\",\"properties\":{\"entity_id\":{\"type\":\"string\"}},\"required\":[\"entity_id\"],\"additionalProperties\":false}",
+            "{\"entity_id\":\"node-99\"}",
             VINOX_SECURITY_CLASS_READ_ONLY
         },
         {
             "vinox.relation_create",
             "Create typed relation between entities",
             "{\"type\":\"object\",\"properties\":{\"source\":{\"type\":\"string\"},\"target\":{\"type\":\"string\"},\"type\":{\"type\":\"string\"}},\"required\":[\"source\",\"target\",\"type\"],\"additionalProperties\":false}",
+            "{\"source\":\"comp-A\",\"target\":\"comp-B\",\"type\":\"DEPENDS_ON\"}",
             VINOX_SECURITY_CLASS_LOCAL_WRITE
         }
     };
@@ -220,34 +225,54 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // 2. Exercise Native Phase 6 OpenAI C-ABI Mapping Roundtrip Functions
+    // 2. Comprehensive 5-Tool Native OpenAI C-ABI Roundtrip Verification (Comparing Name, ID, AND Arguments JSON)
     char openai_schema_buf[4096] = {0};
     size_t req_sz = 0;
-    bool native_openai_roundtrip_ok = false;
+    bool native_openai_roundtrip_ok = true;
 
-    if (vinox_tools_format_openai_schema(registry, openai_schema_buf, sizeof(openai_schema_buf), &req_sz) == VINOX_STATUS_OK) {
+    if (vinox_tools_format_openai_schema(registry, openai_schema_buf, sizeof(openai_schema_buf), &req_sz) != VINOX_STATUS_OK) {
+        native_openai_roundtrip_ok = false;
+    } else {
         std::string schema_str(openai_schema_buf);
-        if (schema_str.find("vinox.search") != std::string::npos && schema_str.find("function") != std::string::npos) {
-            const char* sample_openai_call = "{\"id\":\"call_eval_999\",\"type\":\"function\",\"function\":{\"name\":\"vinox.search\",\"arguments\":\"{\\\"query\\\":\\\"VINOX\\\"}\"}}";
+        for (const auto& tool : CANONICAL_TOOLS) {
+            if (schema_str.find(tool.name) == std::string::npos) {
+                native_openai_roundtrip_ok = false;
+                break;
+            }
+
+            // Build OpenAI tool call JSON
+            nlohmann::json oai_call;
+            oai_call["id"] = std::string("call_eval_") + tool.name;
+            oai_call["type"] = "function";
+            oai_call["function"]["name"] = tool.name;
+            oai_call["function"]["arguments"] = tool.sample_args_json;
+
+            std::string oai_call_str = oai_call.dump();
+
             vinox_tool_call_request parsed_req;
             std::memset(&parsed_req, 0, sizeof(parsed_req));
             parsed_req.struct_size = sizeof(parsed_req);
             char pool_buf[2048] = {0};
 
-            if (vinox_tools_parse_openai_tool_call(sample_openai_call, &parsed_req, pool_buf, sizeof(pool_buf)) == VINOX_STATUS_OK) {
-                if (parsed_req.tool_name && std::strcmp(parsed_req.tool_name, "vinox.search") == 0 &&
-                    parsed_req.call_id && std::strcmp(parsed_req.call_id, "call_eval_999") == 0) {
-                    native_openai_roundtrip_ok = true;
+            if (vinox_tools_parse_openai_tool_call(oai_call_str.c_str(), &parsed_req, pool_buf, sizeof(pool_buf)) == VINOX_STATUS_OK) {
+                if (!parsed_req.tool_name || std::strcmp(parsed_req.tool_name, tool.name) != 0 ||
+                    !parsed_req.call_id || std::strcmp(parsed_req.call_id, (std::string("call_eval_") + tool.name).c_str()) != 0 ||
+                    !parsed_req.arguments_json || std::strcmp(parsed_req.arguments_json, tool.sample_args_json) != 0) {
+                    native_openai_roundtrip_ok = false;
+                    break;
                 }
+            } else {
+                native_openai_roundtrip_ok = false;
+                break;
             }
         }
     }
 
-    std::cout << "[ROUNDTRIP 01] Native VINOX OpenAI C-ABI Roundtrip Mapping Check ... "
-              << (native_openai_roundtrip_ok ? "[ PASS ] (Native C-ABI verified, 0% semantic drift)\n" : "[ FAIL ]\n");
+    std::cout << "[ROUNDTRIP 01] Native VINOX OpenAI C-ABI Roundtrip Mapping Check (All 5 Tools) ... "
+              << (native_openai_roundtrip_ok ? "[ PASS ] (Verified Name, ID, & Arguments JSON 100% Equal, 0% semantic drift)\n" : "[ FAIL ]\n");
 
     if (!native_openai_roundtrip_ok) {
-        std::cerr << "FAILED: Native VINOX OpenAI C-ABI roundtrip mapping failed!\n";
+        std::cerr << "FAILED: Native VINOX OpenAI C-ABI roundtrip mapping failed across 5 tools!\n";
         vinox_policy_engine_destroy(read_only_policy_engine);
         vinox_policy_engine_destroy(policy_engine);
         vinox_tool_registry_destroy(registry);
@@ -308,9 +333,9 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::string corpus_sha256 = compute_file_sha256(corpus_path);
+    std::string corpus_content_hash = compute_file_content_hash(corpus_path);
     std::cout << "[CORPUS 01] Loaded Deterministic Corpus with " << corpus.size()
-              << " Test Cases (Corpus SHA256: " << corpus_sha256.substr(0, 16) << "...)\n";
+              << " Test Cases (Corpus Content Hash: " << corpus_content_hash.substr(0, 16) << "...)\n";
 
     // 4. Locate OpenVINO Qwen2.5-Instruct Model
     const char* env_path = std::getenv("VINOX_TEST_MODEL_PATH");
@@ -344,7 +369,7 @@ int main(int argc, char* argv[]) {
         return 77;
     }
 
-    std::string model_xml_hash = compute_file_sha256(model_dir + "\\openvino_model.xml");
+    std::string model_xml_hash = compute_file_content_hash(model_dir + "\\openvino_model.xml");
 
     // Decoding Parameters
     const float TEMPERATURE = 0.1f;
@@ -369,12 +394,17 @@ int main(int argc, char* argv[]) {
     size_t direct_tool_expected_total = 0;
     size_t no_tool_expected_total = 0;
 
-    size_t direct_matches = 0;
-    size_t no_tool_correct = 0;
-    size_t false_positives = 0;
-    size_t false_negatives = 0;
-    size_t generation_failures = 0;
+    // Strict Raw-Output Metrics (Driving Headline Scores & Final PASS Threshold)
+    size_t raw_direct_matches = 0;
+    size_t raw_no_tool_correct = 0;
+    size_t raw_false_positives = 0;
+    size_t raw_false_negatives = 0;
 
+    // Diagnostic Extracted Metrics (Downstream Parser Metric Only)
+    size_t extracted_direct_matches = 0;
+    size_t extracted_no_tool_correct = 0;
+
+    size_t generation_failures = 0;
     size_t raw_exact_json_count = 0;
     size_t extracted_json_count = 0;
     size_t tool_call_json_syntax_count = 0;
@@ -392,11 +422,11 @@ int main(int argc, char* argv[]) {
     std::unordered_map<std::string, size_t> failure_taxonomy;
 
     nlohmann::json eval_results_json = nlohmann::json::object();
-    eval_results_json["eval_timestamp"] = "2026-08-16T14:27:00Z";
+    eval_results_json["eval_timestamp"] = "2026-08-16T14:31:00Z";
     eval_results_json["model_metadata"] = {
         {"model_id", "Qwen2.5-1B-Instruct-fp16-test-ov"},
         {"model_path", model_dir},
-        {"openvino_model_xml_sha256", model_xml_hash},
+        {"model_xml_content_hash", model_xml_hash},
         {"openvino_backend", "LLMPipeline_CPU"}
     };
     eval_results_json["decoding_parameters"] = {
@@ -408,7 +438,7 @@ int main(int argc, char* argv[]) {
     };
     eval_results_json["corpus_metadata"] = {
         {"corpus_path", corpus_path},
-        {"corpus_sha256", corpus_sha256},
+        {"corpus_content_hash", corpus_content_hash},
         {"corpus_size", corpus.size()}
     };
 
@@ -420,7 +450,7 @@ int main(int argc, char* argv[]) {
         std::cout << "  [" << item.id << "] " << item.category << ": \"" << item.user_prompt << "\"\n";
 
         std::string full_prompt = system_prompt + "User: " + item.user_prompt + "\nAssistant:";
-        size_t case_pass_count = 0;
+        size_t case_raw_pass_count = 0;
         bool is_no_tool_expected = item.expected_tool.empty();
 
         if (is_no_tool_expected) {
@@ -463,16 +493,16 @@ int main(int argc, char* argv[]) {
                 continue;
             }
 
-            // Nephy Finding 1: Strict raw output scoring (No conversational prose extraction repair)
+            // Nephy Finding 1: Strict raw output classification
             bool is_raw_pure_json = is_strict_pure_json(raw_output_text);
             if (is_raw_pure_json) {
                 raw_exact_json_count++;
             }
 
-            // Permissive Extraction Parser (Diagnostic Metric Only)
-            std::string selected_tool = "";
-            nlohmann::json tool_args = nlohmann::json::object();
-            bool has_tool_call = false;
+            // Permissive Extracted Tool Call
+            std::string extracted_tool = "";
+            nlohmann::json extracted_args = nlohmann::json::object();
+            bool has_extracted_tool_call = false;
             bool extracted_json_valid = false;
 
             try {
@@ -484,39 +514,50 @@ int main(int argc, char* argv[]) {
                     extracted_json_valid = true;
                     extracted_json_count++;
                     if (parsed.contains("tool")) {
-                        selected_tool = parsed["tool"].get<std::string>();
-                        has_tool_call = true;
+                        extracted_tool = parsed["tool"].get<std::string>();
+                        has_extracted_tool_call = true;
                     } else if (parsed.contains("name")) {
-                        selected_tool = parsed["name"].get<std::string>();
-                        has_tool_call = true;
+                        extracted_tool = parsed["name"].get<std::string>();
+                        has_extracted_tool_call = true;
                     }
                     if (parsed.contains("arguments")) {
-                        tool_args = parsed["arguments"];
+                        extracted_args = parsed["arguments"];
                     }
                 }
             } catch (...) {
                 extracted_json_valid = false;
             }
 
-            // Nephy Finding 3: Split JSON & Conversational metrics
-            if (has_tool_call && extracted_json_valid) {
+            // STRICT RAW-ONLY TOOL SELECTION (Populated ONLY if is_raw_pure_json is true!)
+            std::string raw_selected_tool = is_raw_pure_json ? extracted_tool : "";
+            bool has_raw_tool_call = is_raw_pure_json ? has_extracted_tool_call : false;
+
+            // Track Extracted Diagnostic Metrics (Separate from Headline Scores)
+            if (is_no_tool_expected) {
+                if (!has_extracted_tool_call) extracted_no_tool_correct++;
+            } else {
+                if (has_extracted_tool_call && extracted_tool == item.expected_tool) extracted_direct_matches++;
+            }
+
+            if (has_extracted_tool_call && extracted_json_valid) {
                 tool_call_json_syntax_count++;
             }
-            if (is_no_tool_expected && !has_tool_call && !raw_output_text.empty()) {
+            if (is_no_tool_expected && !has_extracted_tool_call && !raw_output_text.empty()) {
                 no_tool_conversational_text_valid_count++;
             }
 
-            bool tool_matched = false;
+            // STRICT HEADLINE METRICS (Driven ONLY by raw_selected_tool and has_raw_tool_call)
+            bool raw_tool_matched = false;
 
             if (is_no_tool_expected) {
-                if (!has_tool_call) {
-                    no_tool_correct++;
-                    tool_matched = true;
+                if (!has_raw_tool_call) {
+                    raw_no_tool_correct++;
+                    raw_tool_matched = true;
                 } else {
-                    false_positives++;
-                    if (selected_tool != "vinox.search" && selected_tool != "vinox.conversation_get" &&
-                        selected_tool != "vinox.document_ingest" && selected_tool != "vinox.relations_query" &&
-                        selected_tool != "vinox.relation_create") {
+                    raw_false_positives++;
+                    if (raw_selected_tool != "vinox.search" && raw_selected_tool != "vinox.conversation_get" &&
+                        raw_selected_tool != "vinox.document_ingest" && raw_selected_tool != "vinox.relations_query" &&
+                        raw_selected_tool != "vinox.relation_create") {
                         hallucinated_tools++;
                         failure_taxonomy["HALLUCINATED_TOOL"]++;
                     } else {
@@ -524,35 +565,38 @@ int main(int argc, char* argv[]) {
                     }
                 }
             } else {
-                if (has_tool_call) {
-                    if (selected_tool == item.expected_tool) {
-                        direct_matches++;
-                        tool_matched = true;
+                if (has_raw_tool_call) {
+                    if (raw_selected_tool == item.expected_tool) {
+                        raw_direct_matches++;
+                        raw_tool_matched = true;
                     } else {
                         failure_taxonomy["WRONG_TOOL"]++;
-                        if (selected_tool != "vinox.search" && selected_tool != "vinox.conversation_get" &&
-                            selected_tool != "vinox.document_ingest" && selected_tool != "vinox.relations_query" &&
-                            selected_tool != "vinox.relation_create") {
+                        if (raw_selected_tool != "vinox.search" && raw_selected_tool != "vinox.conversation_get" &&
+                            raw_selected_tool != "vinox.document_ingest" && raw_selected_tool != "vinox.relations_query" &&
+                            raw_selected_tool != "vinox.relation_create") {
                             hallucinated_tools++;
                             failure_taxonomy["HALLUCINATED_TOOL"]++;
                         }
                     }
                 } else {
-                    false_negatives++;
-                    failure_taxonomy["MISSING_TOOL"]++;
+                    raw_false_negatives++;
+                    if (!is_raw_pure_json && has_extracted_tool_call) {
+                        failure_taxonomy["PROSE_WRAPPED_JSON_FORMAT_DEFECT"]++;
+                    } else {
+                        failure_taxonomy["MISSING_TOOL"]++;
+                    }
                 }
             }
 
-            // Headline score for raw quality require pure JSON when tool call emitted
-            if (tool_matched && (is_no_tool_expected || is_raw_pure_json)) {
-                case_pass_count++;
+            if (raw_tool_matched) {
+                case_raw_pass_count++;
             }
 
             // Nephy Finding 5: Bounded-Payload Compliance Evaluator
-            std::string tool_args_dump = tool_args.dump();
+            std::string tool_args_dump = extracted_args.dump();
             bool bounded_payload_ok = (tool_args_dump.size() <= 262144); // <= 256 KB
-            if (has_tool_call && tool_args.is_object()) {
-                for (auto& el : tool_args.items()) {
+            if (has_extracted_tool_call && extracted_args.is_object()) {
+                for (auto& el : extracted_args.items()) {
                     if (el.value().is_array() && el.value().size() > 1024) {
                         bounded_payload_ok = false;
                     }
@@ -565,8 +609,8 @@ int main(int argc, char* argv[]) {
             bool schema_valid = false;
             bool req_fields_ok = false;
 
-            if (has_tool_call && !selected_tool.empty()) {
-                vinox_status val_st = vinox_tool_registry_validate_arguments(registry, selected_tool.c_str(), tool_args_dump.c_str(), val_err, sizeof(val_err));
+            if (has_extracted_tool_call && !extracted_tool.empty()) {
+                vinox_status val_st = vinox_tool_registry_validate_arguments(registry, extracted_tool.c_str(), tool_args_dump.c_str(), val_err, sizeof(val_err));
                 schema_valid = (val_st == VINOX_STATUS_OK);
                 if (schema_valid) {
                     schema_valid_passes++;
@@ -585,7 +629,7 @@ int main(int argc, char* argv[]) {
                         failure_taxonomy["SCHEMA_VIOLATION"]++;
                     }
                 }
-            } else if (is_no_tool_expected && !has_tool_call) {
+            } else if (is_no_tool_expected && !has_extracted_tool_call) {
                 schema_valid = true;
                 schema_valid_passes++;
                 req_fields_ok = true;
@@ -596,18 +640,18 @@ int main(int argc, char* argv[]) {
             bool policy_allowed = false;
             vinox_policy_engine* target_engine = (item.id == "TC-13") ? read_only_policy_engine : policy_engine;
 
-            if (has_tool_call && !selected_tool.empty()) {
+            if (has_extracted_tool_call && !extracted_tool.empty()) {
                 char pool_buf[4096] = {0};
                 vinox_tool_definition tdef;
                 std::memset(&tdef, 0, sizeof(tdef));
                 tdef.struct_size = sizeof(tdef);
 
-                if (vinox_tool_registry_find_tool(registry, selected_tool.c_str(), &tdef, pool_buf, sizeof(pool_buf)) == VINOX_STATUS_OK) {
+                if (vinox_tool_registry_find_tool(registry, extracted_tool.c_str(), &tdef, pool_buf, sizeof(pool_buf)) == VINOX_STATUS_OK) {
                     vinox_tool_call_request req_call;
                     std::memset(&req_call, 0, sizeof(req_call));
                     req_call.struct_size = sizeof(req_call);
                     req_call.call_id = "eval_call";
-                    req_call.tool_name = selected_tool.c_str();
+                    req_call.tool_name = extracted_tool.c_str();
                     req_call.arguments_json = tool_args_dump.c_str();
 
                     vinox_policy_decision pdecision;
@@ -623,7 +667,7 @@ int main(int argc, char* argv[]) {
                         failure_taxonomy["POLICY_DENIED"]++;
                     }
                 }
-            } else if (is_no_tool_expected && !has_tool_call) {
+            } else if (is_no_tool_expected && !has_extracted_tool_call) {
                 policy_allowed = true;
                 policy_allow_passes++;
             }
@@ -632,8 +676,9 @@ int main(int argc, char* argv[]) {
             trial_report["trial_index"] = trial + 1;
             trial_report["raw_output"] = raw_output_text;
             trial_report["is_raw_pure_json"] = is_raw_pure_json;
-            trial_report["selected_tool"] = selected_tool.empty() ? nullptr : nlohmann::json(selected_tool);
-            trial_report["tool_matched"] = tool_matched;
+            trial_report["raw_selected_tool"] = raw_selected_tool.empty() ? nullptr : nlohmann::json(raw_selected_tool);
+            trial_report["extracted_tool"] = extracted_tool.empty() ? nullptr : nlohmann::json(extracted_tool);
+            trial_report["raw_tool_matched"] = raw_tool_matched;
             trial_report["schema_valid"] = schema_valid;
             trial_report["required_fields_valid"] = req_fields_ok;
             trial_report["bounded_payload_valid"] = bounded_payload_ok;
@@ -642,31 +687,36 @@ int main(int argc, char* argv[]) {
             case_trials.push_back(trial_report);
         }
 
-        double case_pass_rate = (static_cast<double>(case_pass_count) / TRIAL_COUNT) * 100.0;
-        std::cout << "      Raw Quality Pass Rate across N=" << TRIAL_COUNT << " Trials: " << case_pass_rate << "%\n";
+        double case_raw_pass_rate = (static_cast<double>(case_raw_pass_count) / TRIAL_COUNT) * 100.0;
+        std::cout << "      Raw Quality Pass Rate across N=" << TRIAL_COUNT << " Trials: " << case_raw_pass_rate << "%\n";
 
         nlohmann::json case_report;
         case_report["id"] = item.id;
         case_report["category"] = item.category;
         case_report["user_prompt"] = item.user_prompt;
         case_report["expected_tool"] = item.expected_tool.empty() ? nullptr : nlohmann::json(item.expected_tool);
-        case_report["case_pass_rate_pct"] = case_pass_rate;
+        case_report["case_raw_pass_rate_pct"] = case_raw_pass_rate;
         case_report["trials"] = case_trials;
         cases_results.push_back(case_report);
     }
 
-    // 5. Calculate Aggregate Benchmark Metrics & Multi-Trial Precision/Recall
-    double direct_tool_acc = direct_tool_expected_total > 0 ? (static_cast<double>(direct_matches) / direct_tool_expected_total) * 100.0 : 100.0;
-    double no_tool_recall = no_tool_expected_total > 0 ? (static_cast<double>(no_tool_correct) / no_tool_expected_total) * 100.0 : 100.0;
+    // 5. Calculate Aggregate Headline Metrics & Multi-Trial Precision/Recall (Strictly Driven by Raw Output!)
+    double direct_tool_acc = direct_tool_expected_total > 0 ? (static_cast<double>(raw_direct_matches) / direct_tool_expected_total) * 100.0 : 100.0;
+    double no_tool_recall = no_tool_expected_total > 0 ? (static_cast<double>(raw_no_tool_correct) / no_tool_expected_total) * 100.0 : 100.0;
 
-    size_t no_tool_emitted_total = no_tool_correct + false_negatives;
-    double no_tool_precision = no_tool_emitted_total > 0 ? (static_cast<double>(no_tool_correct) / no_tool_emitted_total) * 100.0 : 100.0;
+    size_t raw_no_tool_emitted_total = raw_no_tool_correct + raw_false_negatives;
+    double no_tool_precision = raw_no_tool_emitted_total > 0 ? (static_cast<double>(raw_no_tool_correct) / raw_no_tool_emitted_total) * 100.0 : 100.0;
 
-    size_t tool_call_emitted_total = direct_matches + false_positives;
-    double tool_call_precision = tool_call_emitted_total > 0 ? (static_cast<double>(direct_matches) / tool_call_emitted_total) * 100.0 : 100.0;
-    double tool_call_recall = direct_tool_expected_total > 0 ? (static_cast<double>(direct_matches) / direct_tool_expected_total) * 100.0 : 100.0;
+    size_t raw_tool_call_emitted_total = raw_direct_matches + raw_false_positives;
+    double tool_call_precision = raw_tool_call_emitted_total > 0 ? (static_cast<double>(raw_direct_matches) / raw_tool_call_emitted_total) * 100.0 : 100.0;
+    double tool_call_recall = direct_tool_expected_total > 0 ? (static_cast<double>(raw_direct_matches) / direct_tool_expected_total) * 100.0 : 100.0;
 
-    double overall_tool_acc = (static_cast<double>(direct_matches + no_tool_correct) / total_trial_evaluations) * 100.0;
+    // STRICT HEADLINE METRIC (Drives PASS condition)
+    double overall_tool_acc = (static_cast<double>(raw_direct_matches + raw_no_tool_correct) / total_trial_evaluations) * 100.0;
+
+    // DIAGNOSTIC PARSER METRIC (Does NOT affect PASS condition)
+    double diagnostic_extracted_tool_acc = (static_cast<double>(extracted_direct_matches + extracted_no_tool_correct) / total_trial_evaluations) * 100.0;
+
     double raw_exact_json_rate = (static_cast<double>(raw_exact_json_count) / total_trial_evaluations) * 100.0;
     double extracted_json_rate = (static_cast<double>(extracted_json_count) / total_trial_evaluations) * 100.0;
     double schema_pass_rate = (static_cast<double>(schema_valid_passes) / total_trial_evaluations) * 100.0;
@@ -674,32 +724,33 @@ int main(int argc, char* argv[]) {
     double bounded_payload_rate = (static_cast<double>(bounded_payload_passes) / total_trial_evaluations) * 100.0;
     double policy_pass_rate = (static_cast<double>(policy_allow_passes) / total_trial_evaluations) * 100.0;
 
-    double false_positive_rate = (static_cast<double>(false_positives) / total_trial_evaluations) * 100.0;
-    double false_negative_rate = (static_cast<double>(false_negatives) / total_trial_evaluations) * 100.0;
+    double false_positive_rate = (static_cast<double>(raw_false_positives) / total_trial_evaluations) * 100.0;
+    double false_negative_rate = (static_cast<double>(raw_false_negatives) / total_trial_evaluations) * 100.0;
 
     std::cout << "\n================================================================================\n";
-    std::cout << "  EVALUATION SUMMARY & BENCHMARK REPORT (RAW LIVE MODEL OUTPUT)\n";
+    std::cout << "  EVALUATION SUMMARY & BENCHMARK REPORT (STRICT RAW LIVE MODEL OUTPUT)\n";
     std::cout << "================================================================================\n";
     std::cout << "  - Total Evaluations (Corpus x N=" << TRIAL_COUNT << "): " << total_trial_evaluations << "\n";
-    std::cout << "  - Direct Tool Selection Accuracy: " << direct_tool_acc << "%\n";
-    std::cout << "  - Tool Call Precision:            " << tool_call_precision << "%\n";
-    std::cout << "  - Tool Call Recall:               " << tool_call_recall << "%\n";
-    std::cout << "  - No-Tool Precision:              " << no_tool_precision << "%\n";
-    std::cout << "  - No-Tool Recall:                 " << no_tool_recall << "%\n";
-    std::cout << "  - Overall Tool Selection Accuracy:" << overall_tool_acc << "%\n";
-    std::cout << "  - Raw Exact Pure JSON Rate:      " << raw_exact_json_rate << "% (Strict Headline Score)\n";
-    std::cout << "  - Extracted JSON Syntax Rate:    " << extracted_json_rate << "% (Diagnostic Parser Score)\n";
-    std::cout << "  - Schema Validation Pass Rate:   " << schema_pass_rate << "%\n";
-    std::cout << "  - Required Field Correctness:    " << required_field_rate << "%\n";
-    std::cout << "  - Bounded Payload Compliance:    " << bounded_payload_rate << "%\n";
-    std::cout << "  - Policy Authorization Pass Rate:" << policy_pass_rate << "%\n";
-    std::cout << "  - Policy Denied Refusal Count:   " << policy_denied_refusals << " (Explicit Default-Deny Proof)\n";
-    std::cout << "  - False-Positive Tool Call Count: " << false_positives << " (" << false_positive_rate << "%)\n";
-    std::cout << "  - False-Negative Tool Call Count: " << false_negatives << " (" << false_negative_rate << "%)\n";
-    std::cout << "  - Generation Failures Count:     " << generation_failures << "\n";
-    std::cout << "  - Hallucinated Tool Count:       " << hallucinated_tools << "\n";
-    std::cout << "  - Forbidden Arg Violation Count: " << forbidden_property_violations << "\n";
-    std::cout << "  - Type / Enum Mismatch Count:    " << type_enum_errors << "\n";
+    std::cout << "  - Raw Direct Tool Selection Accuracy:" << direct_tool_acc << "% (Strict Headline Score)\n";
+    std::cout << "  - Raw Tool Call Precision:           " << tool_call_precision << "%\n";
+    std::cout << "  - Raw Tool Call Recall:              " << tool_call_recall << "%\n";
+    std::cout << "  - Raw No-Tool Precision:             " << no_tool_precision << "%\n";
+    std::cout << "  - Raw No-Tool Recall:                " << no_tool_recall << "%\n";
+    std::cout << "  - OVERALL RAW TOOL SELECTION ACCURACY:" << overall_tool_acc << "% (HEADLINE PASS METRIC)\n";
+    std::cout << "  - Diagnostic Extracted Tool Accuracy: " << diagnostic_extracted_tool_acc << "% (Parser Metric Only)\n";
+    std::cout << "  - Raw Exact Pure JSON Rate:          " << raw_exact_json_rate << "%\n";
+    std::cout << "  - Extracted JSON Syntax Rate:        " << extracted_json_rate << "%\n";
+    std::cout << "  - Schema Validation Pass Rate:       " << schema_pass_rate << "%\n";
+    std::cout << "  - Required Field Correctness:        " << required_field_rate << "%\n";
+    std::cout << "  - Bounded Payload Compliance:        " << bounded_payload_rate << "%\n";
+    std::cout << "  - Policy Authorization Pass Rate:    " << policy_pass_rate << "%\n";
+    std::cout << "  - Policy Denied Refusal Count:       " << policy_denied_refusals << " (Explicit Default-Deny Proof)\n";
+    std::cout << "  - Raw False-Positive Tool Call Count:" << raw_false_positives << " (" << false_positive_rate << "%)\n";
+    std::cout << "  - Raw False-Negative Tool Call Count:" << raw_false_negatives << " (" << false_negative_rate << "%)\n";
+    std::cout << "  - Generation Failures Count:         " << generation_failures << "\n";
+    std::cout << "  - Hallucinated Tool Count:           " << hallucinated_tools << "\n";
+    std::cout << "  - Forbidden Arg Violation Count:     " << forbidden_property_violations << "\n";
+    std::cout << "  - Type / Enum Mismatch Count:        " << type_enum_errors << "\n";
     std::cout << "================================================================================\n\n";
 
     eval_results_json["summary"] = {
@@ -710,6 +761,7 @@ int main(int argc, char* argv[]) {
         {"no_tool_precision_pct", no_tool_precision},
         {"no_tool_recall_pct", no_tool_recall},
         {"overall_tool_accuracy_pct", overall_tool_acc},
+        {"diagnostic_extracted_tool_accuracy_pct", diagnostic_extracted_tool_acc},
         {"raw_exact_json_rate_pct", raw_exact_json_rate},
         {"extracted_json_rate_pct", extracted_json_rate},
         {"schema_validation_pass_pct", schema_pass_rate},
@@ -717,9 +769,9 @@ int main(int argc, char* argv[]) {
         {"bounded_payload_compliance_pct", bounded_payload_rate},
         {"policy_authorization_pass_pct", policy_pass_rate},
         {"policy_denied_refusals_count", policy_denied_refusals},
-        {"false_positive_tool_call_count", false_positives},
+        {"false_positive_tool_call_count", raw_false_positives},
         {"false_positive_tool_call_rate_pct", false_positive_rate},
-        {"false_negative_tool_call_count", false_negatives},
+        {"false_negative_tool_call_count", raw_false_negatives},
         {"false_negative_tool_call_rate_pct", false_negative_rate},
         {"generation_failures_count", generation_failures},
         {"hallucinated_tools_count", hallucinated_tools},
@@ -745,7 +797,7 @@ int main(int argc, char* argv[]) {
     vinox_tool_registry_destroy(registry);
 
     if (overall_tool_acc < 80.0 || schema_pass_rate < 80.0) {
-        std::cerr << "FAILED: Live model evaluation benchmark threshold (< 80%) violated!\n";
+        std::cerr << "FAILED: Strict raw live model evaluation benchmark threshold (< 80%) violated!\n";
         return 1;
     }
 
