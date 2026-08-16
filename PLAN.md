@@ -1035,7 +1035,7 @@ streamen, ohne interne Implementierungsdetails zu kennen.
 
 **Ergebnis:** Phase 5 (SQLite, `sqlite-vec`, Dokumente, Chunks, CTE-Relationen, Online-Backup, Export/Import) ist vollstaendig umgesetzt und mit 12/12 CTest-Tests verifiziert.
 
-### Phase 6: Tools und MCP — 🟢 gehärtet & umgesetzt (Eval Harness 🟢, Issue #16 in Review)
+### Phase 6: Tools und MCP — 🟢 abgeschlossen & gehärtet
 
 - [x] interne Tool Registry und JSON-Schema-Validierung implementieren
 - [x] Policy Engine, Freigaben, Limits, Audit und Abbruch implementieren
