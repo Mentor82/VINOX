@@ -726,6 +726,12 @@ vinox_status vinox_mcp_client_read_resource(
     vinox_status st = client->exchange_json_rpc(req, res, "resources/read");
     if (st != VINOX_STATUS_OK) return st;
 
+    if (res.contains("error")) {
+        std::string err_msg = res["error"].value("message", "MCP resources/read failed");
+        set_mcp_last_error(err_msg);
+        return VINOX_STATUS_RUNTIME_ERROR;
+    }
+
     std::string str = res.contains("result") ? res["result"].dump() : res.dump();
     size_t req_len = str.length() + 1;
     if (required_size_out) *required_size_out = req_len;

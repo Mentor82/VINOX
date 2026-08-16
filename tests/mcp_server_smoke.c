@@ -36,19 +36,48 @@ int main(void) {
     char seed_cid[128] = {0};
     strncpy(seed_cid, conv_info.id, sizeof(seed_cid) - 1);
 
-    vinox_message_info msg_in;
-    memset(&msg_in, 0, sizeof(msg_in));
-    msg_in.struct_size = sizeof(msg_in);
-    msg_in.conversation_id = seed_cid;
-    msg_in.role = "user";
-    msg_in.content = "VINOX MCP hybrid vector retrieval specification note";
+    vinox_message_info msg_root;
+    memset(&msg_root, 0, sizeof(msg_root));
+    msg_root.struct_size = sizeof(msg_root);
+    msg_root.id = "msg-root";
+    msg_root.conversation_id = seed_cid;
+    msg_root.role = "user";
+    msg_root.content = "Root question about architecture";
 
     vinox_message_info msg_out;
     memset(&msg_out, 0, sizeof(msg_out));
     msg_out.struct_size = sizeof(msg_out);
 
-    if (vinox_storage_add_message(storage, &msg_in, &msg_out) != VINOX_STATUS_OK) {
-        printf("FAILED: Seed message creation failed\n");
+    if (vinox_storage_add_message(storage, &msg_root, &msg_out) != VINOX_STATUS_OK) {
+        printf("FAILED: Seed msg_root creation failed\n");
+        vinox_storage_engine_close(storage);
+        return 1;
+    }
+
+    vinox_message_info msg_branchA;
+    memset(&msg_branchA, 0, sizeof(msg_branchA));
+    msg_branchA.struct_size = sizeof(msg_branchA);
+    msg_branchA.id = "msg-branchA";
+    msg_branchA.conversation_id = seed_cid;
+    msg_branchA.parent_id = "msg-root";
+    msg_branchA.role = "assistant";
+    msg_branchA.content = "Branch A architecture suggestion";
+    if (vinox_storage_add_message(storage, &msg_branchA, &msg_out) != VINOX_STATUS_OK) {
+        printf("FAILED: Seed msg_branchA creation failed\n");
+        vinox_storage_engine_close(storage);
+        return 1;
+    }
+
+    vinox_message_info msg_branchB;
+    memset(&msg_branchB, 0, sizeof(msg_branchB));
+    msg_branchB.struct_size = sizeof(msg_branchB);
+    msg_branchB.id = "msg-branchB";
+    msg_branchB.conversation_id = seed_cid;
+    msg_branchB.parent_id = "msg-root";
+    msg_branchB.role = "assistant";
+    msg_branchB.content = "VINOX MCP hybrid vector retrieval specification note";
+    if (vinox_storage_add_message(storage, &msg_branchB, &msg_out) != VINOX_STATUS_OK) {
+        printf("FAILED: Seed msg_branchB creation failed\n");
         vinox_storage_engine_close(storage);
         return 1;
     }
@@ -171,9 +200,9 @@ int main(void) {
     }
     printf("  - Real Wire vinox.search Vector Embedding Query Execution: Verified\n");
 
-    /* 4. Execute vinox.conversation_get Tool */
+    /* 4. Execute vinox.conversation_get Tool with leaf_message_id branch selection */
     char conv_args[512];
-    snprintf(conv_args, sizeof(conv_args), "{\"conversation_id\":\"%s\"}", seed_cid);
+    snprintf(conv_args, sizeof(conv_args), "{\"conversation_id\":\"%s\",\"leaf_message_id\":\"msg-branchB\"}", seed_cid);
     call_req.call_id = "call_conv_get_1";
     call_req.tool_name = "vinox_mcp.vinox.conversation_get";
     call_req.arguments_json = conv_args;
@@ -183,13 +212,15 @@ int main(void) {
 
     if (vinox_mcp_client_call_tool(client, &call_req, &call_res, pool, sizeof(pool)) != VINOX_STATUS_OK ||
         call_res.result_json == NULL ||
-        strstr(call_res.result_json, "VINOX MCP hybrid vector retrieval specification note") == NULL) {
-        printf("FAILED: vinox.conversation_get tool execution failed: %s\n", vinox_mcp_last_error());
+        strstr(call_res.result_json, "Root question about architecture") == NULL ||
+        strstr(call_res.result_json, "VINOX MCP hybrid vector retrieval specification note") == NULL ||
+        strstr(call_res.result_json, "Branch A architecture suggestion") != NULL) {
+        printf("FAILED: vinox.conversation_get branch reconstruction failed or included alternate branch: %s\n", call_res.result_json ? call_res.result_json : vinox_mcp_last_error());
         vinox_tool_registry_destroy(reg);
         vinox_mcp_client_destroy(client);
         return 1;
     }
-    printf("  - Real Wire vinox.conversation_get Canonical History Branch: Verified\n");
+    printf("  - Real Wire vinox.conversation_get Reconstructed Parent Chain Branch: Verified\n");
 
     /* 5. Execute vinox.relations_query Tool */
     char rel_args[512];
@@ -234,7 +265,16 @@ int main(void) {
         vinox_mcp_client_destroy(client);
         return 1;
     }
-    printf("  - Native VINOX MCP Resources List/Read Canonical Storage Content: Verified\n");
+
+    /* Verify missing resource fails closed with error */
+    char err_res_buf[16384] = {0};
+    if (vinox_mcp_client_read_resource(client, "vinox://documents/NON_EXISTENT_DOC", err_res_buf, sizeof(err_res_buf), &req_sz) == VINOX_STATUS_OK) {
+        printf("FAILED: Reading missing resource vinox://documents/NON_EXISTENT_DOC must fail closed!\n");
+        vinox_tool_registry_destroy(reg);
+        vinox_mcp_client_destroy(client);
+        return 1;
+    }
+    printf("  - Native VINOX MCP Resources List/Read Canonical Content & Missing Resource Fail-Closed: Verified\n");
 
     vinox_tool_registry_destroy(reg);
     vinox_mcp_client_destroy(client);

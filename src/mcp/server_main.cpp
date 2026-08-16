@@ -3,6 +3,8 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <unordered_set>
+#include <unordered_map>
 #include <filesystem>
 #include <cstdlib>
 #include <cstring>
@@ -84,7 +86,7 @@ int main(int argc, char* argv[]) {
                 nlohmann::json t_conv;
                 t_conv["name"] = "vinox.conversation_get";
                 t_conv["description"] = "Retrieve VINOX Conversation History Branch";
-                t_conv["inputSchema"] = nlohmann::json::parse("{\"type\":\"object\",\"properties\":{\"conversation_id\":{\"type\":\"string\"}},\"required\":[\"conversation_id\"],\"additionalProperties\":false}");
+                t_conv["inputSchema"] = nlohmann::json::parse("{\"type\":\"object\",\"properties\":{\"conversation_id\":{\"type\":\"string\"},\"leaf_message_id\":{\"type\":\"string\"}},\"required\":[\"conversation_id\"],\"additionalProperties\":false}");
                 tools_arr.push_back(t_conv);
 
                 nlohmann::json t_ingest;
@@ -116,58 +118,127 @@ int main(int argc, char* argv[]) {
                     if (name == "vinox.search") {
                         std::string q = args.value("query", "");
                         std::vector<float> query_vec;
-                        if (args.contains("embedding") && args["embedding"].is_array()) {
-                            for (const auto& item : args["embedding"]) {
-                                query_vec.push_back(item.get<float>());
+                        if (args.contains("embedding")) {
+                            if (!args["embedding"].is_array()) {
+                                res["result"]["isError"] = true;
+                                res["result"]["content"] = nlohmann::json::array({
+                                    {{"type", "text"}, {"text", "Invalid embedding parameter: expected JSON array of numbers"}}
+                                });
+                            } else {
+                                for (const auto& item : args["embedding"]) {
+                                    if (!item.is_number()) {
+                                        res["result"]["isError"] = true;
+                                        res["result"]["content"] = nlohmann::json::array({
+                                            {{"type", "text"}, {"text", "Invalid embedding element: all array items must be numbers"}}
+                                        });
+                                        break;
+                                    }
+                                    query_vec.push_back(item.get<float>());
+                                }
+                                if (!res["result"].contains("isError") && !query_vec.empty() && query_vec.size() != 1024) {
+                                    res["result"]["isError"] = true;
+                                    res["result"]["content"] = nlohmann::json::array({
+                                        {{"type", "text"}, {"text", "Invalid embedding dimension: expected 1024 float values, got " + std::to_string(query_vec.size())}}
+                                    });
+                                }
                             }
                         }
-                        const float* emb_ptr = query_vec.empty() ? nullptr : query_vec.data();
-                        size_t emb_dim = query_vec.size();
-                        float alpha = query_vec.empty() ? 0.0f : 0.5f;
 
-                        vinox_search_result matches[10];
-                        for (size_t i = 0; i < 10; ++i) {
-                            std::memset(&matches[i], 0, sizeof(matches[i]));
-                            matches[i].struct_size = sizeof(vinox_search_result);
-                        }
-                        size_t match_count = 0;
-                        vinox_status st = vinox_storage_search_hybrid(storage, emb_ptr, emb_dim, q.c_str(), alpha, 10, matches, &match_count);
-                        if (st == VINOX_STATUS_OK) {
-                            nlohmann::json matches_arr = nlohmann::json::array();
-                            for (size_t i = 0; i < match_count; ++i) {
-                                matches_arr.push_back({
-                                    {"message_id", matches[i].message_id ? matches[i].message_id : ""},
-                                    {"hybrid_score", matches[i].hybrid_score},
-                                    {"bm25_score", matches[i].bm25_score},
-                                    {"vector_score", matches[i].vector_score}
+                        if (!res["result"].contains("isError")) {
+                            const float* emb_ptr = query_vec.empty() ? nullptr : query_vec.data();
+                            size_t emb_dim = query_vec.size();
+                            float alpha = query_vec.empty() ? 0.0f : 0.5f;
+
+                            vinox_search_result matches[10];
+                            for (size_t i = 0; i < 10; ++i) {
+                                std::memset(&matches[i], 0, sizeof(matches[i]));
+                                matches[i].struct_size = sizeof(vinox_search_result);
+                            }
+                            size_t match_count = 0;
+                            vinox_status st = vinox_storage_search_hybrid(storage, emb_ptr, emb_dim, q.c_str(), alpha, 10, matches, &match_count);
+                            if (st == VINOX_STATUS_OK) {
+                                nlohmann::json matches_arr = nlohmann::json::array();
+                                for (size_t i = 0; i < match_count; ++i) {
+                                    matches_arr.push_back({
+                                        {"message_id", matches[i].message_id ? matches[i].message_id : ""},
+                                        {"hybrid_score", matches[i].hybrid_score},
+                                        {"bm25_score", matches[i].bm25_score},
+                                        {"vector_score", matches[i].vector_score}
+                                    });
+                                }
+                                res["result"]["content"] = nlohmann::json::array({
+                                    {{"type", "text"}, {"text", "VINOX Hybrid Search Result for '" + q + "': " + matches_arr.dump()}}
+                                });
+                            } else {
+                                res["result"]["isError"] = true;
+                                res["result"]["content"] = nlohmann::json::array({
+                                    {{"type", "text"}, {"text", "Hybrid search failed: " + std::string(vinox_storage_last_error())}}
                                 });
                             }
-                            res["result"]["content"] = nlohmann::json::array({
-                                {{"type", "text"}, {"text", "VINOX Hybrid Search Result for '" + q + "': " + matches_arr.dump()}}
-                            });
-                        } else {
-                            res["result"]["isError"] = true;
-                            res["result"]["content"] = nlohmann::json::array({
-                                {{"type", "text"}, {"text", "Hybrid search failed: " + std::string(vinox_storage_last_error())}}
-                            });
                         }
                     } else if (name == "vinox.conversation_get") {
                         std::string cid = args.value("conversation_id", "");
+                        std::string target_msg_id = args.value("leaf_message_id", "");
                         static char json_buf[524288] = {0};
                         size_t req_sz = 0;
                         if (vinox_storage_export_json(storage, json_buf, sizeof(json_buf), &req_sz) == VINOX_STATUS_OK) {
                             auto root = nlohmann::json::parse(json_buf);
-                            nlohmann::json msgs = nlohmann::json::array();
+                            std::unordered_map<std::string, nlohmann::json> msg_map;
+                            std::unordered_set<std::string> parent_ids;
+                            std::vector<nlohmann::json> conv_msgs;
+
                             if (root.contains("messages") && root["messages"].is_array()) {
                                 for (const auto& m : root["messages"]) {
                                     if (m.value("conversation_id", "") == cid) {
-                                        msgs.push_back(m);
+                                        std::string mid = m.value("id", "");
+                                        msg_map[mid] = m;
+                                        if (m.contains("parent_id") && !m["parent_id"].is_null()) {
+                                            parent_ids.insert(m["parent_id"].get<std::string>());
+                                        }
+                                        conv_msgs.push_back(m);
                                     }
                                 }
                             }
-                            res["result"]["content"] = nlohmann::json::array({
-                                {{"type", "text"}, {"text", "Conversation History for " + cid + ": " + msgs.dump()}}
-                            });
+
+                            if (conv_msgs.empty()) {
+                                res["result"]["isError"] = true;
+                                res["result"]["content"] = nlohmann::json::array({
+                                    {{"type", "text"}, {"text", "Conversation not found or has no messages: " + cid}}
+                                });
+                            } else {
+                                // Find leaf node to reconstruct parent_id branch sequence
+                                std::string leaf_id = target_msg_id;
+                                if (leaf_id.empty() || msg_map.find(leaf_id) == msg_map.end()) {
+                                    for (const auto& m : conv_msgs) {
+                                        std::string mid = m.value("id", "");
+                                        if (parent_ids.find(mid) == parent_ids.end()) {
+                                            leaf_id = mid;
+                                            break;
+                                        }
+                                    }
+                                    if (leaf_id.empty()) leaf_id = conv_msgs.back().value("id", "");
+                                }
+
+                                // Trace parent_id chain back to root
+                                std::vector<nlohmann::json> branch_chain;
+                                std::unordered_set<std::string> visited;
+                                std::string curr_id = leaf_id;
+                                while (!curr_id.empty() && msg_map.find(curr_id) != msg_map.end() && visited.find(curr_id) == visited.end()) {
+                                    visited.insert(curr_id);
+                                    branch_chain.push_back(msg_map[curr_id]);
+                                    auto curr_msg = msg_map[curr_id];
+                                    if (curr_msg.contains("parent_id") && !curr_msg["parent_id"].is_null()) {
+                                        curr_id = curr_msg["parent_id"].get<std::string>();
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                std::reverse(branch_chain.begin(), branch_chain.end());
+
+                                res["result"]["content"] = nlohmann::json::array({
+                                    {{"type", "text"}, {"text", "Conversation History Branch for " + cid + ": " + nlohmann::json(branch_chain).dump()}}
+                                });
+                            }
                         } else {
                             res["result"]["isError"] = true;
                             res["result"]["content"] = nlohmann::json::array({
@@ -265,7 +336,8 @@ int main(int argc, char* argv[]) {
                     std::string uri = req["params"].value("uri", "");
                     static char json_buf[524288] = {0};
                     size_t req_sz = 0;
-                    std::string content_text = "Resource not found for URI: " + uri;
+                    bool found = false;
+                    std::string content_text;
                     if (vinox_storage_export_json(storage, json_buf, sizeof(json_buf), &req_sz) == VINOX_STATUS_OK) {
                         auto root = nlohmann::json::parse(json_buf);
                         if (uri.rfind("vinox://conversations/", 0) == 0) {
@@ -278,12 +350,16 @@ int main(int argc, char* argv[]) {
                                     }
                                 }
                             }
-                            content_text = "Conversation Resource " + cid + ": " + conv_msgs.dump();
+                            if (!conv_msgs.empty()) {
+                                found = true;
+                                content_text = "Conversation Resource " + cid + ": " + conv_msgs.dump();
+                            }
                         } else if (uri.rfind("vinox://documents/", 0) == 0) {
                             std::string did = uri.substr(strlen("vinox://documents/"));
                             if (root.contains("documents") && root["documents"].is_array()) {
                                 for (const auto& d : root["documents"]) {
                                     if (d.value("id", "") == did) {
+                                        found = true;
                                         content_text = "Document Resource " + did + ": " + d.dump();
                                         break;
                                     }
@@ -291,9 +367,14 @@ int main(int argc, char* argv[]) {
                             }
                         }
                     }
-                    res["result"]["contents"] = nlohmann::json::array({
-                        {{"uri", uri}, {"text", content_text}}
-                    });
+                    if (found) {
+                        res["result"]["contents"] = nlohmann::json::array({
+                            {{"uri", uri}, {"text", content_text}}
+                        });
+                    } else {
+                        res["error"]["code"] = -32602;
+                        res["error"]["message"] = "Resource not found for URI: " + uri;
+                    }
                 }
             } else if (method == "prompts/list") {
                 res["result"]["prompts"] = nlohmann::json::array({
