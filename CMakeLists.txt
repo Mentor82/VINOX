@@ -255,7 +255,7 @@ endif()
 add_executable(vinox_mcp_server
     src/mcp/server_main.cpp
 )
-target_link_libraries(vinox_mcp_server PRIVATE vinox::core nlohmann_json::nlohmann_json)
+target_link_libraries(vinox_mcp_server PRIVATE vinox::core vinox::storage nlohmann_json::nlohmann_json)
 if(MSVC)
     target_compile_options(vinox_mcp_server PRIVATE /W4 /permissive- /EHsc)
 else()
