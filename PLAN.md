@@ -48,6 +48,10 @@ CLI / GUI / Server / externe Apps
 - Chat, Plan und Agent besitzen unveraenderliche, technisch erzwungene Policies.
 - Toolausfuehrung im Agent-Modus erfolgt ausserhalb des Hostprozesses.
 - Konfiguration und Fehlerbehandlung sind fuer CLI, Server und GUI konsistent.
+- Ab Phase 8 enthalten CLI, Server und GUI keine eigene Geschaefts-, Tool- oder
+    Agent-Logik; sie sind Adapter auf dieselben Core-, Storage-, Tool-, MCP- und
+    Agent-Vertraege. Kein Frontend oder Protokoll darf eine zweite Governance-
+    oder Execution-Implementierung einfuehren.
 - Build und Laufzeit verwenden ausschliesslich versionierte Abhaengigkeiten aus
     dem Buildbaum beziehungsweise dem erzeugten Standalone-Stage.
 - Eine installierte Qt-, OpenVINO-, vcpkg- oder Modellumgebung ist zur Laufzeit
@@ -1056,55 +1060,245 @@ streamen, ohne interne Implementierungsdetails zu kennen.
 
 **Ergebnis:** Ein freigegebener Plan laeuft begrenzt in einer nachweislich isolierten Umgebung (`vinox_sandbox_worker.exe` mit Job-Object Binding) und kann nur gepruefte Artefakte zur atomaren Uebernahme vorschlagen. (Verifiziert mit `agent_smoke` & `sandbox_smoke`).
 
-### Phase 8: CLI
+### Phase 8: CLI — Referenzoberflaeche und erster System-E2E
 
-- lokales Chatten ueber DLL
-- Servermodus ueber HTTP
-- Streaming, Abbruch und Parameter
-- Sitzungsverlauf und JSON-Ausgabe
+**Ziel:** Die CLI ist die erste vollstaendige Referenzoberflaeche fuer die bereits
+implementierten Core-, Storage-, Tool-, MCP- und Agent-Vertraege. Sie enthaelt
+keine eigene Runtime- oder Governance-Logik.
 
-**Ergebnis:** Vollstaendig nutzbarer Terminal-Chat fuer Entwicklung und Tests.
+**Architektur-Invarianten:**
 
-### Phase 9: Server
+- lokaler DLL-Modus und entfernter HTTP-Modus verwenden dieselben fachlichen
+    Zustaende, Fehlerklassen und Capability-Begriffe
+- Chat, Plan und Agent sind echte Modi; ein CLI-Kommando darf Policies oder
+    Freigaben nicht umgehen
+- Tool Calls zeigen mindestens Toolname, Security Class, Argumente,
+    Policy-Entscheidung und Ergebnis
+- Agent Runs zeigen Plan-Hash, Workspace-/Snapshot-Bindung, Budget, aktuellen
+    Step und Terminalstatus
+- `Ctrl+C` propagiert Cancellation bis Inferenz, Tool/MCP und Sandbox; ein lokaler
+    UI-Abbruch ohne Runtime-Abbruch gilt nicht als Erfolg
+- `--json` besitzt einen stabilen, versionierbaren maschinenlesbaren Vertrag und
+    ist nicht nur die formatierte Human-Ausgabe
+- lokale und entfernte Capability-Unterschiede werden explizit gemeldet; es gibt
+    keinen stillen Fallback zwischen beiden Modi
 
-- OpenAI-kompatible DTOs und Fehlerobjekte
+**Umfang:**
+
+- lokales Chatten ueber die DLL und Servermodus ueber HTTP
+- Streaming, Abbruch, Sampling-Parameter und Kontextbudget
+- Sitzungsverlauf, Suche, Quellenanzeige und JSON-Ausgabe
+- Modellstatus, Load/Warmup/Unload und Statistiken
+- MCP-Server verbinden/trennen und Tools anzeigen
+- interaktive Freigaben fuer sicherheitsrelevante Tool Calls
+- Moduswahl `chat`, `plan` und `agent`
+- `/clear`, `/save`, `/search`, `/relate`, `/tools`, `/mcp`, `/plan`, `/agent`,
+    `/approve`, `/diff`, `/apply`, `/stats` und `/exit`
+- Plan pruefen, Plan-Hash freigeben und Agent-Run starten
+- Agent-Events, Budgets, Diffs, Validierungen und Sandbox-Artefakte anzeigen
+- Apply ausschliesslich ueber die snapshot-/review-gebundene Takeover-API
+
+**Negative Pfade:**
+
+- fehlende Capability, Governance oder Sandbox fuehrt zu einem sichtbaren,
+    strukturierten Fehler und niemals zu synthetischem Erfolg
+- stale Plan-/Workspace-/Snapshot-Bindings blockieren Approval beziehungsweise
+    Apply
+- abgebrochene oder fehlgeschlagene Tool-/Agent-Aktionen duerfen nicht als
+    abgeschlossene CLI-Schritte dargestellt werden
+
+**Acceptance Evidence:**
+
+- lokaler Mehrfachrunden-Chat mit Streaming und realem Abbruch
+- derselbe Kernworkflow im HTTP-Modus, sobald Phase 9 verfuegbar ist
+- stabiler `--json`-Vertragstest
+- deterministischer E2E-Pfad:
+  `Prompt -> Plan -> Approval -> Agent -> Sandbox write -> Diff -> Apply`
+- der E2E-Test prueft das erzeugte Artefakt und die Snapshot-Bindung tatsaechlich;
+    PASS darf keinen lediglich vorhandenen Codepfad bescheinigen
+
+**Ergebnis:** Vollstaendig nutzbare Terminal-Referenz fuer Entwicklung, Tests und
+die erste Ende-zu-Ende-Verifikation der gesamten VINOX-Ausfuehrungskette.
+
+### Phase 9: Server — Protokolladapter auf dieselben Runtime-Vertraege
+
+**Ziel:** Der Server exponiert die bestehenden Core-/Serving-/Storage-/Tool-/Agent-
+Pfade ueber einen OpenAI-kompatiblen HTTP-/SSE-Vertrag. Er implementiert keine
+zweite Tool-, Approval- oder Agent-Engine.
+
+**Architektur-Invarianten:**
+
+- OpenAI-DTOs und HTTP-Handler sind Adapter; kanonische Validation, Policy,
+    Tool-Execution und Agent-Governance bleiben in den bestehenden Bibliotheken
+- Tool-Call-IDs bleiben ueber Request, Governance, Executor und Tool Result stabil
+- Plan-Approval bindet an die erwartete Plan-Identitaet beziehungsweise den Hash,
+    nicht nur an eine mutable `plan_id`
+- Agent-Start bindet explizit Plan, Policy, Workspace/Snapshot und Budgets; er darf
+    nicht implizit den jeweils aktuellen Zustand uebernehmen
+- Disconnect, Timeout und Shutdown propagieren Cancellation bis Scheduler,
+    Modell, Tool/MCP und Sandbox
+- `failed`, `blocked`, `cancelled`, `timeout` und indeterminierte/unknown Outcomes
+    bleiben unterscheidbare Zustaende und werden nicht zu generischem `500`
+- Agent-Events sind sequenziert und reconnect-faehig; SSE Resume verwendet stabile
+    Event-/Sequence-IDs
+
+**Umfang:**
+
+- OpenAI-kompatible DTOs und strukturierte Fehlerobjekte
 - Tool Calling und Tool-Result-Nachrichten
-- Endpunkte und SSE implementieren
-- Health, Model Lifecycle, Tokenizer und Metrikendpunkte implementieren
-- Plan- und Agent-Run-Endpunkte mit Ereignisstream implementieren
-- OpenAPI-Schema bereitstellen
-- Parallelitaet, Limits und Shutdown absichern
-- API-Vertragstests schreiben
+- synchrone Endpunkte und SSE-Streaming
+- Health, Model Lifecycle, Tokenizer und Metrikendpunkte
+- Plan- und Agent-Run-Endpunkte mit Ereignisstream
+- OpenAPI-3.1-Schema und Capability-/Kompatibilitaetsmatrix
+- Parallelitaet, Admission/Rate/Request-Limits, Backpressure und Shutdown
+- API-Vertragstests fuer JSON, Tool Calls, Tool Results, SSE und Fehler
 
-**Ergebnis:** Standardclients koennen Chat-Completions synchron oder streamend
-abrufen.
+**Negative Pfade:**
 
-### Phase 10: GUI
+- Request-/Header-/Body-Limits greifen vor der Inferenz
+- Client-Disconnect entfernt laufende Requests und beendet zugehoerige
+    Tool-/Agent-Aktionen kontrolliert
+- stale Approval-/Workspace-Bindings, ungueltige Tool-Argumente und Policy-Denials
+    bleiben fail-closed
+- Backpressure, Queue-Ueberlauf und Shutdown erzeugen reproduzierbare Status- und
+    Finish-Semantik
+- nicht implementierte OpenAI-Felder werden strukturiert abgelehnt und niemals
+    stillschweigend ignoriert
+
+**Acceptance Evidence:**
+
+- OpenAI-Vertragstests fuer synchronen und streamenden Chat
+- Tool-Call-/Tool-Result-Roundtrip mit stabiler Call-ID
+- SSE-Disconnect-, Resume-, Backpressure- und Shutdown-Tests
+- Agent-Eventstream mit sequenzierten Events und eindeutigen Terminalzustaenden
+- OpenAPI-Schema stimmt mit dem tatsaechlich implementierten Verhalten ueberein
+
+**Ergebnis:** Standardclients koennen VINOX synchron und streamend nutzen, ohne
+dass die HTTP-Schicht eigene Runtime- oder Governance-Semantik besitzt.
+
+### Phase 10: GUI — UX ueber bewiesener Runtime
+
+**Ziel:** Die native GUI visualisiert und steuert dieselben Zustaende und Aktionen
+wie CLI und Server. QML/ViewModels sind kein neuer Runtime-Layer.
+
+**Architektur-Invarianten:**
+
+- keine eigene Inferenz-, Policy-, Approval-, Tool- oder Agent-Logik im QML
+- ViewModels konsumieren dieselben kanonischen DTOs/Zustaende wie CLI/Server
+- Local und Remote Mode duerfen semantisch nicht auseinanderlaufen
+- Agent-Timeline wird aus echten Runtime-/Agent-Events aufgebaut und nicht lokal
+    aus UI-Annahmen rekonstruiert
+- Diff/Apply verwendet ausschliesslich die Kern-API mit Snapshot-Bindung
+- Approval-Dialog zeigt exakt den freizugebenden Scope: Server/Tool, Argumente,
+    Security Class, Ziel sowie relevante Plan-/Workspace-/Snapshot-Bindungen
+
+**Umfang:**
 
 - QML-Oberflaeche und View Models
 - lokaler und entfernter Modus
-- Sessions, Parameter und Statistiken
-- responsive Desktop-Layouts und Fehlerzustaende
+- Sessions, Suche, Parameter, Statistiken und Quellen
+- Modell- und MCP-Verwaltung
+- Chat-/Plan-/Agent-Modusumschaltung
+- Planansicht, Approval-Dialog und Agent-Zeitleiste
+- Diff-/Artefaktansicht mit selektiver, snapshot-gebundener Uebernahme
+- responsive Desktop-Layouts und vollstaendige Fehlerzustaende
 
-**Ergebnis:** Alltagstaugliche native Chat-Anwendung ohne duplizierte
-Inferenzlogik.
+**Negative Pfade:**
+
+- stale UI-State: Aendert sich Plan, Policy, Agentstatus oder Workspace waehrend
+    eines offenen Dialogs, wird die alte Approval-/Apply-Aktion abgelehnt
+- Disconnect und Reconnect duerfen keine lokalen Phantomzustaende erzeugen
+- Fehler, Blocked, Cancelled und indeterminierte Outcomes bleiben sichtbar
+    unterscheidbar
+
+**Acceptance Evidence:**
+
+- zentrale Bedienablaeufe im lokalen und entfernten Modus
+- stale-state Approval-/Apply-Negativtests
+- GUI-Abbruch propagiert bis zur echten laufenden Operation
+- Diff-/Apply-Test prueft die gebundene Zielrevision und das resultierende Artefakt
+
+**Ergebnis:** Alltagstaugliche native Chat-/Plan-/Agent-Anwendung ohne duplizierte
+Inferenz- oder Governance-Logik.
 
 ### Phase 11: Optionale Multiagent-Ausbaustufe
+
+#### Phase 11.0 — Evaluation-/Architecture-Gate
+
+Vor der eigentlichen Multiagent-Implementierung wird die Einzelagent-Baseline
+versioniert eingefroren und ein fester Evaluationssatz definiert. Messgroessen und
+Aktivierungsschwellen werden **vor** dem Multiagent-Benchmark festgelegt:
+Erfolgsquote, Validierungsfehler, Tokens/Cost Units, Laufzeit, Konflikte,
+Stalls und notwendige Benutzereingriffe.
+
+Multiagent bleibt per Feature-Flag deaktiviert, solange Supervisor plus Worker
+keinen reproduzierbaren Vorteil gegenueber derselben Einzelagent-Baseline zeigen.
+
+#### Phase 11.1 — Supervisor/Worker-Runtime
 
 - versionierte Agent Profiles und typisierte Action/Observation-Events erstellen
 - Supervisor, Task-DAG, Handoffs und kombinierbare Abbruchbedingungen implementieren
 - Task-Leases, Idempotency Keys, Resource Locks und Stuck Detection implementieren
-- isolierte Worker-Overlays und deterministischen Merge implementieren
-- read-only Reviewer und evidenzbasierte Abschlusspruefung implementieren
-- Einzelagent gegen Multiagent auf einem festen Evaluationssatz vergleichen
-- A2A-1.0-Client/-Server nur als separaten Folgespike bewerten
+- jeder delegierte Task erhaelt ein unveraenderliches Execution Envelope mit
+    Task-/Plan-Identitaet, erlaubten Capabilities/Tools, Resource Scope, Teilbudget
+    und Lease
+- Berechtigungen koennen bei Delegation nur gleich bleiben oder kleiner werden;
+    Delegation darf niemals neue Rechte erzeugen
+- Worker kommunizieren ueber typisierte Events und Artefakte; der Event-Log ist
+    Source of Truth, nicht ein geteilter Chat-Prompt
+- schreibende Worker verwenden getrennte Overlays/Worktrees
+- read-only Reviewer wird technisch ohne Write-Capability erzwungen und validiert
+    Claims gegen Evidenz
+- deterministischer Merge verwendet dieselbe Hash-, Snapshot- und Konfliktsemantik
+    wie der gehärtete Einzelagent-/Takeover-Pfad
+- Event-Replay aus Log plus Checkpoint muss denselben Zustand erzeugen
 
-**Ergebnis:** Multiagent kann nur aktiviert werden, wenn Isolation, Korrektheit
-und ein messbarer Vorteil gegenueber dem Einzelagenten nachgewiesen sind.
+**Negative Pfade:**
+
+- Lease-Verlust, doppelte Zustellung oder Resume darf keinen Task doppelt ausfuehren
+- parallele Worker duerfen nicht unbemerkt dieselbe Ressource veraendern
+- Worker koennen weder Freigaben erteilen noch Policies oder Budgets erweitern
+- Stuck-, Budget-, Zeit- und Benutzerabbruch stoppen den gesamten betroffenen
+    Ausfuehrungszweig deterministisch
+- Reviewer besitzt nachweislich keine mutierenden Tools
+
+**Acceptance Evidence:**
+
+- feste Single-Agent-vs-Multiagent-Benchmark-Suite
+- Event-Replay-, Lease-, Duplicate-Delivery-, Resource-Lock- und Merge-Tests
+- nachgewiesene Rechte-/Budget-Monotonie bei jeder Delegation
+- messbarer Vorteil gemaess vorher festgelegter Aktivierungsschwellen
+
+A2A-1.0-Client/-Server bleibt ein separater Folgespike **nach** akzeptierter
+Multiagent-Runtime. Multiagent und Remote-Agent-Protokoll werden nicht gleichzeitig
+als eine neue ungetestete Vertrauensgrenze eingefuehrt.
+
+**Ergebnis:** Multiagent kann nur aktiviert werden, wenn Isolation, Korrektheit,
+reproduzierbare Event-Semantik und ein messbarer Vorteil gegenueber dem
+Einzelagenten nachgewiesen sind.
 
 ### Phase 12: Haertung und Distribution
 
-- Last-, Abbruch- und Parallelitaetstests
+**Ziel:** Aus dem verifizierten Entwicklungsstand entsteht ein reproduzierbares,
+relocatable und supply-chain-geprueftes Release-Paket.
+
+**Architektur-/Release-Invarianten:**
+
+- Release-Build besitzt eindeutige Commit-/Build-ID und ein Hashmanifest ueber die
+    ausgelieferten Binaries und Runtime-Dateien
+- die kanonische `stage`-Wurzel bleibt einzige unterstuetzte Laufzeitwurzel
+- keine Build-, SDK-, Benutzer- oder Entwicklerpfade verbleiben im Paket
+- Windows-Binaries beziehungsweise Release-Pakete werden in einem dokumentierten
+    Signierungs-Schritt signiert, sobald der Signierungsprozess eingerichtet ist
+- Upgrade und Rollback duerfen Datenbank-, Config- und Workspace-Integritaet nicht
+    verletzen
+- Audit-PASS folgt weiterhin dem Evidence-Invariant: `PASS/Verified` darf nur
+    Verhalten zertifizieren, das der konkrete Verifikationspfad selbst ausgefuehrt
+    hat
+
+**Umfang:**
+
+- Last-, Abbruch-, Crash- und Parallelitaetstests
 - ABI-Kompatibilitaetspruefung
 - Standalone-Stage, Installationslayout und relocatable CMake-Paket
 - Windows-Paket mit EXE, DLL, Headern und Dokumentation
@@ -1113,8 +1307,35 @@ und ein messbarer Vorteil gegenueber dem Einzelagenten nachgewiesen sind.
 - Redistributables gegen OpenVINO-`redist.txt` und Qt-LGPL-Pflichten pruefen
 - Third-Party Notices, Modellmanifeste, SBOM und Lizenzreport paketieren
 - Linux-Build des portablen Kerns pruefen
+- Konfigurations- und DB-Migrationen mindestens von einer realen unterstuetzten
+    Vorgaengerversion testen
+- Sandbox Worker und Agent-Apply nochmals aus der installierten Stage testen
+- Upgrade-/Rollback- und Power-Loss-/Crash-artige Recovery-Tests fuer Storage und
+    Artifact Takeover
 
-**Ergebnis:** Reproduzierbares, dokumentiertes Release-Paket.
+**Negative Pfade / Release-Gates:**
+
+- fehlende, manipulierte oder global gefundene Runtime-Dateien muessen den
+    Standalone-Test deterministisch scheitern lassen
+- Loader-Audit beweist, dass jede geladene Nicht-System-DLL aus der Stage-Wurzel
+    stammt
+- Relocation-Test verschiebt die komplette Stage und wiederholt zentrale Smokes
+- Paket-Scan findet keine absoluten Build-/SDK-/Benutzerpfade
+- korruptes Hashmanifest, falsche Signatur, nicht lizenzierte Runtime oder Modell
+    blockiert das Release
+- Takeover-/Storage-Fehler duerfen nach Recovery keinen partiellen erfolgreichen
+    Zustand vortaeuschen
+
+**Acceptance Evidence:**
+
+- reproduzierbarer Clean-Build und Paket-Build mit identifizierbarer Revision
+- Standalone-Smoke aus sauberer Umgebung ohne globale Qt/OpenVINO/vcpkg-Pfade
+- Loader-, Relocation-, Lizenz-, SBOM-, Hashmanifest- und Paketinhalt-Audits
+- Upgrade-/Rollback-, Migration-, Crash-/Recovery- und Sandbox-Stage-Tests
+- ABI-Kompatibilitaetsreport fuer die unterstuetzte Release-Linie
+
+**Ergebnis:** Reproduzierbares, dokumentiertes und supply-chain-geprueftes
+Release-Paket mit nachvollziehbarer Herkunft und verifizierten Runtime-Grenzen.
 
 ## 15. Teststrategie
 
