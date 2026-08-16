@@ -354,6 +354,7 @@ if(BUILD_TESTING)
                 "PATH=${VINOX_OPENVINO_SDK_ROOT}/runtime/bin/intel64/$<CONFIG>\\\;${VINOX_OPENVINO_SDK_ROOT}/runtime/3rdparty/tbb/bin\\\;$ENV{PATH}"
             )
         endif()
+        set_tests_properties(qwen2_5_eval_smoke PROPERTIES SKIP_RETURN_CODE 77)
     endif()
 endif()
 

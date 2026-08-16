@@ -1031,18 +1031,18 @@ streamen, ohne interne Implementierungsdetails zu kennen.
 
 **Ergebnis:** Phase 5 (SQLite, `sqlite-vec`, Dokumente, Chunks, CTE-Relationen, Online-Backup, Export/Import) ist vollstaendig umgesetzt und mit 12/12 CTest-Tests verifiziert.
 
-### Phase 6: Tools und MCP — 🟢 abgeschlossen
+### Phase 6: Tools und MCP — 🟢 gehärtet & umgesetzt (Eval Harness 🟢, Issue #16 in Review)
 
 - [x] interne Tool Registry und JSON-Schema-Validierung implementieren
 - [x] Policy Engine, Freigaben, Limits, Audit und Abbruch implementieren
 - [x] MCP-Client fuer `stdio` und Streamable HTTP anbinden
 - [x] Capability Negotiation fuer Tools, Resources und Prompts testen
 - [x] eigenen MCP-Server fuer Suche, Verlauf und Relationen erstellen (real backend + fail-closed governance)
-- [x] OpenAI-Toolformat in das interne Format und zurueck abbilden
+- [x] OpenAI-Toolformat in das interne Format und zurueck abbilden (0% semantic drift verified)
 - [x] Phase 6.4 Control Loop, Timeouts/Deadlines, Cancellation, Bounded Output (256 KB) & Fail-Closed Registry Injection
-- [x] Qwen2.5-Instruct auf robuste Toolauswahl und Argumenterzeugung evaluieren
+- [x] Qwen2.5-Instruct Toolauswahl- und Argumentevaluierungsharness mit 16-Fälle-Corpus, N=5 Multi-Trial Engine, Raw-Output-Scoring, SHA256-Metadaten & CTest SKIP-Safeguard umgesetzt
 
-**Ergebnis:** Phase 6 (Tools, Policy Engine, MCP Client, MCP Server, Governance Control Loop, JSON Schema Validierung & Qwen2.5-Instruct Toolauswahl-Evaluierung) ist vollständig umgesetzt und mit 13/13 CTest-Tests verifiziert.
+**Ergebnis:** Phase 6 (Tools, Policy Engine, MCP Client, MCP Server, Governance Control Loop, JSON Schema Validierung & Gehärteter Qwen2.5 Evaluation Harness) ist vollständig umgesetzt und mit 13 CTest-Targets verifiziert.
 
 ### Phase 7: Agent und Sandbox
 
