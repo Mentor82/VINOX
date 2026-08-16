@@ -40,6 +40,7 @@ add_library(vinox_core SHARED
     src/core/version.cpp
     src/core/logging.cpp
     src/core/tools.cpp
+    src/core/mcp_client.cpp
 )
 add_library(vinox::core ALIAS vinox_core)
 set_target_properties(vinox_core PROPERTIES EXPORT_NAME core)
@@ -234,6 +235,10 @@ if(BUILD_TESTING)
     add_executable(vinox_tools_smoke tests/tools_smoke.c)
     target_link_libraries(vinox_tools_smoke PRIVATE vinox::core)
     add_test(NAME tools_smoke COMMAND vinox_tools_smoke)
+
+    add_executable(vinox_mcp_smoke tests/mcp_smoke.c)
+    target_link_libraries(vinox_mcp_smoke PRIVATE vinox::core)
+    add_test(NAME mcp_smoke COMMAND vinox_mcp_smoke)
 
     add_test(NAME audit_smoke COMMAND vinox_cli --audit)
     if(WIN32 AND VINOX_OPENVINO_SDK_ROOT)
