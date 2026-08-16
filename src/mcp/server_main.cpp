@@ -20,6 +20,47 @@
 
 namespace fs = std::filesystem;
 
+struct CanonicalToolSpec {
+    const char* name;
+    const char* description;
+    const char* schema_json;
+    vinox_security_class security_class;
+};
+
+static const CanonicalToolSpec CANONICAL_TOOLS[] = {
+    {
+        "vinox.search",
+        "VINOX Hybrid Retrieval (BM25 FTS5 Text Search + Optional 1024-dim Cosine Vector Search)",
+        "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"embedding\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},\"description\":\"Optional 1024-dim dense float embedding vector\"}},\"required\":[\"query\"],\"additionalProperties\":false}",
+        VINOX_SECURITY_CLASS_READ_ONLY
+    },
+    {
+        "vinox.conversation_get",
+        "Retrieve VINOX Conversation History Branch",
+        "{\"type\":\"object\",\"properties\":{\"conversation_id\":{\"type\":\"string\"},\"leaf_message_id\":{\"type\":\"string\"}},\"required\":[\"conversation_id\"],\"additionalProperties\":false}",
+        VINOX_SECURITY_CLASS_READ_ONLY
+    },
+    {
+        "vinox.document_ingest",
+        "Ingest and index document into VINOX storage",
+        "{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"title\",\"content\"],\"additionalProperties\":false}",
+        VINOX_SECURITY_CLASS_LOCAL_WRITE
+    },
+    {
+        "vinox.relations_query",
+        "Query graph entity relations and paths",
+        "{\"type\":\"object\",\"properties\":{\"entity_id\":{\"type\":\"string\"}},\"required\":[\"entity_id\"],\"additionalProperties\":false}",
+        VINOX_SECURITY_CLASS_READ_ONLY
+    },
+    {
+        "vinox.relation_create",
+        "Create typed relation between entities",
+        "{\"type\":\"object\",\"properties\":{\"source\":{\"type\":\"string\"},\"target\":{\"type\":\"string\"},\"type\":{\"type\":\"string\"}},\"required\":[\"source\",\"target\",\"type\"],\"additionalProperties\":false}",
+        VINOX_SECURITY_CLASS_LOCAL_WRITE
+    }
+};
+static const size_t CANONICAL_TOOLS_COUNT = sizeof(CANONICAL_TOOLS) / sizeof(CANONICAL_TOOLS[0]);
+
 int main(int argc, char* argv[]) {
 #if defined(_WIN32)
     _setmode(_fileno(stdin), _O_BINARY);
@@ -44,50 +85,51 @@ int main(int argc, char* argv[]) {
         if (storage_err_msg.empty()) storage_err_msg = "Failed to open SQLite database engine at " + db_path;
     }
 
-    // Initialize central Phase 6.1 Bounded Tool Registry for argument & security contract validation
+    // Fail-Closed Governance Control Loop: Registry & Policy Engine Setup
     vinox_tool_registry* registry = nullptr;
-    if (vinox_tool_registry_create(&registry) == VINOX_STATUS_OK && registry) {
-        auto reg_tool = [&](const char* name, const char* desc, const char* schema, uint32_t sec_class) {
+    vinox_policy_engine* policy_engine = nullptr;
+    bool governance_initialized = false;
+
+    if (vinox_tool_registry_create(&registry) == VINOX_STATUS_OK && registry &&
+        vinox_policy_engine_create(&policy_engine) == VINOX_STATUS_OK && policy_engine) {
+        
+        bool all_registered = true;
+        for (size_t i = 0; i < CANONICAL_TOOLS_COUNT; ++i) {
             vinox_tool_definition tdef;
             std::memset(&tdef, 0, sizeof(tdef));
             tdef.struct_size = sizeof(tdef);
-            tdef.name = name;
-            tdef.description = desc;
-            tdef.parameters_json_schema = schema;
-            tdef.security_class = sec_class;
-            vinox_tool_registry_register_tool(registry, &tdef);
-        };
+            tdef.name = CANONICAL_TOOLS[i].name;
+            tdef.description = CANONICAL_TOOLS[i].description;
+            tdef.parameters_json_schema = CANONICAL_TOOLS[i].schema_json;
+            tdef.security_class = CANONICAL_TOOLS[i].security_class;
 
-        reg_tool("vinox.search",
-                 "VINOX Hybrid Retrieval (BM25 FTS5 Text Search + Optional 1024-dim Cosine Vector Search)",
-                 "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"embedding\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},\"description\":\"Optional 1024-dim dense float embedding vector\"}},\"required\":[\"query\"],\"additionalProperties\":false}",
-                 VINOX_SECURITY_CLASS_READ_ONLY);
+            if (vinox_tool_registry_register_tool(registry, &tdef) != VINOX_STATUS_OK) {
+                all_registered = false;
+                break;
+            }
+        }
 
-        reg_tool("vinox.conversation_get",
-                 "Retrieve VINOX Conversation History Branch",
-                 "{\"type\":\"object\",\"properties\":{\"conversation_id\":{\"type\":\"string\"},\"leaf_message_id\":{\"type\":\"string\"}},\"required\":[\"conversation_id\"],\"additionalProperties\":false}",
-                 VINOX_SECURITY_CLASS_READ_ONLY);
-
-        reg_tool("vinox.document_ingest",
-                 "Ingest and index document into VINOX storage",
-                 "{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"title\",\"content\"],\"additionalProperties\":false}",
-                 VINOX_SECURITY_CLASS_LOCAL_WRITE);
-
-        reg_tool("vinox.relations_query",
-                 "Query graph entity relations and paths",
-                 "{\"type\":\"object\",\"properties\":{\"entity_id\":{\"type\":\"string\"}},\"required\":[\"entity_id\"],\"additionalProperties\":false}",
-                 VINOX_SECURITY_CLASS_READ_ONLY);
-
-        reg_tool("vinox.relation_create",
-                 "Create typed relation between entities",
-                 "{\"type\":\"object\",\"properties\":{\"source\":{\"type\":\"string\"},\"target\":{\"type\":\"string\"},\"type\":{\"type\":\"string\"}},\"required\":[\"source\",\"target\",\"type\"],\"additionalProperties\":false}",
-                 VINOX_SECURITY_CLASS_LOCAL_WRITE);
+        if (all_registered) {
+            if (allow_write) {
+                vinox_policy_engine_set_rule(policy_engine, "*", VINOX_SECURITY_CLASS_LOCAL_WRITE, VINOX_APPROVAL_AUTO_ALLOWED);
+            } else {
+                vinox_policy_engine_set_rule(policy_engine, "*", VINOX_SECURITY_CLASS_READ_ONLY, VINOX_APPROVAL_AUTO_ALLOWED);
+            }
+            governance_initialized = true;
+        }
     }
 
     auto make_backend_error = [&](nlohmann::json& res) {
         res["result"]["isError"] = true;
         res["result"]["content"] = nlohmann::json::array({
             {{"type", "text"}, {"text", "VINOX storage backend unavailable: " + storage_err_msg}}
+        });
+    };
+
+    auto make_governance_error = [&](nlohmann::json& res) {
+        res["result"]["isError"] = true;
+        res["result"]["content"] = nlohmann::json::array({
+            {{"type", "text"}, {"text", "VINOX tool governance engine unavailable: initialization failed"}}
         });
     };
 
@@ -116,60 +158,92 @@ int main(int argc, char* argv[]) {
                 res["result"]["serverInfo"]["name"] = "vinox_mcp_server";
                 res["result"]["serverInfo"]["version"] = "0.1.0";
             } else if (method == "tools/list") {
-                nlohmann::json tools_arr = nlohmann::json::array();
-
-                nlohmann::json t_search;
-                t_search["name"] = "vinox.search";
-                t_search["description"] = "VINOX Hybrid Retrieval (BM25 FTS5 Text Search + Optional 1024-dim Cosine Vector Search)";
-                t_search["inputSchema"] = nlohmann::json::parse("{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"embedding\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},\"description\":\"Optional 1024-dim dense float embedding vector\"}},\"required\":[\"query\"],\"additionalProperties\":false}");
-                tools_arr.push_back(t_search);
-
-                nlohmann::json t_conv;
-                t_conv["name"] = "vinox.conversation_get";
-                t_conv["description"] = "Retrieve VINOX Conversation History Branch";
-                t_conv["inputSchema"] = nlohmann::json::parse("{\"type\":\"object\",\"properties\":{\"conversation_id\":{\"type\":\"string\"},\"leaf_message_id\":{\"type\":\"string\"}},\"required\":[\"conversation_id\"],\"additionalProperties\":false}");
-                tools_arr.push_back(t_conv);
-
-                nlohmann::json t_ingest;
-                t_ingest["name"] = "vinox.document_ingest";
-                t_ingest["description"] = "Ingest and index document into VINOX storage";
-                t_ingest["inputSchema"] = nlohmann::json::parse("{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"title\",\"content\"],\"additionalProperties\":false}");
-                tools_arr.push_back(t_ingest);
-
-                nlohmann::json t_rel_q;
-                t_rel_q["name"] = "vinox.relations_query";
-                t_rel_q["description"] = "Query graph entity relations and paths";
-                t_rel_q["inputSchema"] = nlohmann::json::parse("{\"type\":\"object\",\"properties\":{\"entity_id\":{\"type\":\"string\"}},\"required\":[\"entity_id\"],\"additionalProperties\":false}");
-                tools_arr.push_back(t_rel_q);
-
-                nlohmann::json t_rel_c;
-                t_rel_c["name"] = "vinox.relation_create";
-                t_rel_c["description"] = "Create typed relation between entities";
-                t_rel_c["inputSchema"] = nlohmann::json::parse("{\"type\":\"object\",\"properties\":{\"source\":{\"type\":\"string\"},\"target\":{\"type\":\"string\"},\"type\":{\"type\":\"string\"}},\"required\":[\"source\",\"target\",\"type\"],\"additionalProperties\":false}");
-                tools_arr.push_back(t_rel_c);
-
-                res["result"]["tools"] = tools_arr;
+                if (!governance_initialized) {
+                    res["error"]["code"] = -32603;
+                    res["error"]["message"] = "VINOX tool governance engine unavailable: initialization failed";
+                } else {
+                    nlohmann::json tools_arr = nlohmann::json::array();
+                    for (size_t i = 0; i < CANONICAL_TOOLS_COUNT; ++i) {
+                        nlohmann::json t_item;
+                        t_item["name"] = CANONICAL_TOOLS[i].name;
+                        t_item["description"] = CANONICAL_TOOLS[i].description;
+                        t_item["inputSchema"] = nlohmann::json::parse(CANONICAL_TOOLS[i].schema_json);
+                        tools_arr.push_back(t_item);
+                    }
+                    res["result"]["tools"] = tools_arr;
+                }
             } else if (method == "tools/call") {
                 if (!storage) {
                     make_backend_error(res);
+                } else if (!governance_initialized) {
+                    make_governance_error(res);
                 } else {
                     std::string name = req["params"].value("name", "");
                     auto args = req["params"].value("arguments", nlohmann::json::object());
+                    std::string args_str = args.dump();
 
-                    // Central Phase 6.1 Bounded Schema Validator check
-                    if (registry) {
-                        char val_err[512] = {0};
-                        vinox_status val_st = vinox_tool_registry_validate_arguments(registry, name.c_str(), args.dump().c_str(), val_err, sizeof(val_err));
-                        if (val_st != VINOX_STATUS_OK) {
-                            res["result"]["isError"] = true;
-                            res["result"]["content"] = nlohmann::json::array({
-                                {{"type", "text"}, {"text", "Invalid tool arguments: " + std::string(val_err)}}
-                            });
-                            std::string res_str = res.dump() + "\n";
-                            std::cout << res_str;
-                            std::cout.flush();
-                            continue;
-                        }
+                    // Gate 1: Bounded Input Payload Size Limit Check (Max 128 KB)
+                    if (args_str.size() > 131072) {
+                        res["result"]["isError"] = true;
+                        res["result"]["content"] = nlohmann::json::array({
+                            {{"type", "text"}, {"text", "Input payload size limit exceeded (max 128 KB)"}}
+                        });
+                        std::string res_str = res.dump() + "\n";
+                        std::cout << res_str;
+                        std::cout.flush();
+                        continue;
+                    }
+
+                    // Gate 2: Registry Lookup & Registered Tool Definition Binding
+                    char pool_buf[4096] = {0};
+                    vinox_tool_definition tdef;
+                    std::memset(&tdef, 0, sizeof(tdef));
+                    tdef.struct_size = sizeof(tdef);
+                    if (vinox_tool_registry_find_tool(registry, name.c_str(), &tdef, pool_buf, sizeof(pool_buf)) != VINOX_STATUS_OK) {
+                        res["error"]["code"] = -32601;
+                        res["error"]["message"] = "Tool not found: " + name;
+                        std::string res_str = res.dump() + "\n";
+                        std::cout << res_str;
+                        std::cout.flush();
+                        continue;
+                    }
+
+                    // Gate 3: Central Phase 6.1 Bounded Schema Validator Check
+                    char val_err[512] = {0};
+                    vinox_status val_st = vinox_tool_registry_validate_arguments(registry, name.c_str(), args_str.c_str(), val_err, sizeof(val_err));
+                    if (val_st != VINOX_STATUS_OK) {
+                        res["result"]["isError"] = true;
+                        res["result"]["content"] = nlohmann::json::array({
+                            {{"type", "text"}, {"text", "Invalid tool arguments: " + std::string(val_err)}}
+                        });
+                        std::string res_str = res.dump() + "\n";
+                        std::cout << res_str;
+                        std::cout.flush();
+                        continue;
+                    }
+
+                    // Gate 4: Central Phase 6.1 C-ABI Policy Engine Authorization Check
+                    vinox_tool_call_request req_call;
+                    std::memset(&req_call, 0, sizeof(req_call));
+                    req_call.struct_size = sizeof(req_call);
+                    req_call.call_id = "mcp_call";
+                    req_call.tool_name = name.c_str();
+                    req_call.arguments_json = args_str.c_str();
+
+                    vinox_policy_decision pdecision;
+                    std::memset(&pdecision, 0, sizeof(pdecision));
+                    pdecision.struct_size = sizeof(pdecision);
+                    char reason_buf[512] = {0};
+
+                    if (vinox_policy_engine_evaluate(policy_engine, &req_call, &tdef, &pdecision, reason_buf, sizeof(reason_buf)) != VINOX_STATUS_OK || !pdecision.allowed) {
+                        res["result"]["isError"] = true;
+                        res["result"]["content"] = nlohmann::json::array({
+                            {{"type", "text"}, {"text", "Permission denied: Tool execution rejected by policy engine: " + std::string(reason_buf)}}
+                        });
+                        std::string res_str = res.dump() + "\n";
+                        std::cout << res_str;
+                        std::cout.flush();
+                        continue;
                     }
 
                     if (name == "vinox.search") {
@@ -467,6 +541,9 @@ int main(int argc, char* argv[]) {
     }
     if (registry) {
         vinox_tool_registry_destroy(registry);
+    }
+    if (policy_engine) {
+        vinox_policy_engine_destroy(policy_engine);
     }
 
     return 0;

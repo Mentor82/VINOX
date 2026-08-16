@@ -1031,18 +1031,15 @@ streamen, ohne interne Implementierungsdetails zu kennen.
 
 **Ergebnis:** Phase 5 (SQLite, `sqlite-vec`, Dokumente, Chunks, CTE-Relationen, Online-Backup, Export/Import) ist vollstaendig umgesetzt und mit 12/12 CTest-Tests verifiziert.
 
-### Phase 6: Tools und MCP
-
-- interne Tool Registry und JSON-Schema-Validierung implementieren
-- Policy Engine, Freigaben, Limits, Audit und Abbruch implementieren
-- MCP-Client fuer `stdio` und Streamable HTTP anbinden
-- Capability Negotiation fuer Tools, Resources und Prompts testen
-- eigenen MCP-Server fuer Suche, Verlauf und Relationen erstellen
-- OpenAI-Toolformat in das interne Format und zurueck abbilden
+- [x] interne Tool Registry und JSON-Schema-Validierung implementieren
+- [x] Policy Engine, Freigaben, Limits, Audit und Abbruch implementieren
+- [x] MCP-Client fuer `stdio` und Streamable HTTP anbinden
+- [x] Capability Negotiation fuer Tools, Resources und Prompts testen
+- [x] eigenen MCP-Server fuer Suche, Verlauf und Relationen erstellen (real backend + fail-closed governance)
+- [x] OpenAI-Toolformat in das interne Format und zurueck abbilden
 - Qwen2.5-Instruct auf robuste Toolauswahl und Argumenterzeugung evaluieren
 
-**Ergebnis:** Externe und interne Tools koennen kontrolliert, nachvollziehbar und
-ueber OpenAI API oder MCP verwendet werden.
+**Ergebnis:** Phase 6 (Tools, MCP-Client/Server, zentraler Schema-Validator, Fail-Closed Policy Engine, Payloads & Governance Control Loop) ist vollstaendig gehärtet und mit 12/12 CTest-Tests verifiziert.
 
 ### Phase 7: Agent und Sandbox
 

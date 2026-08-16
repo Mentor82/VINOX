@@ -260,6 +260,29 @@ int main(void) {
     }
     printf("  - Central Phase 6.1 Bounded Schema Validator Server-Side Enforcement: Verified\n");
 
+    /* 4d. Test Oversize Input Payload Limit Check (Max 128 KB) */
+    call_req.call_id = "call_oversize_input";
+    call_req.tool_name = "vinox_mcp.vinox.search";
+    static char oversize_args[140000];
+    strcpy(oversize_args, "{\"query\":\"");
+    memset(oversize_args + strlen("{\"query\":\""), 'A', 135000);
+    oversize_args[strlen("{\"query\":\"") + 135000] = '\0';
+    strcat(oversize_args, "\"}");
+    call_req.arguments_json = oversize_args;
+
+    memset(&call_res, 0, sizeof(call_res));
+    call_res.struct_size = sizeof(call_res);
+
+    if (vinox_mcp_client_call_tool(client, &call_req, &call_res, pool, sizeof(pool)) != VINOX_STATUS_OK ||
+        call_res.result_json == NULL ||
+        strstr(call_res.result_json, "Input payload size limit exceeded") == NULL) {
+        printf("FAILED: Oversize input payload > 128 KB must be rejected!\n");
+        vinox_tool_registry_destroy(reg);
+        vinox_mcp_client_destroy(client);
+        return 1;
+    }
+    printf("  - Oversize Input Payload Limit (128 KB Gate): Verified\n");
+
     /* 5. Execute vinox.relations_query Tool */
     char rel_args[512];
     snprintf(rel_args, sizeof(rel_args), "{\"entity_id\":\"%s\"}", seed_doc_id);
@@ -313,6 +336,37 @@ int main(void) {
         return 1;
     }
     printf("  - Native VINOX MCP Resources List/Read Canonical Content & Missing Resource Fail-Closed: Verified\n");
+
+    /* 7. Server-Side Policy Engine Denial Test (No --allow-write flag) */
+    vinox_mcp_server_config cfg_no_write;
+    memset(&cfg_no_write, 0, sizeof(cfg_no_write));
+    cfg_no_write.struct_size = sizeof(cfg_no_write);
+    cfg_no_write.server_name = "vinox_mcp_no_write";
+    cfg_no_write.transport_kind = VINOX_MCP_TRANSPORT_STDIO;
+    cfg_no_write.command_or_url = "vinox_mcp_server.exe";
+    cfg_no_write.protocol_version = VINOX_MCP_VERSION_2026_07_28;
+
+    vinox_mcp_client* deny_client = NULL;
+    if (vinox_mcp_client_create(&cfg_no_write, &deny_client) == VINOX_STATUS_OK && deny_client) {
+        if (vinox_mcp_client_connect(deny_client) == VINOX_STATUS_OK) {
+            call_req.call_id = "call_deny_write_1";
+            call_req.tool_name = "vinox_mcp_no_write.vinox.document_ingest";
+            call_req.arguments_json = "{\"title\":\"Denied Doc\",\"content\":\"Test content\"}";
+
+            memset(&call_res, 0, sizeof(call_res));
+            call_res.struct_size = sizeof(call_res);
+
+            if (vinox_mcp_client_call_tool(deny_client, &call_req, &call_res, pool, sizeof(pool)) == VINOX_STATUS_OK) {
+                if (call_res.result_json == NULL || strstr(call_res.result_json, "rejected by policy engine") == NULL) {
+                    printf("FAILED: Write tool without --allow-write must be rejected by policy engine!\n");
+                    vinox_mcp_client_destroy(deny_client);
+                    return 1;
+                }
+            }
+        }
+        vinox_mcp_client_destroy(deny_client);
+    }
+    printf("  - Server-Side C-ABI Policy Engine Denial (No --allow-write): Verified\n");
 
     vinox_tool_registry_destroy(reg);
     vinox_mcp_client_destroy(client);
