@@ -222,6 +222,44 @@ int main(void) {
     }
     printf("  - Real Wire vinox.conversation_get Reconstructed Parent Chain Branch: Verified\n");
 
+    /* 4b. Test Unknown leaf_message_id Fails Closed */
+    snprintf(conv_args, sizeof(conv_args), "{\"conversation_id\":\"%s\",\"leaf_message_id\":\"NON_EXISTENT_LEAF\"}", seed_cid);
+    call_req.call_id = "call_conv_get_bad_leaf";
+    call_req.tool_name = "vinox_mcp.vinox.conversation_get";
+    call_req.arguments_json = conv_args;
+
+    memset(&call_res, 0, sizeof(call_res));
+    call_res.struct_size = sizeof(call_res);
+
+    if (vinox_mcp_client_call_tool(client, &call_req, &call_res, pool, sizeof(pool)) != VINOX_STATUS_OK ||
+        call_res.result_json == NULL ||
+        strstr(call_res.result_json, "Specified leaf_message_id not found") == NULL) {
+        printf("FAILED: Unknown leaf_message_id must fail closed with error!\n");
+        vinox_tool_registry_destroy(reg);
+        vinox_mcp_client_destroy(client);
+        return 1;
+    }
+    printf("  - Unknown leaf_message_id Fail-Closed Check: Verified\n");
+
+    /* 4c. Test Central Phase 6.1 Bounded Schema Validator Rejection (additionalProperties: false) */
+    call_req.call_id = "call_bad_schema_1";
+    call_req.tool_name = "vinox_mcp.vinox.search";
+    call_req.arguments_json = "{\"query\":\"test\",\"unauthorized_extra_param\":123}";
+
+    memset(&call_res, 0, sizeof(call_res));
+    call_res.struct_size = sizeof(call_res);
+
+    if (vinox_mcp_client_call_tool(client, &call_req, &call_res, pool, sizeof(pool)) != VINOX_STATUS_OK ||
+        call_res.result_json == NULL ||
+        strstr(call_res.result_json, "Invalid tool arguments") == NULL ||
+        strstr(call_res.result_json, "forbidden by schema") == NULL) {
+        printf("FAILED: Central Phase 6.1 bounded schema validator must reject additionalProperties!\n");
+        vinox_tool_registry_destroy(reg);
+        vinox_mcp_client_destroy(client);
+        return 1;
+    }
+    printf("  - Central Phase 6.1 Bounded Schema Validator Server-Side Enforcement: Verified\n");
+
     /* 5. Execute vinox.relations_query Tool */
     char rel_args[512];
     snprintf(rel_args, sizeof(rel_args), "{\"entity_id\":\"%s\"}", seed_doc_id);

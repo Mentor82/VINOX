@@ -1,5 +1,6 @@
 #include "vinox/vinox.h"
 #include "vinox/storage.h"
+#include "vinox/tools.h"
 #include <iostream>
 #include <string>
 #include <vector>
@@ -41,6 +42,46 @@ int main(int argc, char* argv[]) {
         storage = nullptr;
         storage_err_msg = vinox_storage_last_error();
         if (storage_err_msg.empty()) storage_err_msg = "Failed to open SQLite database engine at " + db_path;
+    }
+
+    // Initialize central Phase 6.1 Bounded Tool Registry for argument & security contract validation
+    vinox_tool_registry* registry = nullptr;
+    if (vinox_tool_registry_create(&registry) == VINOX_STATUS_OK && registry) {
+        auto reg_tool = [&](const char* name, const char* desc, const char* schema, uint32_t sec_class) {
+            vinox_tool_definition tdef;
+            std::memset(&tdef, 0, sizeof(tdef));
+            tdef.struct_size = sizeof(tdef);
+            tdef.name = name;
+            tdef.description = desc;
+            tdef.parameters_json_schema = schema;
+            tdef.security_class = sec_class;
+            vinox_tool_registry_register_tool(registry, &tdef);
+        };
+
+        reg_tool("vinox.search",
+                 "VINOX Hybrid Retrieval (BM25 FTS5 Text Search + Optional 1024-dim Cosine Vector Search)",
+                 "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"embedding\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},\"description\":\"Optional 1024-dim dense float embedding vector\"}},\"required\":[\"query\"],\"additionalProperties\":false}",
+                 VINOX_SECURITY_CLASS_READ_ONLY);
+
+        reg_tool("vinox.conversation_get",
+                 "Retrieve VINOX Conversation History Branch",
+                 "{\"type\":\"object\",\"properties\":{\"conversation_id\":{\"type\":\"string\"},\"leaf_message_id\":{\"type\":\"string\"}},\"required\":[\"conversation_id\"],\"additionalProperties\":false}",
+                 VINOX_SECURITY_CLASS_READ_ONLY);
+
+        reg_tool("vinox.document_ingest",
+                 "Ingest and index document into VINOX storage",
+                 "{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"title\",\"content\"],\"additionalProperties\":false}",
+                 VINOX_SECURITY_CLASS_LOCAL_WRITE);
+
+        reg_tool("vinox.relations_query",
+                 "Query graph entity relations and paths",
+                 "{\"type\":\"object\",\"properties\":{\"entity_id\":{\"type\":\"string\"}},\"required\":[\"entity_id\"],\"additionalProperties\":false}",
+                 VINOX_SECURITY_CLASS_READ_ONLY);
+
+        reg_tool("vinox.relation_create",
+                 "Create typed relation between entities",
+                 "{\"type\":\"object\",\"properties\":{\"source\":{\"type\":\"string\"},\"target\":{\"type\":\"string\"},\"type\":{\"type\":\"string\"}},\"required\":[\"source\",\"target\",\"type\"],\"additionalProperties\":false}",
+                 VINOX_SECURITY_CLASS_LOCAL_WRITE);
     }
 
     auto make_backend_error = [&](nlohmann::json& res) {
@@ -114,6 +155,22 @@ int main(int argc, char* argv[]) {
                 } else {
                     std::string name = req["params"].value("name", "");
                     auto args = req["params"].value("arguments", nlohmann::json::object());
+
+                    // Central Phase 6.1 Bounded Schema Validator check
+                    if (registry) {
+                        char val_err[512] = {0};
+                        vinox_status val_st = vinox_tool_registry_validate_arguments(registry, name.c_str(), args.dump().c_str(), val_err, sizeof(val_err));
+                        if (val_st != VINOX_STATUS_OK) {
+                            res["result"]["isError"] = true;
+                            res["result"]["content"] = nlohmann::json::array({
+                                {{"type", "text"}, {"text", "Invalid tool arguments: " + std::string(val_err)}}
+                            });
+                            std::string res_str = res.dump() + "\n";
+                            std::cout << res_str;
+                            std::cout.flush();
+                            continue;
+                        }
+                    }
 
                     if (name == "vinox.search") {
                         std::string q = args.value("query", "");
@@ -205,10 +262,15 @@ int main(int argc, char* argv[]) {
                                 res["result"]["content"] = nlohmann::json::array({
                                     {{"type", "text"}, {"text", "Conversation not found or has no messages: " + cid}}
                                 });
+                            } else if (!target_msg_id.empty() && msg_map.find(target_msg_id) == msg_map.end()) {
+                                res["result"]["isError"] = true;
+                                res["result"]["content"] = nlohmann::json::array({
+                                    {{"type", "text"}, {"text", "Specified leaf_message_id not found: " + target_msg_id}}
+                                });
                             } else {
                                 // Find leaf node to reconstruct parent_id branch sequence
                                 std::string leaf_id = target_msg_id;
-                                if (leaf_id.empty() || msg_map.find(leaf_id) == msg_map.end()) {
+                                if (leaf_id.empty()) {
                                     for (const auto& m : conv_msgs) {
                                         std::string mid = m.value("id", "");
                                         if (parent_ids.find(mid) == parent_ids.end()) {
@@ -402,6 +464,9 @@ int main(int argc, char* argv[]) {
 
     if (storage) {
         vinox_storage_engine_close(storage);
+    }
+    if (registry) {
+        vinox_tool_registry_destroy(registry);
     }
 
     return 0;
