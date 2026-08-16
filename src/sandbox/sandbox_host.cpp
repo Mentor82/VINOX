@@ -30,6 +30,32 @@ struct vinox_sandbox_host {
     int next_id{1};
 };
 
+static void cleanup_worker_resources_locked(vinox_sandbox_host* host) {
+#if defined(_WIN32)
+    if (host->hProcess) {
+        TerminateProcess(host->hProcess, 1);
+        CloseHandle(host->hProcess);
+        host->hProcess = NULL;
+    }
+    if (host->hThread) {
+        CloseHandle(host->hThread);
+        host->hThread = NULL;
+    }
+    if (host->hChildStdinWrite) {
+        CloseHandle(host->hChildStdinWrite);
+        host->hChildStdinWrite = NULL;
+    }
+    if (host->hChildStdoutRead) {
+        CloseHandle(host->hChildStdoutRead);
+        host->hChildStdoutRead = NULL;
+    }
+    if (host->hJob) {
+        CloseHandle(host->hJob);
+        host->hJob = NULL;
+    }
+#endif
+}
+
 extern "C" {
 
 VINOX_API vinox_sandbox_host* VINOX_CALL vinox_sandbox_host_create(const char* overlay_dir) {
@@ -48,6 +74,9 @@ VINOX_API void VINOX_CALL vinox_sandbox_host_destroy(vinox_sandbox_host* host) {
 
 VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_start(vinox_sandbox_host* host, const char* worker_exe_path) {
     if (!host) return VINOX_STATUS_INVALID_ARGUMENT;
+
+    std::lock_guard<std::mutex> lock(host->host_mutex);
+    cleanup_worker_resources_locked(host);
 
 #if defined(_WIN32)
     std::string exe_path = worker_exe_path ? worker_exe_path : "vinox_sandbox_worker.exe";
@@ -201,14 +230,7 @@ VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_exec_tool(vinox_sandbox_hos
             if (err_msg.length() < out_buf_sz) {
                 strncpy_s(out_buf, out_buf_sz, err_msg.c_str(), _TRUNCATE);
             }
-            if (host->hProcess) {
-                TerminateProcess(host->hProcess, 1);
-                CloseHandle(host->hProcess);
-                if (host->hThread) CloseHandle(host->hThread);
-                host->hProcess = NULL;
-                host->hThread = NULL;
-            }
-            vinox_sandbox_host_start(host, "vinox_sandbox_worker.exe");
+            cleanup_worker_resources_locked(host);
             host->cancel_requested.store(false);
             return VINOX_STATUS_CANCELLED;
         }
@@ -221,7 +243,7 @@ VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_exec_tool(vinox_sandbox_hos
                 if (err_msg.length() < out_buf_sz) {
                     strncpy_s(out_buf, out_buf_sz, err_msg.c_str(), _TRUNCATE);
                 }
-                vinox_sandbox_host_start(host, "vinox_sandbox_worker.exe");
+                cleanup_worker_resources_locked(host);
                 host->cancel_requested.store(false);
                 return VINOX_STATUS_CANCELLED;
             }
@@ -249,21 +271,12 @@ VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_exec_tool(vinox_sandbox_hos
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_wait).count();
             if (elapsed > 5000) {
                 std::lock_guard<std::mutex> lock(host->host_mutex);
-                // Terminate runaway worker process to prevent background mutating execution
-                if (host->hProcess) {
-                    TerminateProcess(host->hProcess, 1);
-                    CloseHandle(host->hProcess);
-                    if (host->hThread) CloseHandle(host->hThread);
-                    host->hProcess = NULL;
-                    host->hThread = NULL;
-                }
+                // Terminate runaway worker process and clean up ALL resources
+                cleanup_worker_resources_locked(host);
 
                 std::string err_msg = "{\"status\":\"ERROR\",\"error\":\"INDETERMINATE_OUTCOME_MUTATION_CANCELLED: Host pipe read execution deadline timeout (5000 ms). Subprocess terminated.\"}";
                 if (err_msg.length() >= out_buf_sz) return VINOX_STATUS_OUT_OF_RANGE;
                 strncpy_s(out_buf, out_buf_sz, err_msg.c_str(), _TRUNCATE);
-
-                // Restart fresh worker process for subsequent calls
-                vinox_sandbox_host_start(host, "vinox_sandbox_worker.exe");
 
                 return VINOX_STATUS_CANCELLED;
             }
@@ -347,33 +360,10 @@ VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_stop(vinox_sandbox_host* ho
         DWORD written = 0;
         WriteFile(host->hChildStdinWrite, req_str.c_str(), (DWORD)req_str.length(), &written, NULL);
     }
-
     if (host->hProcess) {
-        WaitForSingleObject(host->hProcess, 500);
-        TerminateProcess(host->hProcess, 0);
-        CloseHandle(host->hProcess);
-        host->hProcess = NULL;
+        WaitForSingleObject(host->hProcess, 200);
     }
-
-    if (host->hThread) {
-        CloseHandle(host->hThread);
-        host->hThread = NULL;
-    }
-
-    if (host->hChildStdinWrite) {
-        CloseHandle(host->hChildStdinWrite);
-        host->hChildStdinWrite = NULL;
-    }
-
-    if (host->hChildStdoutRead) {
-        CloseHandle(host->hChildStdoutRead);
-        host->hChildStdoutRead = NULL;
-    }
-
-    if (host->hJob) {
-        CloseHandle(host->hJob);
-        host->hJob = NULL;
-    }
+    cleanup_worker_resources_locked(host);
 #endif
 
     return VINOX_STATUS_OK;
@@ -384,13 +374,7 @@ VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_cancel(vinox_sandbox_host* 
     host->cancel_requested.store(true);
 #if defined(_WIN32)
     std::lock_guard<std::mutex> lock(host->host_mutex);
-    if (host->hProcess) {
-        TerminateProcess(host->hProcess, 1);
-        CloseHandle(host->hProcess);
-        if (host->hThread) CloseHandle(host->hThread);
-        host->hProcess = NULL;
-        host->hThread = NULL;
-    }
+    cleanup_worker_resources_locked(host);
 #endif
     return VINOX_STATUS_OK;
 }

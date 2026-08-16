@@ -409,7 +409,10 @@ int main(void) {
     vinox_mode_controller* mode_ctrl = vinox_mode_controller_create();
     vinox_mode_controller_set_mode(mode_ctrl, VINOX_MODE_AGENT);
 
-    const char* cancel_plan_json = "{\"version\":1,\"goal\":\"Inflight Cancel Goal\",\"steps\":[{\"step_id\":\"step1\",\"description\":\"Slow Sandbox Tool Step\",\"dependencies\":[],\"tool_calls\":[{\"name\":\"test_sleep\",\"arguments_json\":\"{\\\"delay_ms\\\":2000}\"}]}]}";
+    std::error_code ec_signal;
+    std::filesystem::remove(".cli_sandbox_overlay/handshake.signal", ec_signal);
+
+    const char* cancel_plan_json = "{\"version\":1,\"goal\":\"Inflight Cancel Goal\",\"steps\":[{\"step_id\":\"step1\",\"description\":\"Slow Sandbox Tool Step\",\"dependencies\":[],\"tool_calls\":[{\"name\":\"test_sleep\",\"arguments\":{\"delay_ms\":2000,\"handshake_file\":\"handshake.signal\"}}]}]}";
     vinox_plan* cancel_plan = vinox_plan_create(cancel_plan_json);
     char plan_hash[128] = {0};
     vinox_plan_compute_hash(cancel_plan, plan_hash, sizeof(plan_hash));
@@ -452,10 +455,20 @@ int main(void) {
         step_status.store(vinox_agent_run_step(run));
     });
 
-    // Wait 100ms to guarantee test_sleep has been dispatched to sandbox worker and exec_tool is in read loop
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // Empirically wait until sandbox worker acknowledges dispatch & writes handshake signal file
+    int handshake_attempts = 0;
+    while (!std::filesystem::exists(".cli_sandbox_overlay/handshake.signal") && handshake_attempts < 200) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        handshake_attempts++;
+    }
 
-    // Cancel in-flight AFTER real dispatch
+    if (!std::filesystem::exists(".cli_sandbox_overlay/handshake.signal")) {
+        std::cerr << "FAILED 05: Sandbox worker failed to write handshake signal file on dispatch!\n";
+        if (worker.joinable()) worker.join();
+        return 1;
+    }
+
+    // Cancel in-flight AFTER real dispatch is empirically proven by handshake signal file
     vinox_agent_run_cancel(run);
 
     if (worker.joinable()) worker.join();

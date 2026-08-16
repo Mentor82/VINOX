@@ -137,6 +137,16 @@ int main(int argc, char* argv[]) {
                         }
                     }
                 } else if (tool_name == "test_sleep") {
+                    if (args.contains("handshake_file") && args["handshake_file"].is_string()) {
+                        std::string hfile = args["handshake_file"].get<std::string>();
+                        fs::path canonical_hfile;
+                        if (verify_path_containment(fs::path(overlay_dir), fs::path(hfile), canonical_hfile)) {
+                            fs::create_directories(canonical_hfile.parent_path());
+                            std::ofstream out(canonical_hfile, std::ios::binary);
+                            out << "DISPATCH_STARTED\n";
+                            out.close();
+                        }
+                    }
                     int delay_ms = args.value("delay_ms", 2000);
                     std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
                     res["result"]["status"] = "OK";
