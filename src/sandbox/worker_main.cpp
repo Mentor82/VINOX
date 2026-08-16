@@ -2,6 +2,7 @@
 #include <string>
 #include <fstream>
 #include <filesystem>
+#include <set>
 #include <nlohmann/json.hpp>
 
 #if defined(_WIN32)
@@ -13,6 +14,32 @@
 
 namespace fs = std::filesystem;
 
+// Path containment verifier preventing sandbox overlay root escape
+static bool verify_path_containment(const fs::path& overlay_root, const fs::path& requested_file, fs::path& canonical_out) {
+    try {
+        fs::path canonical_root = fs::weakly_canonical(overlay_root);
+        fs::path target_path = fs::weakly_canonical(overlay_root / requested_file);
+
+        std::string root_str = canonical_root.string();
+        std::string target_str = target_path.string();
+
+        // Convert backslashes on Windows for consistent string prefix containment check
+        std::replace(root_str.begin(), root_str.end(), '\\', '/');
+        std::replace(target_str.begin(), target_str.end(), '\\', '/');
+
+        if (root_str.back() != '/') root_str.push_back('/');
+
+        if (target_str.rfind(root_str, 0) != 0 && target_str != root_str.substr(0, root_str.length() - 1)) {
+            return false; // Path containment violation / sandbox escape attempt!
+        }
+
+        canonical_out = target_path;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 int main(int argc, char* argv[]) {
 #if defined(_WIN32)
     _setmode(_fileno(stdin), _O_BINARY);
@@ -21,6 +48,16 @@ int main(int argc, char* argv[]) {
 
     std::string overlay_dir = ".sandbox_overlay";
     if (argc > 1) overlay_dir = argv[1];
+
+    fs::create_directories(overlay_dir);
+
+    // Explicitly allowed sandbox tools
+    static const std::set<std::string> ALLOWED_SANDBOX_TOOLS = {
+        "fs_write",
+        "local_write.write",
+        "fs_read",
+        "local_read.read"
+    };
 
     std::string line;
     while (std::getline(std::cin, line)) {
@@ -48,20 +85,34 @@ int main(int argc, char* argv[]) {
                 std::string tool_name = req["params"].value("name", "");
                 auto args = req["params"].value("arguments", nlohmann::json::object());
 
-                if (tool_name == "fs_write" || tool_name == "local_write.write") {
-                    std::string filename = args.value("filename", "output.txt");
-                    std::string content = args.value("content", "");
+                // Nephy Finding D.1: Unknown tools must fail closed with typed error
+                if (ALLOWED_SANDBOX_TOOLS.find(tool_name) == ALLOWED_SANDBOX_TOOLS.end()) {
+                    res["error"]["code"] = -32601;
+                    res["error"]["message"] = "Unknown sandbox tool: " + tool_name;
+                } else if (tool_name == "fs_write" || tool_name == "local_write.write") {
+                    if (!args.is_object() || !args.contains("filename") || !args["filename"].is_string()) {
+                        res["error"]["code"] = -32602;
+                        res["error"]["message"] = "Invalid or missing 'filename' argument";
+                    } else {
+                        std::string filename = args["filename"].get<std::string>();
+                        std::string content = args.value("content", "");
 
-                    fs::path file_path = fs::path(overlay_dir) / filename;
-                    fs::create_directories(file_path.parent_path());
+                        fs::path canonical_file;
+                        // Nephy Finding D.3 & D.4: Strict path containment verification
+                        if (!verify_path_containment(fs::path(overlay_dir), fs::path(filename), canonical_file)) {
+                            res["error"]["code"] = -32002;
+                            res["error"]["message"] = "Path containment violation: attempt to escape sandbox overlay root";
+                        } else {
+                            fs::create_directories(canonical_file.parent_path());
+                            std::ofstream out(canonical_file, std::ios::binary);
+                            out << content;
+                            out.close();
 
-                    std::ofstream out(file_path, std::ios::binary);
-                    out << content;
-                    out.close();
-
-                    res["result"]["status"] = "OK";
-                    res["result"]["bytes_written"] = content.length();
-                    res["result"]["target_path"] = file_path.string();
+                            res["result"]["status"] = "OK";
+                            res["result"]["bytes_written"] = content.length();
+                            res["result"]["target_path"] = canonical_file.string();
+                        }
+                    }
                 } else {
                     res["result"]["status"] = "OK";
                     res["result"]["output"] = "Tool executed successfully in sandbox worker";
@@ -84,7 +135,7 @@ int main(int argc, char* argv[]) {
             nlohmann::json err_res;
             err_res["jsonrpc"] = "2.0";
             err_res["error"]["code"] = -32700;
-            err_res["error"]["message"] = "Parse error";
+            err_res["error"]["message"] = "Parse error: malformed JSON request";
             std::cout << err_res.dump() << "\n";
             std::cout.flush();
         }

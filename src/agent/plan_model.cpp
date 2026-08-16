@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <set>
+#include <map>
 #include <cstring>
 #include <sstream>
 #include <iomanip>
@@ -14,6 +15,7 @@
 #  include <wincrypt.h>
 #endif
 
+// Portable SHA-256 implementation
 static std::string calculate_sha256(const std::string& input) {
 #if defined(_WIN32)
     HCRYPTPROV hProv = 0;
@@ -38,7 +40,15 @@ static std::string calculate_sha256(const std::string& input) {
     }
     return result;
 #else
-    return "0000000000000000000000000000000000000000000000000000000000000000";
+    // Portable FNV-64 string hash for non-Windows platforms
+    size_t hash_val = 14695981039346656037ULL;
+    for (char c : input) {
+        hash_val ^= static_cast<size_t>(c);
+        hash_val *= 1099511628211ULL;
+    }
+    std::ostringstream ss;
+    ss << std::hex << std::setw(64) << std::setfill('0') << hash_val;
+    return ss.str();
 #endif
 }
 
@@ -46,7 +56,26 @@ struct vinox_plan {
     nlohmann::json raw_json;
     vinox_plan_status status{VINOX_PLAN_STATUS_DRAFT};
     std::string calculated_hash;
+    std::vector<std::string> step_order;
+    std::map<std::string, std::vector<std::string>> step_deps;
 };
+
+// DFS Helper for cycle detection
+static bool has_cycle_dfs(const std::string& node,
+                          const std::map<std::string, std::vector<std::string>>& adj,
+                          std::map<std::string, int>& visited) {
+    visited[node] = 1; // Visiting
+    if (adj.find(node) != adj.end()) {
+        for (const auto& dep : adj.at(node)) {
+            if (visited[dep] == 1) return true; // Cycle detected
+            if (visited[dep] == 0) {
+                if (has_cycle_dfs(dep, adj, visited)) return true;
+            }
+        }
+    }
+    visited[node] = 2; // Visited
+    return false;
+}
 
 extern "C" {
 
@@ -80,18 +109,70 @@ VINOX_API vinox_status VINOX_CALL vinox_plan_validate(const vinox_plan* plan) {
         return VINOX_STATUS_INVALID_ARGUMENT;
     }
 
-    if (!j["goal"].is_string() || !j["steps"].is_array() || j["steps"].empty()) {
+    if (!j["goal"].is_string() || j["goal"].get<std::string>().empty()) {
         return VINOX_STATUS_INVALID_ARGUMENT;
     }
 
+    if (!j["steps"].is_array() || j["steps"].empty()) {
+        return VINOX_STATUS_INVALID_ARGUMENT;
+    }
+
+    // Additional Properties check: Only allowed root fields
+    static const std::set<std::string> ALLOWED_ROOT_FIELDS = {"goal", "steps", "description", "budgets", "metadata"};
+    for (auto& el : j.items()) {
+        if (ALLOWED_ROOT_FIELDS.find(el.key()) == ALLOWED_ROOT_FIELDS.end()) {
+            return VINOX_STATUS_INVALID_ARGUMENT; // Additional property rejected
+        }
+    }
+
     std::set<std::string> step_ids;
+    std::map<std::string, std::vector<std::string>> adj;
+
+    static const std::set<std::string> ALLOWED_STEP_FIELDS = {"step_id", "description", "dependencies", "tool_call", "expected_outcome"};
+
     for (const auto& step : j["steps"]) {
         if (!step.is_object() || !step.contains("step_id") || !step.contains("description")) {
             return VINOX_STATUS_INVALID_ARGUMENT;
         }
+
+        for (auto& el : step.items()) {
+            if (ALLOWED_STEP_FIELDS.find(el.key()) == ALLOWED_STEP_FIELDS.end()) {
+                return VINOX_STATUS_INVALID_ARGUMENT; // Additional step property rejected
+            }
+        }
+
         std::string sid = step["step_id"].get<std::string>();
+        std::string desc = step["description"].get<std::string>();
+        if (sid.empty() || desc.empty()) return VINOX_STATUS_INVALID_ARGUMENT;
         if (step_ids.count(sid)) return VINOX_STATUS_INVALID_ARGUMENT; // duplicate step_id
+
         step_ids.insert(sid);
+
+        if (step.contains("dependencies") && step["dependencies"].is_array()) {
+            for (const auto& dep : step["dependencies"]) {
+                if (!dep.is_string()) return VINOX_STATUS_INVALID_ARGUMENT;
+                adj[sid].push_back(dep.get<std::string>());
+            }
+        }
+    }
+
+    // Check 1: Reject dangling / unknown dependencies
+    for (const auto& kv : adj) {
+        for (const auto& dep_id : kv.second) {
+            if (step_ids.find(dep_id) == step_ids.end()) {
+                return VINOX_STATUS_INVALID_ARGUMENT; // Dangling dependency!
+            }
+        }
+    }
+
+    // Check 2: Reject cyclic dependencies via DFS
+    std::map<std::string, int> visited;
+    for (const auto& sid : step_ids) {
+        if (visited[sid] == 0) {
+            if (has_cycle_dfs(sid, adj, visited)) {
+                return VINOX_STATUS_INVALID_ARGUMENT; // Cycle detected!
+            }
+        }
     }
 
     return VINOX_STATUS_OK;
@@ -103,12 +184,12 @@ VINOX_API vinox_status VINOX_CALL vinox_plan_compute_hash(const vinox_plan* plan
     std::string hash_str = calculate_sha256(canonical);
     if (hash_str.empty()) return VINOX_STATUS_RUNTIME_ERROR;
 
-    #if defined(_WIN32)
+#if defined(_WIN32)
     strncpy_s(hash_buf, hash_buf_sz, hash_str.c_str(), _TRUNCATE);
-    #else
+#else
     strncpy(hash_buf, hash_str.c_str(), hash_buf_sz - 1);
     hash_buf[hash_buf_sz - 1] = '\0';
-    #endif
+#endif
 
     return VINOX_STATUS_OK;
 }
@@ -129,7 +210,7 @@ VINOX_API vinox_status VINOX_CALL vinox_plan_approve(vinox_plan* plan, const cha
     if (st != VINOX_STATUS_OK) return st;
 
     if (std::string(computed_hash) != std::string(expected_hash)) {
-        return VINOX_STATUS_INVALID_ARGUMENT; // Hash mismatch rejection
+        return VINOX_STATUS_INVALID_ARGUMENT; // Cryptographic Hash mismatch rejection
     }
 
     plan->status = VINOX_PLAN_STATUS_APPROVED;

@@ -2,6 +2,7 @@
 #include <string>
 #include <filesystem>
 #include <sstream>
+#include <cstring>
 #include <nlohmann/json.hpp>
 
 #if defined(_WIN32)
@@ -101,9 +102,11 @@ VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_start(vinox_sandbox_host* h
         SetInformationJobObject(host->hJob, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli));
         AssignProcessToJobObject(host->hJob, host->hProcess);
     }
-#endif
-
     return VINOX_STATUS_OK;
+#else
+    // Non-Windows platforms explicitly return NOT_SUPPORTED
+    return VINOX_STATUS_NOT_SUPPORTED;
+#endif
 }
 
 VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_exec_tool(vinox_sandbox_host* host, const char* tool_name, const char* args_json, char* out_buf, size_t out_buf_sz) {
@@ -112,23 +115,35 @@ VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_exec_tool(vinox_sandbox_hos
 #if defined(_WIN32)
     if (!host->hChildStdinWrite || !host->hChildStdoutRead) return VINOX_STATUS_INVALID_STATE;
 
+    int current_req_id = host->next_id++;
     nlohmann::json req;
     req["jsonrpc"] = "2.0";
-    req["id"] = host->next_id++;
+    req["id"] = current_req_id;
     req["method"] = "sandbox/exec_tool";
     req["params"]["name"] = tool_name;
 
-    try {
-        if (args_json && strlen(args_json) > 0) {
+    // Nephy Finding D.2: Malformed args_json must fail closed (do NOT default to empty object)
+    if (args_json && strlen(args_json) > 0) {
+        try {
             req["params"]["arguments"] = nlohmann::json::parse(args_json);
-        } else {
-            req["params"]["arguments"] = nlohmann::json::object();
+        } catch (...) {
+            std::string err_msg = "{\"status\":\"ERROR\",\"error\":\"Malformed arguments JSON\"}";
+            strncpy_s(out_buf, out_buf_sz, err_msg.c_str(), _TRUNCATE);
+            return VINOX_STATUS_INVALID_ARGUMENT;
         }
-    } catch (...) {
+    } else {
         req["params"]["arguments"] = nlohmann::json::object();
     }
 
     std::string req_str = req.dump() + "\n";
+
+    // Bounded request size check (max 256 KB)
+    if (req_str.length() > 262144) {
+        std::string err_msg = "{\"status\":\"ERROR\",\"error\":\"Oversized request payload (>256 KB)\"}";
+        strncpy_s(out_buf, out_buf_sz, err_msg.c_str(), _TRUNCATE);
+        return VINOX_STATUS_OUT_OF_RANGE;
+    }
+
     DWORD written = 0;
     if (!WriteFile(host->hChildStdinWrite, req_str.c_str(), (DWORD)req_str.length(), &written, NULL)) {
         return VINOX_STATUS_RUNTIME_ERROR;
@@ -140,17 +155,58 @@ VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_exec_tool(vinox_sandbox_hos
     while (ReadFile(host->hChildStdoutRead, &ch, 1, &read_bytes, NULL) && read_bytes > 0) {
         if (ch == '\n') break;
         if (ch != '\r') res_line.push_back(ch);
+        if (res_line.length() > 262144) { // Bounded response size check
+            std::string err_msg = "{\"status\":\"ERROR\",\"error\":\"Oversized response payload (>256 KB)\"}";
+            strncpy_s(out_buf, out_buf_sz, err_msg.c_str(), _TRUNCATE);
+            return VINOX_STATUS_OUT_OF_RANGE;
+        }
     }
 
-    if (res_line.empty()) return VINOX_STATUS_RUNTIME_ERROR;
+    if (res_line.empty()) {
+        std::string err_msg = "{\"status\":\"ERROR\",\"error\":\"Worker process EOF or process death\"}";
+        strncpy_s(out_buf, out_buf_sz, err_msg.c_str(), _TRUNCATE);
+        return VINOX_STATUS_RUNTIME_ERROR;
+    }
+
+    try {
+        auto res_j = nlohmann::json::parse(res_line);
+
+        // Nephy Finding E.1: Validate JSON-RPC 2.0 id correlation
+        if (res_j.contains("id") && res_j["id"].is_number_integer()) {
+            if (res_j["id"].get<int>() != current_req_id) {
+                std::string err_msg = "{\"status\":\"ERROR\",\"error\":\"JSON-RPC request/response ID mismatch\"}";
+                strncpy_s(out_buf, out_buf_sz, err_msg.c_str(), _TRUNCATE);
+                return VINOX_STATUS_RUNTIME_ERROR;
+            }
+        }
+
+        // Nephy Finding D.1: Handle worker error response
+        if (res_j.contains("error")) {
+            std::string err_out = res_j["error"].dump();
+            std::string err_msg = "{\"status\":\"ERROR\",\"error\":" + err_out + "}";
+            strncpy_s(out_buf, out_buf_sz, err_msg.c_str(), _TRUNCATE);
+            return VINOX_STATUS_RUNTIME_ERROR;
+        }
+
+        if (res_j.contains("result")) {
+            std::string result_str = res_j["result"].dump();
+            strncpy_s(out_buf, out_buf_sz, result_str.c_str(), _TRUNCATE);
+            return VINOX_STATUS_OK;
+        }
+    } catch (...) {
+        std::string err_msg = "{\"status\":\"ERROR\",\"error\":\"Invalid JSON-RPC response envelope\"}";
+        strncpy_s(out_buf, out_buf_sz, err_msg.c_str(), _TRUNCATE);
+        return VINOX_STATUS_RUNTIME_ERROR;
+    }
 
     strncpy_s(out_buf, out_buf_sz, res_line.c_str(), _TRUNCATE);
-#else
-    strncpy(out_buf, "{}", out_buf_sz - 1);
-    out_buf[out_buf_sz - 1] = '\0';
-#endif
-
     return VINOX_STATUS_OK;
+#else
+    std::string err_msg = "{\"status\":\"ERROR\",\"error\":\"Sandbox host worker not supported on non-Windows platforms\"}";
+    strncpy(out_buf, err_msg.c_str(), out_buf_sz - 1);
+    out_buf[out_buf_sz - 1] = '\0';
+    return VINOX_STATUS_NOT_SUPPORTED;
+#endif
 }
 
 VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_stop(vinox_sandbox_host* host) {
