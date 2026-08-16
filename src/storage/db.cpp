@@ -1,3 +1,4 @@
+#include "vinox/logging.h"
 #include "vinox/storage.h"
 
 #include <algorithm>
@@ -46,6 +47,21 @@ public:
 std::unique_ptr<VectorIndexBackend> create_vector_backend(sqlite3* db);
 }  // namespace vinox::storage
 
+vinox_status fail_arg(const char* message) {
+    vinox_set_last_error(message);
+    return VINOX_STATUS_INVALID_ARGUMENT;
+}
+
+vinox_status fail_abi(const char* message) {
+    vinox_set_last_error(message);
+    return VINOX_STATUS_INCOMPATIBLE_ABI;
+}
+
+vinox_status fail_runtime(const char* message) {
+    vinox_set_last_error(message);
+    return VINOX_STATUS_RUNTIME_ERROR;
+}
+
 struct ConversationEntry {
     std::string id;
     std::string title;
@@ -77,23 +93,6 @@ namespace {
 
 #define VINOX_FIELD_PRESENT(ptr, member) \
     ((ptr)->struct_size >= (offsetof(std::remove_pointer_t<decltype(ptr)>, member) + sizeof((ptr)->member)))
-
-thread_local std::string last_error;
-
-vinox_status fail_arg(const char* message) {
-    last_error = message;
-    return VINOX_STATUS_INVALID_ARGUMENT;
-}
-
-vinox_status fail_abi(const char* message) {
-    last_error = message;
-    return VINOX_STATUS_INCOMPATIBLE_ABI;
-}
-
-vinox_status fail_runtime(const char* message) {
-    last_error = message;
-    return VINOX_STATUS_RUNTIME_ERROR;
-}
 
 uint64_t current_timestamp_ms() {
     using namespace std::chrono;
@@ -272,7 +271,7 @@ vinox_status vinox_storage_engine_open(
         engine->db = db;
         engine->vector_backend = vinox::storage::create_vector_backend(db);
         *engine_out = engine;
-        last_error.clear();
+        vinox_set_last_error(nullptr);
         return VINOX_STATUS_OK;
     } catch (...) {
         sqlite3_close(db);
@@ -291,7 +290,7 @@ vinox_status vinox_storage_get_vector_backend_kind(
         return fail_arg("backend_kind_out pointer cannot be null");
     }
     *backend_kind_out = static_cast<uint32_t>(engine->vector_backend->get_kind());
-    last_error.clear();
+    vinox_set_last_error(nullptr);
     return VINOX_STATUS_OK;
 }
 
@@ -348,7 +347,7 @@ vinox_status vinox_storage_create_conversation(
     if (VINOX_FIELD_PRESENT(info_out, created_at_ms)) info_out->created_at_ms = stored.created_at_ms;
     if (VINOX_FIELD_PRESENT(info_out, updated_at_ms)) info_out->updated_at_ms = stored.updated_at_ms;
 
-    last_error.clear();
+    vinox_set_last_error(nullptr);
     return VINOX_STATUS_OK;
 }
 
@@ -424,7 +423,7 @@ vinox_status vinox_storage_add_message(
         if (VINOX_FIELD_PRESENT(message_out, created_at_ms)) message_out->created_at_ms = stored.created_at_ms;
     }
 
-    last_error.clear();
+    vinox_set_last_error(nullptr);
     return VINOX_STATUS_OK;
 }
 
@@ -454,7 +453,7 @@ vinox_status vinox_storage_get_conversation_count(
     sqlite3_finalize(stmt);
 
     *count_out = count;
-    last_error.clear();
+    vinox_set_last_error(nullptr);
     return VINOX_STATUS_OK;
 }
 
@@ -496,7 +495,7 @@ vinox_status vinox_storage_search_messages_fts(
         *match_count_out = (max_results > 0 && count > max_results) ? max_results : count;
     }
 
-    last_error.clear();
+    vinox_set_last_error(nullptr);
     return VINOX_STATUS_OK;
 }
 
@@ -529,7 +528,7 @@ vinox_status vinox_storage_store_embedding(
     }
 
     engine->index_dim = dim;
-    last_error.clear();
+    vinox_set_last_error(nullptr);
     return VINOX_STATUS_OK;
 }
 
@@ -668,7 +667,7 @@ vinox_status vinox_storage_search_hybrid(
         *results_count_out = count;
     }
 
-    last_error.clear();
+    vinox_set_last_error(nullptr);
     return VINOX_STATUS_OK;
 }
 
@@ -682,5 +681,5 @@ void vinox_storage_engine_close(vinox_storage_engine* engine) {
 }
 
 const char* vinox_storage_last_error(void) {
-    return last_error.c_str();
+    return vinox_last_error();
 }

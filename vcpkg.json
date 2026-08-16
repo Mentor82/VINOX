@@ -6,6 +6,7 @@
   "supports": "windows | linux",
   "dependencies": [
     "nlohmann-json",
+    "spdlog",
     {
       "name": "sqlite3",
       "features": [

@@ -1,3 +1,4 @@
+#include "vinox/logging.h"
 #include "vinox/serving.h"
 
 #include <deque>
@@ -33,20 +34,18 @@ namespace {
 #define VINOX_FIELD_PRESENT(ptr, member) \
     ((ptr)->struct_size >= (offsetof(std::remove_pointer_t<decltype(ptr)>, member) + sizeof((ptr)->member)))
 
-thread_local std::string last_error;
-
 vinox_status fail_arg(const char* message) {
-    last_error = message;
+    vinox_set_last_error(message);
     return VINOX_STATUS_INVALID_ARGUMENT;
 }
 
 vinox_status fail_abi(const char* message) {
-    last_error = message;
+    vinox_set_last_error(message);
     return VINOX_STATUS_INCOMPATIBLE_ABI;
 }
 
 vinox_status fail_runtime(const char* message) {
-    last_error = message;
+    vinox_set_last_error(message);
     return VINOX_STATUS_RUNTIME_ERROR;
 }
 
@@ -149,7 +148,7 @@ vinox_status vinox_model_registry_create(vinox_model_registry** registry) {
     }
     try {
         *registry = new vinox_model_registry();
-        last_error.clear();
+        vinox_set_last_error(nullptr);
         return VINOX_STATUS_OK;
     } catch (...) {
         return fail_runtime("Failed to allocate vinox_model_registry");
@@ -202,7 +201,7 @@ vinox_status vinox_model_registry_scan(
         *count_out = registry->models.size();
     }
 
-    last_error.clear();
+    vinox_set_last_error(nullptr);
     return VINOX_STATUS_OK;
 }
 
@@ -233,13 +232,13 @@ vinox_status vinox_model_registry_register_manifest(
     for (auto& m : registry->models) {
         if (m.model_id == entry.model_id) {
             m = entry;
-            last_error.clear();
+            vinox_set_last_error(nullptr);
             return VINOX_STATUS_OK;
         }
     }
 
     registry->models.push_back(entry);
-    last_error.clear();
+    vinox_set_last_error(nullptr);
     return VINOX_STATUS_OK;
 }
 
@@ -256,7 +255,7 @@ vinox_status vinox_model_registry_get_count(
 
     std::lock_guard<std::mutex> lock(const_cast<vinox_model_registry*>(registry)->mutex);
     *count_out = registry->models.size();
-    last_error.clear();
+    vinox_set_last_error(nullptr);
     return VINOX_STATUS_OK;
 }
 
@@ -295,7 +294,7 @@ vinox_status vinox_model_registry_get_info(
         info_out->state = static_cast<uint32_t>(entry.state);
     }
 
-    last_error.clear();
+    vinox_set_last_error(nullptr);
     return VINOX_STATUS_OK;
 }
 
@@ -304,5 +303,5 @@ void vinox_model_registry_destroy(vinox_model_registry* registry) {
 }
 
 const char* vinox_serving_last_error(void) {
-    return last_error.c_str();
+    return vinox_last_error();
 }

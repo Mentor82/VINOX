@@ -45,13 +45,14 @@ private:
 inline std::string redact_secrets(const std::string& input) {
     if (input.empty()) return "";
     size_t req_size = 0;
-    vinox_redact_sensitive_text(input.c_str(), nullptr, 0, &req_size);
-    if (req_size <= 1) return input;
+    if (vinox_redact_sensitive_text(input.c_str(), nullptr, 0, &req_size) != VINOX_STATUS_OK || req_size == 0) {
+        return "[REDACTION_FAILED]"; // FAIL CLOSED ON REDACTION ERROR
+    }
     std::vector<char> buf(req_size + 16);
     if (vinox_redact_sensitive_text(input.c_str(), buf.data(), buf.size(), nullptr) == VINOX_STATUS_OK) {
         return std::string(buf.data());
     }
-    return input;
+    return "[REDACTION_FAILED]"; // FAIL CLOSED
 }
 
 inline void log_info(const std::string& component, const std::string& event_id, const CorrelationScope& scope, const std::string& msg) {

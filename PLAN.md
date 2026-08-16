@@ -190,7 +190,7 @@ installed`, statt globale Modellpfade zu durchsuchen.
 - `nlohmann/json` fuer JSON
 - JSON Schema fuer Toolargumente, Ergebnisse und strukturierte Modellantworten
 - `spdlog` / vinox_logging fuer strukturierte Protokollierung
-- Strukturierte Events, Korrelations-Propagation und strikte No-Content/No-Secret Privacy Policy (dokumentiert in [`docs/architecture/logging-audit-telemetry-contract.md`](file:///c:/ai/openvino/docs/architecture/logging-audit-telemetry-contract.md))
+- Strukturierte Events, Korrelations-Propagation und strikte No-Content/No-Secret Privacy Policy (dokumentiert in [`docs/architecture/logging-audit-telemetry-contract.md`](docs/architecture/logging-audit-telemetry-contract.md))
 - Catch2 oder GoogleTest fuer Tests
 - Doxygen und Markdown fuer API- und Entwicklerdokumentation
 - HTTP-Bibliothek mit robustem SSE- und Abbruch-Support, Auswahl nach Spike
@@ -209,7 +209,7 @@ VINOX unterscheidet vier getrennte Beobachtbarkeits-Konzepte:
 - Default No-Content & No-Secret Policy: Prompts, Antworten, API-Keys, Bearer-Tokens und Passwoerter werden NIEMALS standardmaessig geloggt.
 - Zentrale Redaktions-Engine fuer Log-Sinks und C-ABI `last_error()` Diagnosemeldungen.
 - Ende-zu-Ende Korrelations-Propagation (`request_id`, `session_id`, `run_id`) ueber DLL- und Prozess-Grenzen.
-- Detaillierter Vertrag dokumentiert in [`docs/architecture/logging-audit-telemetry-contract.md`](file:///c:/ai/openvino/docs/architecture/logging-audit-telemetry-contract.md).
+- Detaillierter Vertrag dokumentiert in [`docs/architecture/logging-audit-telemetry-contract.md`](docs/architecture/logging-audit-telemetry-contract.md).
 
 ### Lizenztyp und Distribution
 
@@ -525,7 +525,7 @@ Retrieval kombiniert drei Signale:
 
 `sqlite-vec` v0.1.6 ist das erforderliche, versionierte Produktions-Vektor-Backend fuer das aktuelle Phase-5.2 Vektorprofil und ist vendored/statisch gebunden. Die Backend-Auswahl ist fuer eine Storage-Engine Instanz fixiert. Das Fehlschlagen der Initialisierung des erforderlichen Produktions-Backends ist fail-closed. Ein Referenz-Backend darf nur als explizit gewaehlter Entwicklungs-/Referenzpfad existieren und darf niemals als `SQLITE_VEC` gemeldet werden; es gibt keinen stillen Per-Operation-Fallback.
 
-`bm25_score` muss von FTS5 BM25 stammen, Vektor-Scores vom gewaehlten Vektor-Backend, und Audit-Evidenz darf keinen Pfad bescheinigen, den sie nicht selbst ausgefuehrt hat. Detaillierter Vertrag: [`docs/architecture/retrieval-backend-contract.md`](file:///c:/ai/openvino/docs/architecture/retrieval-backend-contract.md).
+`bm25_score` muss von FTS5 BM25 stammen, Vektor-Scores vom gewaehlten Vektor-Backend, und Audit-Evidenz darf keinen Pfad bescheinigen, den sie nicht selbst ausgefuehrt hat. Detaillierter Vertrag: [`docs/architecture/retrieval-backend-contract.md`](docs/architecture/retrieval-backend-contract.md).
 
 Die Kandidaten werden normalisiert, gewichtet zusammengefuehrt und mit Quelle, Score und Textspanne zurueckgegeben. Embeddings werden asynchron in Batches erzeugt. Loeschen und Re-Embedding bleiben transaktional nachvollziehbar.
 
@@ -1008,7 +1008,7 @@ streamen, ohne interne Implementierungsdetails zu kennen.
 - Deterministische logistische/normalisierte Text/Vektor-Fusion und Tie-Breaking
 - Alpha- und Dimensions-Validierung mit deterministischer Fehler-Abweisung (`VINOX_STATUS_INVALID_ARGUMENT`)
 - Live-Audit weist das aktive Backend nach und fuehrt gezeigte Eigenschaften live aus
-- Detaillierter Backend-Vertrag dokumentiert in [`docs/architecture/retrieval-backend-contract.md`](file:///c:/ai/openvino/docs/architecture/retrieval-backend-contract.md)
+- Detaillierter Backend-Vertrag dokumentiert in [`docs/architecture/retrieval-backend-contract.md`](docs/architecture/retrieval-backend-contract.md)
 
 #### Phase 5.3 — Dokumente & Semantische Relationen — 🟡 geplant
 
@@ -1271,7 +1271,7 @@ Bereits entschieden:
 - primaeres Referenzmodell `Qwen2.5-1B-Instruct-fp16-test-ov`
 - Embedding-Referenzmodell `Qwen3-Embedding-0.6B-fp16-ov`
 - SQLite als lokaler Store mit FTS5 und austauschbarem Vektorindex
-- `sqlite-vec` v0.1.6, vendort/statische Produktions-Integration fuer das aktuelle lokale Retrieval-Profil; fail-closed Initialisierung und kein stiller Per-Operation-Fallback; Backend-/Evidenz-Vertrag dokumentiert in [`docs/architecture/retrieval-backend-contract.md`](file:///c:/ai/openvino/docs/architecture/retrieval-backend-contract.md)
+- `sqlite-vec` v0.1.6, vendort/statische Produktions-Integration fuer das aktuelle lokale Retrieval-Profil; fail-closed Initialisierung und kein stiller Per-Operation-Fallback; Backend-/Evidenz-Vertrag dokumentiert in [`docs/architecture/retrieval-backend-contract.md`](docs/architecture/retrieval-backend-contract.md)
 - strukturelle Foreign Keys plus typisierte semantische Kanten mit Evidenz
 - zentrale Tool Registry mit JSON-Schema-Validierung und Default-Deny-Policy
 - MCP-Client fuer `stdio` und Streamable HTTP sowie separater eigener MCP-Server

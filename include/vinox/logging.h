@@ -33,7 +33,7 @@ typedef struct vinox_correlation_context {
 } vinox_correlation_context;
 
 /**
- * @brief Emits a structured operational log event into active sinks.
+ * @brief Emits a structured operational log event into active sinks with JSON escaping.
  */
 VINOX_API vinox_status vinox_log_event(
     uint32_t level,
@@ -54,6 +54,16 @@ VINOX_API vinox_status vinox_redact_sensitive_text(
 );
 
 /**
+ * @brief Sets thread-local last_error with central secret redaction.
+ */
+VINOX_API void vinox_set_last_error(const char* message);
+
+/**
+ * @brief Retrieves thread-local redacted error message.
+ */
+VINOX_API const char* vinox_last_error(void);
+
+/**
  * @brief Configures minimum operational log level threshold.
  */
 VINOX_API vinox_status vinox_log_set_level(uint32_t level);
@@ -64,12 +74,20 @@ VINOX_API vinox_status vinox_log_set_level(uint32_t level);
 VINOX_API vinox_status vinox_log_get_level(uint32_t* level_out);
 
 /**
- * @brief Configures rotating file log sink.
+ * @brief Configures rotating file and console log sinks.
  */
 VINOX_API vinox_status vinox_log_configure_sink(
     const char* log_file_path,
     uint32_t max_file_size_mb,
     uint32_t max_files
+);
+
+/**
+ * @brief Queries observable sink health status without recursive log loops.
+ */
+VINOX_API vinox_status vinox_log_get_sink_status(
+    uint32_t* sink_ok_out,
+    uint64_t* dropped_count_out
 );
 
 #ifdef __cplusplus

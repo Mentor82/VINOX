@@ -33,12 +33,17 @@ set(
     "Root of the OpenVINO GenAI distribution"
 )
 
+find_package(nlohmann_json REQUIRED)
+find_package(spdlog CONFIG REQUIRED)
+
 add_library(vinox_core SHARED
     src/core/version.cpp
     src/core/logging.cpp
 )
 add_library(vinox::core ALIAS vinox_core)
 set_target_properties(vinox_core PROPERTIES EXPORT_NAME core)
+
+target_link_libraries(vinox_core PRIVATE nlohmann_json::nlohmann_json spdlog::spdlog)
 
 target_compile_definitions(vinox_core
     PRIVATE
@@ -134,7 +139,7 @@ add_library(vinox_serving SHARED
 add_library(vinox::serving ALIAS vinox_serving)
 set_target_properties(vinox_serving PROPERTIES EXPORT_NAME serving)
 
-target_link_libraries(vinox_serving PRIVATE nlohmann_json::nlohmann_json)
+target_link_libraries(vinox_serving PRIVATE nlohmann_json::nlohmann_json vinox::core)
 target_compile_definitions(vinox_serving PRIVATE VINOX_BUILD_SHARED)
 target_include_directories(vinox_serving
     PUBLIC
@@ -174,7 +179,7 @@ add_library(vinox_storage SHARED
 add_library(vinox::storage ALIAS vinox_storage)
 set_target_properties(vinox_storage PROPERTIES EXPORT_NAME storage)
 
-target_link_libraries(vinox_storage PRIVATE unofficial::sqlite3::sqlite3)
+target_link_libraries(vinox_storage PRIVATE unofficial::sqlite3::sqlite3 vinox::core)
 target_compile_definitions(vinox_storage PRIVATE VINOX_BUILD_SHARED SQLITE_VEC_STATIC SQLITE_CORE)
 target_include_directories(vinox_storage
     PUBLIC
