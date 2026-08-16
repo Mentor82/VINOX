@@ -35,6 +35,7 @@ set(
 
 add_library(vinox_core SHARED
     src/core/version.cpp
+    src/core/logging.cpp
 )
 add_library(vinox::core ALIAS vinox_core)
 set_target_properties(vinox_core PROPERTIES EXPORT_NAME core)
@@ -211,6 +212,10 @@ if(BUILD_TESTING)
     add_executable(vinox_provenance_smoke tests/provenance_smoke.c)
     target_link_libraries(vinox_provenance_smoke PRIVATE vinox::core)
     add_test(NAME provenance_smoke COMMAND vinox_provenance_smoke)
+
+    add_executable(vinox_logging_smoke tests/logging_smoke.c)
+    target_link_libraries(vinox_logging_smoke PRIVATE vinox::core)
+    add_test(NAME logging_smoke COMMAND vinox_logging_smoke)
 
     add_executable(vinox_serving_smoke tests/serving_smoke.c)
     target_link_libraries(vinox_serving_smoke PRIVATE vinox::serving)

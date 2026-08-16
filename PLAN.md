@@ -189,10 +189,27 @@ installed`, statt globale Modellpfade zu durchsuchen.
 - Qt 6.10.1 mit Qt Quick/QML fuer die GUI
 - `nlohmann/json` fuer JSON
 - JSON Schema fuer Toolargumente, Ergebnisse und strukturierte Modellantworten
-- `spdlog` fuer Logging
+- `spdlog` / vinox_logging fuer strukturierte Protokollierung
+- Strukturierte Events, Korrelations-Propagation und strikte No-Content/No-Secret Privacy Policy (dokumentiert in [`docs/architecture/logging-audit-telemetry-contract.md`](file:///c:/ai/openvino/docs/architecture/logging-audit-telemetry-contract.md))
 - Catch2 oder GoogleTest fuer Tests
 - Doxygen und Markdown fuer API- und Entwicklerdokumentation
 - HTTP-Bibliothek mit robustem SSE- und Abbruch-Support, Auswahl nach Spike
+
+### Logging, Audit & Telemetry Contract
+
+VINOX unterscheidet vier getrennte Beobachtbarkeits-Konzepte:
+
+1. **Operational Logging:** Diagnose- und Laufzeit-Ereignisse (best-effort, fail-safe).
+2. **Audit Evidence:** Dauerhafte, nachvollziehbare Evidenz fuer sicherheits- und governance-relevante Aktionen (Tools, MCP, Sandbox, Agent).
+3. **Metrics / Telemetry:** Aggregierbare Messwerte (Request-Count, Latenz, TTFT, TPOT, Durchsatz) unabhaengig von Log-Prosa.
+4. **Active Audit Verification (`vinox-cli --audit`):** Reale System-Architektur-Pruefung.
+
+**Kanonische Regeln:**
+- Versionierter strukturierter Event-Envelope (`event_schema_version: 1`) mit stabilen Event-IDs.
+- Default No-Content & No-Secret Policy: Prompts, Antworten, API-Keys, Bearer-Tokens und Passwoerter werden NIEMALS standardmaessig geloggt.
+- Zentrale Redaktions-Engine fuer Log-Sinks und C-ABI `last_error()` Diagnosemeldungen.
+- Ende-zu-Ende Korrelations-Propagation (`request_id`, `session_id`, `run_id`) ueber DLL- und Prozess-Grenzen.
+- Detaillierter Vertrag dokumentiert in [`docs/architecture/logging-audit-telemetry-contract.md`](file:///c:/ai/openvino/docs/architecture/logging-audit-telemetry-contract.md).
 
 ### Lizenztyp und Distribution
 
