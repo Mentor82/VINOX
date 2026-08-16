@@ -19,7 +19,9 @@ typedef enum vinox_status {
     VINOX_STATUS_RUNTIME_ERROR = 3,
     VINOX_STATUS_CANCELLED = 4,
     VINOX_STATUS_NOT_FOUND = 5,
-    VINOX_STATUS_PERMISSION_DENIED = 6
+    VINOX_STATUS_PERMISSION_DENIED = 6,
+    VINOX_STATUS_INVALID_STATE = 7,
+    VINOX_STATUS_OUT_OF_RANGE = 8
 } vinox_status;
 
 typedef struct vinox_version_info {

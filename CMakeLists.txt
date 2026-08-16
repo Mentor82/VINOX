@@ -200,10 +200,46 @@ else()
     target_compile_options(vinox_storage PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+add_library(vinox_agent SHARED
+    src/agent/mode_controller.cpp
+    src/agent/plan_model.cpp
+    src/agent/agent_engine.cpp
+    src/agent/artifact_commit.cpp
+    src/sandbox/sandbox_host.cpp
+)
+add_library(vinox::agent ALIAS vinox_agent)
+set_target_properties(vinox_agent PROPERTIES EXPORT_NAME agent)
+
+target_link_libraries(vinox_agent PRIVATE vinox::core nlohmann_json::nlohmann_json)
+target_compile_definitions(vinox_agent PRIVATE VINOX_BUILD_SHARED)
+target_include_directories(vinox_agent
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+    PRIVATE
+        ${CMAKE_CURRENT_BINARY_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/agent
+)
+if(MSVC)
+    target_compile_options(vinox_agent PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(vinox_agent PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_executable(vinox_sandbox_worker
+    src/sandbox/worker_main.cpp
+)
+target_link_libraries(vinox_sandbox_worker PRIVATE nlohmann_json::nlohmann_json)
+if(MSVC)
+    target_compile_options(vinox_sandbox_worker PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(vinox_sandbox_worker PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 add_executable(vinox_cli
     src/cli/main.cpp
 )
-target_link_libraries(vinox_cli PRIVATE vinox::core vinox::serving vinox::storage)
+target_link_libraries(vinox_cli PRIVATE vinox::core vinox::serving vinox::storage vinox::agent)
 if(TARGET vinox_openvino)
     target_link_libraries(vinox_cli PRIVATE vinox_openvino)
 endif()
@@ -255,6 +291,15 @@ if(BUILD_TESTING)
 
     add_executable(vinox_docker_mcp_live_test tests/docker_mcp_live_test.cpp)
     target_link_libraries(vinox_docker_mcp_live_test PRIVATE vinox::core nlohmann_json::nlohmann_json)
+
+    add_executable(vinox_agent_smoke tests/agent_smoke.c)
+    target_link_libraries(vinox_agent_smoke PRIVATE vinox::agent)
+    add_test(NAME agent_smoke COMMAND vinox_agent_smoke)
+
+    add_executable(vinox_sandbox_smoke tests/sandbox_smoke.c)
+    target_link_libraries(vinox_sandbox_smoke PRIVATE vinox::agent)
+    add_dependencies(vinox_sandbox_smoke vinox_sandbox_worker)
+    add_test(NAME sandbox_smoke COMMAND vinox_sandbox_smoke)
 
     add_test(NAME audit_smoke COMMAND vinox_cli --audit)
     if(WIN32 AND VINOX_OPENVINO_SDK_ROOT)

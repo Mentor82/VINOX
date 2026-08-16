@@ -7,8 +7,10 @@
 #  else
 #    define VINOX_API __declspec(dllimport)
 #  endif
+#  define VINOX_CALL __cdecl
 #else
 #  define VINOX_API __attribute__((visibility("default")))
+#  define VINOX_CALL
 #endif
 
 #endif
