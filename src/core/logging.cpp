@@ -134,30 +134,47 @@ const char* vinox_last_error(void) {
     return tls_last_error.c_str();
 }
 
-vinox_status vinox_log_event(
+vinox_status vinox_log_event_ex(
     uint32_t level,
     const char* component,
     const char* event_id,
     const vinox_correlation_context* correlation,
-    const char* message_kv
+    const vinox_log_event_meta* meta
 ) {
+    if (level > VINOX_LOG_CRITICAL) {
+        vinox_set_last_error("Invalid log level: exceeds VINOX_LOG_CRITICAL");
+        return VINOX_STATUS_INVALID_ARGUMENT;
+    }
+
     if (level < g_min_log_level.load(std::memory_order_relaxed)) {
         return VINOX_STATUS_OK;
     }
 
     std::string comp = bound_text(component ? component : "vinox", 32);
     std::string evt = bound_text(event_id ? event_id : "event", 64);
-    std::string details = message_kv ? bound_text(message_kv, 1024) : "";
 
     std::string req_id, sess_id, r_id, t_id, op_id;
-
-    // STRUCT-SIZE OFFSET CHECKING FOR PREFIX-LAYOUT ABI SAFETY
     if (correlation != nullptr) {
         if (VINOX_FIELD_PRESENT_MEMBER(correlation, request_id)) req_id = sanitize_and_bound_id(correlation->request_id);
         if (VINOX_FIELD_PRESENT_MEMBER(correlation, session_id)) sess_id = sanitize_and_bound_id(correlation->session_id);
         if (VINOX_FIELD_PRESENT_MEMBER(correlation, run_id)) r_id = sanitize_and_bound_id(correlation->run_id);
         if (VINOX_FIELD_PRESENT_MEMBER(correlation, task_id)) t_id = sanitize_and_bound_id(correlation->task_id);
         if (VINOX_FIELD_PRESENT_MEMBER(correlation, operation_id)) op_id = sanitize_and_bound_id(correlation->operation_id);
+    }
+
+    std::string model_id, backend, status_str, details;
+    uint64_t duration_ms = 0;
+    uint32_t status_code = 0;
+    bool has_duration = false;
+    bool has_status_code = false;
+
+    if (meta != nullptr) {
+        if (VINOX_FIELD_PRESENT_MEMBER(meta, model_id)) model_id = sanitize_and_bound_id(meta->model_id);
+        if (VINOX_FIELD_PRESENT_MEMBER(meta, backend)) backend = sanitize_and_bound_id(meta->backend);
+        if (VINOX_FIELD_PRESENT_MEMBER(meta, duration_ms)) { duration_ms = meta->duration_ms; has_duration = true; }
+        if (VINOX_FIELD_PRESENT_MEMBER(meta, status)) status_str = bound_text(meta->status, 32);
+        if (VINOX_FIELD_PRESENT_MEMBER(meta, status_code)) { status_code = meta->status_code; has_status_code = true; }
+        if (VINOX_FIELD_PRESENT_MEMBER(meta, details)) details = bound_text(meta->details, 1024);
     }
 
     // GUARANTEED NLOHMANN/JSON SPEC-COMPLIANT JSON ESCAPING
@@ -173,6 +190,12 @@ vinox_status vinox_log_event(
     if (!r_id.empty()) j["run_id"] = r_id;
     if (!t_id.empty()) j["task_id"] = t_id;
     if (!op_id.empty()) j["operation_id"] = op_id;
+
+    if (!model_id.empty()) j["model_id"] = model_id;
+    if (!backend.empty()) j["backend"] = backend;
+    if (has_duration) j["duration_ms"] = duration_ms;
+    if (!status_str.empty()) j["status"] = status_str;
+    if (has_status_code) j["status_code"] = status_code;
     if (!details.empty()) j["details"] = details;
 
     std::string json_line = j.dump();
@@ -183,13 +206,108 @@ vinox_status vinox_log_event(
         if (g_logger) {
             g_logger->log(to_spdlog_level(level), "{}", json_line);
         } else {
-            // Default fallback console write
             std::cerr << json_line << "\n";
         }
     } catch (...) {
         g_sink_ok.store(false, std::memory_order_relaxed);
         g_dropped_count.fetch_add(1, std::memory_order_relaxed);
     }
+
+    return VINOX_STATUS_OK;
+}
+
+vinox_status vinox_log_event(
+    uint32_t level,
+    const char* component,
+    const char* event_id,
+    const vinox_correlation_context* correlation,
+    const char* message_kv
+) {
+    vinox_log_event_meta meta{};
+    meta.struct_size = sizeof(vinox_log_event_meta);
+    meta.details = message_kv;
+    return vinox_log_event_ex(level, component, event_id, correlation, &meta);
+}
+
+vinox_status vinox_correlation_serialize_envelope(
+    const vinox_correlation_context* correlation,
+    char* output_buf,
+    size_t output_buf_size,
+    size_t* required_size_out
+) {
+    if (!correlation) {
+        vinox_set_last_error("correlation context cannot be null");
+        return VINOX_STATUS_INVALID_ARGUMENT;
+    }
+
+    nlohmann::json j;
+    j["wire_version"] = 1;
+
+    if (VINOX_FIELD_PRESENT_MEMBER(correlation, request_id) && correlation->request_id)
+        j["request_id"] = sanitize_and_bound_id(correlation->request_id);
+    if (VINOX_FIELD_PRESENT_MEMBER(correlation, session_id) && correlation->session_id)
+        j["session_id"] = sanitize_and_bound_id(correlation->session_id);
+    if (VINOX_FIELD_PRESENT_MEMBER(correlation, run_id) && correlation->run_id)
+        j["run_id"] = sanitize_and_bound_id(correlation->run_id);
+    if (VINOX_FIELD_PRESENT_MEMBER(correlation, task_id) && correlation->task_id)
+        j["task_id"] = sanitize_and_bound_id(correlation->task_id);
+    if (VINOX_FIELD_PRESENT_MEMBER(correlation, operation_id) && correlation->operation_id)
+        j["operation_id"] = sanitize_and_bound_id(correlation->operation_id);
+
+    std::string str = j.dump();
+    size_t req_len = str.length() + 1;
+    if (required_size_out) *required_size_out = req_len;
+
+    if (output_buf && output_buf_size > 0) {
+        size_t copy_len = std::min(str.length(), output_buf_size - 1);
+        std::memcpy(output_buf, str.c_str(), copy_len);
+        output_buf[copy_len] = '\0';
+    }
+
+    return VINOX_STATUS_OK;
+}
+
+vinox_status vinox_correlation_deserialize_envelope(
+    const char* json_str,
+    vinox_correlation_context* correlation_out,
+    char* string_pool_buf,
+    size_t string_pool_buf_size
+) {
+    if (!json_str || !correlation_out || !string_pool_buf || string_pool_buf_size == 0) {
+        vinox_set_last_error("Invalid arguments for deserializing correlation envelope");
+        return VINOX_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (correlation_out->struct_size < VINOX_CORRELATION_CONTEXT_MIN_SIZE) {
+        vinox_set_last_error("correlation_out->struct_size is too small");
+        return VINOX_STATUS_INCOMPATIBLE_ABI;
+    }
+
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(json_str);
+    } catch (...) {
+        vinox_set_last_error("Invalid JSON envelope");
+        return VINOX_STATUS_INVALID_ARGUMENT;
+    }
+
+    size_t offset = 0;
+    auto copy_field = [&](const char* key) -> const char* {
+        if (!j.contains(key) || !j[key].is_string()) return nullptr;
+        std::string val = j[key].get<std::string>();
+        if (offset + val.length() + 1 > string_pool_buf_size) return nullptr;
+        char* dst = string_pool_buf + offset;
+        std::memcpy(dst, val.c_str(), val.length());
+        dst[val.length()] = '\0';
+        offset += val.length() + 1;
+        return dst;
+    };
+
+    correlation_out->request_id = copy_field("request_id");
+    if (VINOX_FIELD_PRESENT_MEMBER(correlation_out, session_id)) correlation_out->session_id = copy_field("session_id");
+    if (VINOX_FIELD_PRESENT_MEMBER(correlation_out, run_id)) correlation_out->run_id = copy_field("run_id");
+    if (VINOX_FIELD_PRESENT_MEMBER(correlation_out, task_id)) correlation_out->task_id = copy_field("task_id");
+    if (VINOX_FIELD_PRESENT_MEMBER(correlation_out, operation_id)) correlation_out->operation_id = copy_field("operation_id");
 
     return VINOX_STATUS_OK;
 }
@@ -210,7 +328,7 @@ vinox_status vinox_redact_sensitive_text(
     try {
         redacted = redact_string(input_text);
     } catch (...) {
-        redacted = "[REDACTION_FAILED]"; // FAIL CLOSED ON EXCEPTION
+        redacted = "[REDACTION_FAILED]"; // FAIL CLOSED
     }
 
     size_t req_len = redacted.length() + 1;
@@ -228,6 +346,10 @@ vinox_status vinox_redact_sensitive_text(
 }
 
 vinox_status vinox_log_set_level(uint32_t level) {
+    if (level > VINOX_LOG_CRITICAL) {
+        vinox_set_last_error("Invalid log level: level exceeds VINOX_LOG_CRITICAL");
+        return VINOX_STATUS_INVALID_ARGUMENT;
+    }
     g_min_log_level.store(level, std::memory_order_relaxed);
     std::lock_guard<std::mutex> lock(g_sink_mutex);
     if (g_logger) {

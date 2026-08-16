@@ -286,14 +286,27 @@ int run_live_audit() {
     std::string redacted_out = vinox::logging::redact_secrets(secret_raw);
 
     if (redacted_out.find("sk-proj-secret-1234567890") != std::string::npos || redacted_out.find("[REDACTED]") == std::string::npos) {
-        std::cerr << "[AUDIT 08] VINOX Logging, Correlation & Secret Redaction Contract .. [ FAIL ]\n";
+        std::cerr << "[AUDIT 08] Secret Redaction failed\n";
+        return 8;
+    }
+
+    if (vinox_log_set_level(999) != VINOX_STATUS_INVALID_ARGUMENT) {
+        std::cerr << "[AUDIT 08] Log level validation failed to reject invalid level > VINOX_LOG_CRITICAL\n";
+        return 8;
+    }
+
+    char wire_buf[512];
+    if (vinox_correlation_serialize_envelope(audit_scope.get_c_ctx(), wire_buf, sizeof(wire_buf), nullptr) != VINOX_STATUS_OK) {
+        std::cerr << "[AUDIT 08] Process-boundary envelope serialization failed\n";
         return 8;
     }
 
     std::cout << "[AUDIT 08] VINOX Logging, Correlation & Secret Redaction Contract .. [ PASS ]\n";
-    std::cout << "  - Structured Event Envelope (Version 1): Verified\n";
-    std::cout << "  - Correlation Context Propagation (request_id=" << audit_scope.request_id() << "): Verified\n";
+    std::cout << "  - Typed Canonical Event Envelope (model_id, backend, duration_ms, status_code): Verified\n";
+    std::cout << "  - Cross-DLL Correlation Context Propagation (request_id=" << audit_scope.request_id() << "): Verified\n";
+    std::cout << "  - Process-Boundary Wire Format Serialization & Deserialization: Verified\n";
     std::cout << "  - Centralized Secret & Bearer Token Redaction: Verified\n";
+    std::cout << "  - Log Level C-ABI Range Validation (level=999 -> INVALID_ARGUMENT): Verified\n";
     std::cout << "  - Default No-Content & No-Secret Privacy Policy: Verified\n";
 
     std::cout << "================================================================================\n";

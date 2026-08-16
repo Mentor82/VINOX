@@ -32,8 +32,21 @@ typedef struct vinox_correlation_context {
     const char* operation_id;
 } vinox_correlation_context;
 
+#define VINOX_LOG_EVENT_META_MIN_SIZE \
+    ((uint32_t)(offsetof(vinox_log_event_meta, details) + sizeof(const char*)))
+
+typedef struct vinox_log_event_meta {
+    uint32_t struct_size;
+    const char* model_id;
+    const char* backend;
+    uint64_t duration_ms;
+    const char* status;
+    uint32_t status_code;
+    const char* details;
+} vinox_log_event_meta;
+
 /**
- * @brief Emits a structured operational log event into active sinks with JSON escaping.
+ * @brief Emits a structured operational log event into active sinks with JSON escaping and simple message details.
  */
 VINOX_API vinox_status vinox_log_event(
     uint32_t level,
@@ -41,6 +54,37 @@ VINOX_API vinox_status vinox_log_event(
     const char* event_id,
     const vinox_correlation_context* correlation,
     const char* message_kv
+);
+
+/**
+ * @brief Emits a fully-typed canonical structured operational log event with top-level model_id, backend, duration_ms, status, status_code, and details.
+ */
+VINOX_API vinox_status vinox_log_event_ex(
+    uint32_t level,
+    const char* component,
+    const char* event_id,
+    const vinox_correlation_context* correlation,
+    const vinox_log_event_meta* meta
+);
+
+/**
+ * @brief Serializes a correlation context into a versioned process-boundary wire format JSON envelope.
+ */
+VINOX_API vinox_status vinox_correlation_serialize_envelope(
+    const vinox_correlation_context* correlation,
+    char* output_buf,
+    size_t output_buf_size,
+    size_t* required_size_out
+);
+
+/**
+ * @brief Deserializes a versioned process-boundary wire format JSON envelope into a correlation context.
+ */
+VINOX_API vinox_status vinox_correlation_deserialize_envelope(
+    const char* json_str,
+    vinox_correlation_context* correlation_out,
+    char* string_pool_buf,
+    size_t string_pool_buf_size
 );
 
 /**
@@ -64,7 +108,7 @@ VINOX_API void vinox_set_last_error(const char* message);
 VINOX_API const char* vinox_last_error(void);
 
 /**
- * @brief Configures minimum operational log level threshold.
+ * @brief Configures minimum operational log level threshold (must be <= VINOX_LOG_CRITICAL).
  */
 VINOX_API vinox_status vinox_log_set_level(uint32_t level);
 

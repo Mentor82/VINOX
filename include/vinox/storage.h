@@ -83,9 +83,18 @@ VINOX_API vinox_status vinox_storage_create_conversation(
     vinox_conversation_info* info_out
 );
 
+#include "vinox/logging.h"
+
 VINOX_API vinox_status vinox_storage_add_message(
     vinox_storage_engine* engine,
     const vinox_message_info* message_in,
+    vinox_message_info* message_out
+);
+
+VINOX_API vinox_status vinox_storage_add_message_ex(
+    vinox_storage_engine* engine,
+    const vinox_message_info* message_in,
+    const vinox_correlation_context* correlation,
     vinox_message_info* message_out
 );
 

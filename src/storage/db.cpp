@@ -356,6 +356,15 @@ vinox_status vinox_storage_add_message(
     const vinox_message_info* message_in,
     vinox_message_info* message_out
 ) {
+    return vinox_storage_add_message_ex(engine, message_in, nullptr, message_out);
+}
+
+vinox_status vinox_storage_add_message_ex(
+    vinox_storage_engine* engine,
+    const vinox_message_info* message_in,
+    const vinox_correlation_context* correlation,
+    vinox_message_info* message_out
+) {
     if (engine == nullptr || engine->db == nullptr) {
         return fail_arg("storage engine handle cannot be null");
     }
@@ -422,6 +431,13 @@ vinox_status vinox_storage_add_message(
         if (VINOX_FIELD_PRESENT(message_out, provenance_kind)) message_out->provenance_kind = stored.provenance_kind;
         if (VINOX_FIELD_PRESENT(message_out, created_at_ms)) message_out->created_at_ms = stored.created_at_ms;
     }
+
+    // EMIT CROSS-DLL OPERATIONAL LOG EVENT WITH CORRELATION PROPAGATION
+    vinox_log_event_meta meta{};
+    meta.struct_size = sizeof(vinox_log_event_meta);
+    meta.details = "Message inserted into SQLite storage engine";
+    meta.status = "OK";
+    vinox_log_event_ex(VINOX_LOG_INFO, "storage", "message.add", correlation, &meta);
 
     vinox_set_last_error(nullptr);
     return VINOX_STATUS_OK;

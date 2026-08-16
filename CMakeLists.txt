@@ -219,7 +219,7 @@ if(BUILD_TESTING)
     add_test(NAME provenance_smoke COMMAND vinox_provenance_smoke)
 
     add_executable(vinox_logging_smoke tests/logging_smoke.c)
-    target_link_libraries(vinox_logging_smoke PRIVATE vinox::core)
+    target_link_libraries(vinox_logging_smoke PRIVATE vinox::core vinox::storage)
     add_test(NAME logging_smoke COMMAND vinox_logging_smoke)
 
     add_executable(vinox_serving_smoke tests/serving_smoke.c)
