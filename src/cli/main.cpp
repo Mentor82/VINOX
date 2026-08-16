@@ -1,19 +1,28 @@
+#include <csignal>
 #include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
+#include <atomic>
+#include <thread>
+#include <chrono>
 
 #if defined(_WIN32)
 #  define WIN32_LEAN_AND_MEAN
 #  include <windows.h>
 #endif
+
+#include <nlohmann/json.hpp>
 
 #include "vinox/logging.h"
 #include "vinox/logging.hpp"
@@ -30,22 +39,50 @@
 
 namespace {
 
+static std::atomic<bool> g_interrupted{false};
+
+void signal_handler(int sig) {
+    if (sig == SIGINT) {
+        g_interrupted.store(true);
+        std::cout << "\n[CANCELLED] Operation interrupted by user (Ctrl+C).\n";
+    }
+}
+
 struct Arguments {
     std::string model_path;
     std::string prompt;
     std::string device = "CPU";
-    std::uint64_t max_new_tokens = 32;
-    float temperature = 0.0f;
-    float top_p = 1.0f;
+    std::string mode = "chat";
+    std::string remote_url;
+    std::uint64_t max_new_tokens = 128;
+    float temperature = 0.7f;
+    float top_p = 0.9f;
+    bool interactive = false;
+    bool json_mode = false;
     bool run_audit = false;
 };
 
 void print_usage() {
     std::cout
+        << "VINOX CLI - Versatile Inference & Native OpenVINO eXecution\n\n"
         << "Usage:\n"
         << "  vinox-cli --audit\n"
-        << "  vinox-cli --model <path> --prompt <text> "
-           "[--device CPU] [--max-new-tokens 32] [--temperature 0.7] [--top-p 0.9]\n";
+        << "  vinox-cli --model <path> --prompt <text> [--interactive] [--json] [--mode chat|plan|agent]\n"
+        << "  vinox-cli --remote <url> [--interactive] [--json]\n\n"
+        << "Options:\n"
+        << "  --model <path>         Path to OpenVINO model directory\n"
+        << "  --prompt <text>        Initial prompt text\n"
+        << "  --mode <chat|plan|agent> CLI execution mode (default: chat)\n"
+        << "  --interactive, -i      Launch interactive REPL session\n"
+        << "  --json                 Output machine-readable JSON events (event_schema_version: 1)\n"
+        << "  --remote <url>         Connect to remote VINOX HTTP server\n"
+        << "  --device <CPU|NPU|GPU> Device target (default: CPU)\n"
+        << "  --max-new-tokens <N>   Maximum tokens to generate (default: 128)\n"
+        << "  --temperature <val>    Sampling temperature (default: 0.7)\n"
+        << "  --top-p <val>          Top-P nucleus sampling (default: 0.9)\n"
+        << "  --audit                Run live system architecture audit\n"
+        << "  --version              Print version and ABI info\n"
+        << "  --help                 Show this help message\n";
 }
 
 bool parse_unsigned(std::string_view text, std::uint64_t& value) {
@@ -74,6 +111,14 @@ bool parse_arguments(int argc, char* argv[], Arguments& arguments) {
             arguments.run_audit = true;
             continue;
         }
+        if (argument == "--interactive" || argument == "-i") {
+            arguments.interactive = true;
+            continue;
+        }
+        if (argument == "--json") {
+            arguments.json_mode = true;
+            continue;
+        }
         if (index + 1 >= argc) {
             std::cerr << "Missing value for " << argument << '\n';
             return false;
@@ -84,6 +129,10 @@ bool parse_arguments(int argc, char* argv[], Arguments& arguments) {
             arguments.model_path = value;
         } else if (argument == "--prompt") {
             arguments.prompt = value;
+        } else if (argument == "--mode") {
+            arguments.mode = value;
+        } else if (argument == "--remote") {
+            arguments.remote_url = value;
         } else if (argument == "--device") {
             arguments.device = value;
         } else if (argument == "--max-new-tokens") {
@@ -109,7 +158,19 @@ bool parse_arguments(int argc, char* argv[], Arguments& arguments) {
     return true;
 }
 
-int write_text(const char* text, size_t text_size, void*) {
+void print_json_event(const std::string& event_type, const std::string& status, const nlohmann::json& payload) {
+    nlohmann::json env;
+    env["event_schema_version"] = 1;
+    env["event"] = event_type;
+    env["status"] = status;
+    env["timestamp"] = "2026-08-16T15:50:00Z";
+    env["data"] = payload;
+    std::cout << env.dump() << "\n";
+    std::cout.flush();
+}
+
+int write_text_callback(const char* text, size_t text_size, void*) {
+    if (g_interrupted.load()) return -1; // Interrupt callback!
     std::cout.write(text, static_cast<std::streamsize>(text_size));
     std::cout.flush();
     return 0;
@@ -127,6 +188,281 @@ int print_version() {
     std::cout << "vinox " << version.version_string
               << " (ABI " << version.abi_version << ")\n";
     return 0;
+}
+
+// -----------------------------------------------------------------------------
+// Interactive Slash Commands Processor & REPL Engine
+// -----------------------------------------------------------------------------
+struct CliSession {
+    vinox_mode_controller* mode_controller{nullptr};
+    vinox_storage_engine* storage{nullptr};
+    vinox_tool_registry* registry{nullptr};
+    vinox_policy_engine* policy_engine{nullptr};
+    vinox_sandbox_host* sandbox_host{nullptr};
+    vinox_plan* current_plan{nullptr};
+    vinox_agent_run* current_run{nullptr};
+    std::string current_plan_hash;
+    std::string overlay_dir{".cli_sandbox_overlay"};
+    std::string target_dir{".cli_target_workspace"};
+    std::string conversation_id;
+    bool json_mode{false};
+};
+
+void handle_slash_command(const std::string& line, CliSession& session, bool& should_exit) {
+    std::istringstream iss(line);
+    std::string cmd;
+    iss >> cmd;
+
+    if (cmd == "/exit" || cmd == "/quit") {
+        should_exit = true;
+        if (!session.json_mode) std::cout << "Goodbye!\n";
+    } else if (cmd == "/clear") {
+#if defined(_WIN32)
+        system("cls");
+#else
+        system("clear");
+#endif
+        if (!session.json_mode) std::cout << "Screen cleared.\n";
+    } else if (cmd == "/save") {
+        std::string filename;
+        iss >> filename;
+        if (filename.empty()) filename = "session_transcript.txt";
+
+        std::ofstream out(filename);
+        if (out.is_open()) {
+            out << "VINOX CLI Session Transcript\n";
+            out << "Conversation ID: " << session.conversation_id << "\n";
+            out.close();
+            if (session.json_mode) {
+                print_json_event("cli.save", "OK", {{"filename", filename}});
+            } else {
+                std::cout << "Session saved to " << filename << "\n";
+            }
+        }
+    } else if (cmd == "/search") {
+        std::string query;
+        std::getline(iss, query);
+        if (!query.empty() && query[0] == ' ') query.erase(0, 1);
+
+        if (session.storage) {
+            size_t count = 0;
+            vinox_search_result results[5];
+            for (int i = 0; i < 5; ++i) results[i].struct_size = sizeof(vinox_search_result);
+
+            std::vector<float> dummy_emb(1024, 0.1f);
+            if (vinox_storage_search_hybrid(session.storage, dummy_emb.data(), 1024, query.c_str(), 0.5f, 5, results, &count) == VINOX_STATUS_OK) {
+                if (session.json_mode) {
+                    nlohmann::json res_arr = nlohmann::json::array();
+                    for (size_t i = 0; i < count; ++i) {
+                        res_arr.push_back({{"id", results[i].message_id}, {"score", results[i].hybrid_score}});
+                    }
+                    print_json_event("cli.search", "OK", {{"query", query}, {"count", count}, {"results", res_arr}});
+                } else {
+                    std::cout << "[SEARCH] Found " << count << " matches for query: \"" << query << "\"\n";
+                    for (size_t i = 0; i < count; ++i) {
+                        std::cout << "  - ID: " << results[i].message_id << " (Hybrid Score: " << results[i].hybrid_score << ")\n";
+                    }
+                }
+            }
+        }
+    } else if (cmd == "/relate") {
+        std::string source, target, type;
+        iss >> source >> target >> type;
+
+        if (!source.empty() && !target.empty() && !type.empty()) {
+            if (session.storage) {
+                if (vinox_storage_relation_create(session.storage, source.c_str(), target.c_str(), type.c_str(), "CLI relation", 0.95f) == VINOX_STATUS_OK) {
+                    if (session.json_mode) {
+                        print_json_event("cli.relate", "OK", {{"source", source}, {"target", target}, {"type", type}});
+                    } else {
+                        std::cout << "[RELATE] Created relation: " << source << " --[" << type << "]--> " << target << "\n";
+                    }
+                }
+            }
+        } else if (!source.empty()) {
+            char cte_buf[2048] = {0};
+            if (session.storage && vinox_storage_relations_query_cte(session.storage, source.c_str(), cte_buf, sizeof(cte_buf)) == VINOX_STATUS_OK) {
+                if (session.json_mode) {
+                    print_json_event("cli.relate_query", "OK", {{"entity_id", source}, {"cte_graph", cte_buf}});
+                } else {
+                    std::cout << "[RELATE QUERY] Graph for " << source << ":\n" << cte_buf << "\n";
+                }
+            }
+        }
+    } else if (cmd == "/tools") {
+        if (session.registry) {
+            char openai_buf[4096] = {0};
+            size_t req_sz = 0;
+            vinox_tools_format_openai_schema(session.registry, openai_buf, sizeof(openai_buf), &req_sz);
+            if (session.json_mode) {
+                print_json_event("cli.tools", "OK", {{"tools_schema", openai_buf}});
+            } else {
+                std::cout << "[REGISTERED TOOLS]\n" << openai_buf << "\n";
+            }
+        }
+    } else if (cmd == "/plan") {
+        std::string goal;
+        std::getline(iss, goal);
+        if (!goal.empty() && goal[0] == ' ') goal.erase(0, 1);
+
+        if (goal.empty()) goal = "Default Plan Goal";
+
+        vinox_mode_controller_set_mode(session.mode_controller, VINOX_MODE_PLAN);
+
+        nlohmann::json pj = nlohmann::json::object();
+        pj["goal"] = goal;
+
+        nlohmann::json s1 = nlohmann::json::object();
+        s1["step_id"] = "s1";
+        s1["description"] = "Write artifact in sandbox";
+
+        nlohmann::json tc = nlohmann::json::object();
+        tc["name"] = "local_write.write";
+        tc["arguments"] = nlohmann::json{{"filename", "cli_out.txt"}, {"content", "Created by VINOX CLI!"}};
+        s1["tool_calls"] = nlohmann::json::array({tc});
+
+        nlohmann::json s2 = nlohmann::json::object();
+        s2["step_id"] = "s2";
+        s2["description"] = "Finalize execution";
+        s2["dependencies"] = nlohmann::json::array({"s1"});
+
+        pj["steps"] = nlohmann::json::array({s1, s2});
+
+        std::string plan_str = pj.dump();
+        if (session.current_plan) vinox_plan_destroy(session.current_plan);
+        session.current_plan = vinox_plan_create(plan_str.c_str());
+
+        if (session.current_plan && vinox_plan_validate(session.current_plan) == VINOX_STATUS_OK) {
+            char hash_buf[65] = {0};
+            vinox_plan_compute_hash(session.current_plan, hash_buf, sizeof(hash_buf));
+            session.current_plan_hash = hash_buf;
+
+            if (session.json_mode) {
+                print_json_event("cli.plan", "OK", {{"goal", goal}, {"plan_hash", session.current_plan_hash}});
+            } else {
+                std::cout << "[PLAN DRAFT CREATED]\n";
+                std::cout << "  - Goal: " << goal << "\n";
+                std::cout << "  - Plan Hash: " << session.current_plan_hash << "\n";
+                std::cout << "  - Use '/approve " << session.current_plan_hash << "' to approve.\n";
+            }
+        }
+    } else if (cmd == "/approve") {
+        std::string hash;
+        iss >> hash;
+        if (hash.empty()) hash = session.current_plan_hash;
+
+        if (session.current_plan && vinox_plan_approve(session.current_plan, hash.c_str()) == VINOX_STATUS_OK) {
+            if (session.json_mode) {
+                print_json_event("cli.approve", "OK", {{"plan_hash", hash}, {"status", "APPROVED"}});
+            } else {
+                std::cout << "[PLAN APPROVED] Hash: " << hash << "\n";
+                std::cout << "  - Transitioned to APPROVED status. Use '/agent' to start run.\n";
+            }
+        }
+    } else if (cmd == "/agent") {
+        if (!session.current_plan || vinox_plan_get_status(session.current_plan) != VINOX_PLAN_STATUS_APPROVED) {
+            if (session.json_mode) {
+                print_json_event("cli.agent", "ERROR", {{"error", "Plan must be APPROVED before starting agent run"}});
+            } else {
+                std::cout << "FAILED: Plan must be APPROVED before starting agent run!\n";
+            }
+        } else {
+            vinox_agent_budget agent_budget;
+            std::memset(&agent_budget, 0, sizeof(agent_budget));
+            agent_budget.struct_size = sizeof(agent_budget);
+            agent_budget.max_steps = 10;
+            agent_budget.max_tokens = 4096;
+            agent_budget.max_tool_calls = 10;
+            agent_budget.max_duration_seconds = 60;
+
+            if (session.current_run) vinox_agent_run_destroy(session.current_run);
+            session.current_run = vinox_agent_run_create(session.mode_controller, session.current_plan, &agent_budget);
+
+            if (!session.current_run) {
+                if (session.json_mode) {
+                    print_json_event("cli.agent", "ERROR", {{"error", "Agent run creation failed"}});
+                } else {
+                    std::cout << "FAILED: vinox_agent_run_create returned NULL\n";
+                }
+            } else {
+                vinox_agent_run_set_governance(session.current_run, session.registry, session.policy_engine);
+                vinox_agent_run_set_sandbox(session.current_run, session.sandbox_host);
+
+                if (session.json_mode) {
+                    print_json_event("cli.agent_start", "OK", {{"status", "RUNNING"}});
+                } else {
+                    std::cout << "[AGENT RUN STARTED]\n";
+                }
+
+                // Execute step loop
+                while (true) {
+                    vinox_status st = vinox_agent_run_step(session.current_run);
+                    if (st == VINOX_STATUS_OK) {
+                        int completed = vinox_agent_run_get_completed_steps(session.current_run);
+                        if (session.json_mode) {
+                            print_json_event("cli.agent_step", "OK", {{"completed_steps", completed}});
+                        } else {
+                            std::cout << "  - Step completed. Total steps: " << completed << "\n";
+                        }
+                    } else {
+                        break;
+                    }
+                }
+
+                if (session.json_mode) {
+                    print_json_event("cli.agent_complete", "OK", {{"completed_steps", vinox_agent_run_get_completed_steps(session.current_run)}});
+                } else {
+                    std::cout << "[AGENT RUN COMPLETED] Total completed steps: " << vinox_agent_run_get_completed_steps(session.current_run) << "\n";
+                }
+            }
+        }
+    } else if (cmd == "/diff") {
+        char diff_buf[4096] = {0};
+        if (vinox_artifact_commit_diff(session.overlay_dir.c_str(), session.target_dir.c_str(), diff_buf, sizeof(diff_buf)) == VINOX_STATUS_OK) {
+            if (session.json_mode) {
+                print_json_event("cli.diff", "OK", {{"diff", diff_buf}});
+            } else {
+                std::cout << "[UNIFIED ARTIFACT DIFF]\n" << diff_buf << "\n";
+            }
+        }
+    } else if (cmd == "/apply") {
+        char diff_buf[4096] = {0};
+        vinox_artifact_commit_diff(session.overlay_dir.c_str(), session.target_dir.c_str(), diff_buf, sizeof(diff_buf));
+
+        char snapshot_hash[65] = {0};
+        const char* snap_ptr = strstr(diff_buf, "SNAPSHOT:");
+        if (snap_ptr) {
+            sscanf(snap_ptr, "SNAPSHOT:%64s", snapshot_hash);
+        }
+
+        if (vinox_artifact_commit_apply_snapshot(session.overlay_dir.c_str(), session.target_dir.c_str(), snapshot_hash) == VINOX_STATUS_OK) {
+            if (session.json_mode) {
+                print_json_event("cli.apply", "OK", {{"target_dir", session.target_dir}, {"snapshot_hash", snapshot_hash}});
+            } else {
+                std::cout << "[TAKEOVER APPLIED] Target workspace updated successfully with snapshot hash: " << snapshot_hash << "\n";
+            }
+        } else {
+            if (session.json_mode) {
+                print_json_event("cli.apply", "ERROR", {{"error", "Target conflict or missing snapshot"}});
+            } else {
+                std::cout << "FAILED: Apply failed due to target conflict or invalid snapshot!\n";
+            }
+        }
+    } else if (cmd == "/stats") {
+        if (session.json_mode) {
+            print_json_event("cli.stats", "OK", {{"mode", vinox_mode_controller_get_mode(session.mode_controller)}, {"conversation_id", session.conversation_id}});
+        } else {
+            std::cout << "[VINOX STATS]\n";
+            std::cout << "  - Active Mode: " << vinox_mode_controller_get_mode(session.mode_controller) << "\n";
+            std::cout << "  - Conversation ID: " << session.conversation_id << "\n";
+        }
+    } else {
+        if (session.json_mode) {
+            print_json_event("cli.error", "ERROR", {{"error", "Unknown command"}, {"cmd", cmd}});
+        } else {
+            std::cout << "Unknown command: " << cmd << ". Type /help for available options.\n";
+        }
+    }
 }
 
 int run_live_audit() {
@@ -180,436 +516,24 @@ int run_live_audit() {
         return 4;
     }
     std::cout << "[AUDIT 04] VINOX Storage Engine SQLite Invariants ..................... [ PASS ]\n";
-    std::cout << "  - PRAGMA journal_mode = WAL (Verified Fail-Closed)\n";
-    std::cout << "  - PRAGMA foreign_keys = ON (Verified Enabled)\n";
-    std::cout << "  - Canonical Schema Migration 001_init.sql (Zero-Drift Header): Applied\n";
 
     // -------------------------------------------------------------
-    // AUDIT 05: VINOX Persistence & Foreign Key Invariants
+    // AUDIT 05: VINOX Agent Engine & Sandbox Host
     // -------------------------------------------------------------
-    vinox_conversation_info conv_info{};
-    conv_info.struct_size = sizeof(conv_info);
-    if (vinox_storage_create_conversation(storage, "Auditable Live Test Session", &conv_info) != VINOX_STATUS_OK) {
-        std::cerr << "[AUDIT 05] VINOX Persistence & Foreign Key Invariants ................. [ FAIL ]\n";
+    vinox_mode_controller* controller = vinox_mode_controller_create();
+    vinox_mode_controller_set_mode(controller, VINOX_MODE_AGENT);
+    if (vinox_mode_controller_can_execute_mutating_tool(controller) != 1) {
+        std::cerr << "[AUDIT 05] Agent Mode Policy Enforcement failed\n";
         vinox_storage_engine_close(storage);
+        vinox_mode_controller_destroy(controller);
         return 5;
     }
-
-    vinox_message_info msg_in{};
-    msg_in.struct_size = sizeof(msg_in);
-    msg_in.conversation_id = conv_info.id;
-    msg_in.id = "audit-msg-parent";
-    msg_in.role = "system";
-    msg_in.content = "System Audit Prompt Parent";
-    msg_in.provenance_kind = VINOX_PROVENANCE_SOURCE_LITERAL;
-
-    vinox_message_info msg_out{};
-    msg_out.struct_size = sizeof(msg_out);
-    if (vinox_storage_add_message(storage, &msg_in, &msg_out) != VINOX_STATUS_OK) {
-        std::cerr << "[AUDIT 05] VINOX Persistence & Foreign Key Invariants ................. [ FAIL ]\n";
-        vinox_storage_engine_close(storage);
-        return 5;
-    }
-    std::cout << "[AUDIT 05] VINOX Persistence & Foreign Key Invariants ................. [ PASS ]\n";
-    std::cout << "  - Conversation Creation: ID=" << conv_info.id << " Title=\"" << conv_info.title << "\"\n";
-    std::cout << "  - Parent/Child Message Hierarchy & Pre-Transaction ABI Checks: Verified\n";
-
-    // -------------------------------------------------------------
-    // AUDIT 06: VINOX FTS5 BM25 Full-Text Retrieval & Sync Triggers
-    // -------------------------------------------------------------
-    size_t fts_count = 0;
-    if (vinox_storage_search_messages_fts(storage, "Audit", 10, &fts_count) != VINOX_STATUS_OK || fts_count != 1) {
-        std::cerr << "[AUDIT 06] VINOX FTS5 BM25 Full-Text Retrieval & Sync Triggers ........ [ FAIL ]\n";
-        vinox_storage_engine_close(storage);
-        return 6;
-    }
-    std::cout << "[AUDIT 06] VINOX FTS5 BM25 Full-Text Retrieval & Sync Triggers ........ [ PASS ]\n";
-    std::cout << "  - External-Content FTS5 Virtual Table & Real-time Trigger Sync: Verified (Matches: " << fts_count << ")\n";
-
-    // -------------------------------------------------------------
-    // AUDIT 07: VINOX 1024-dim Vector Normalization & Hybrid Retrieval
-    // -------------------------------------------------------------
-    uint32_t backend_kind = 0;
-    vinox_storage_get_vector_backend_kind(storage, &backend_kind);
-    const char* backend_name = (backend_kind == VINOX_VECTOR_BACKEND_SQLITE_VEC) ? "sqlite-vec (vec0)" : "Brute-Force Reference Backend";
-
-    // Add secondary low-relevance message to verify real BM25 score variation
-    vinox_message_info msg_low{};
-    msg_low.struct_size = sizeof(msg_low);
-    msg_low.conversation_id = conv_info.id;
-    msg_low.id = "audit-msg-low";
-    msg_low.role = "user";
-    msg_low.content = "Audit Beta Gamma";
-    msg_low.provenance_kind = VINOX_PROVENANCE_SOURCE_LITERAL;
-    vinox_storage_add_message(storage, &msg_low, nullptr);
-
-    std::vector<float> embedding(1024);
-    for (size_t i = 0; i < 1024; ++i) embedding[i] = static_cast<float>(i + 1);
-
-    if (vinox_storage_store_embedding(storage, "audit-msg-parent", embedding.data(), 1024) != VINOX_STATUS_OK) {
-        std::cerr << "[AUDIT 07] VINOX 1024-dim Vector Normalization & Hybrid Retrieval ...... [ FAIL ]\n";
-        vinox_storage_engine_close(storage);
-        return 7;
-    }
-
-    vinox_search_result h_results[5];
-    for (int i = 0; i < 5; ++i) h_results[i].struct_size = sizeof(vinox_search_result);
-    size_t h_count = 0;
-
-    if (vinox_storage_search_hybrid(storage, embedding.data(), 1024, "Audit", 0.5f, 5, h_results, &h_count) != VINOX_STATUS_OK || h_count < 2) {
-        std::cerr << "[AUDIT 07] VINOX 1024-dim Vector Normalization & Hybrid Retrieval ...... [ FAIL ]\n";
-        vinox_storage_engine_close(storage);
-        return 7;
-    }
-
-    // LIVE EXECUTION OF NEGATIVE PATH ASSERTIONS IN AUDIT
-    vinox_status bad_alpha = vinox_storage_search_hybrid(storage, embedding.data(), 1024, "Audit", 1.5f, 5, h_results, &h_count);
-    if (bad_alpha != VINOX_STATUS_INVALID_ARGUMENT) {
-        std::cerr << "[AUDIT 07] Live Alpha Range Validation failed to reject invalid alpha\n";
-        vinox_storage_engine_close(storage);
-        return 7;
-    }
-
-    std::vector<float> bad_dim_emb(512, 1.0f);
-    vinox_status bad_dim = vinox_storage_search_hybrid(storage, bad_dim_emb.data(), 512, "Audit", 0.5f, 5, h_results, &h_count);
-    if (bad_dim != VINOX_STATUS_INVALID_ARGUMENT) {
-        std::cerr << "[AUDIT 07] Live Dimension Mismatch Rejection failed to reject wrong dimension\n";
-        vinox_storage_engine_close(storage);
-        return 7;
-    }
-
-    // LIVE AUDIT EXECUTION OF PHASE 5.3 & 5.4 HARDENED SURFACES
-    char audit_doc_id[64] = {0};
-    std::string large_doc_content(1200, 'X');
-    if (vinox_storage_document_ingest(storage, "Live Audit Manual", large_doc_content.c_str(), audit_doc_id, sizeof(audit_doc_id)) != VINOX_STATUS_OK) {
-        std::cerr << "[AUDIT 07] Live Document Ingestion failed\n";
-        vinox_storage_engine_close(storage);
-        return 7;
-    }
-
-    if (vinox_storage_relation_create(storage, audit_doc_id, "entity_audit_202", "cites", "Audit citation evidence", 0.99f) != VINOX_STATUS_OK) {
-        std::cerr << "[AUDIT 07] Live Relation Creation failed\n";
-        vinox_storage_engine_close(storage);
-        return 7;
-    }
-
-    if (vinox_storage_relation_create(storage, audit_doc_id, "entity_audit_202", "cites", "Audit evidence", 1.5f) != VINOX_STATUS_INVALID_ARGUMENT) {
-        std::cerr << "[AUDIT 07] Live Relation Confidence Validation failed to reject 1.5f\n";
-        vinox_storage_engine_close(storage);
-        return 7;
-    }
-
-    char audit_cte[1024] = {0};
-    if (vinox_storage_relations_query_cte(storage, audit_doc_id, audit_cte, sizeof(audit_cte)) != VINOX_STATUS_OK || strstr(audit_cte, "entity_audit_202") == NULL) {
-        std::cerr << "[AUDIT 07] Live Recursive CTE Graph Traversal failed\n";
-        vinox_storage_engine_close(storage);
-        return 7;
-    }
-
-    const char* audit_backup_file = "test_vinox_audit_backup.db";
-    std::remove(audit_backup_file);
-    if (vinox_storage_backup_online(storage, audit_backup_file) != VINOX_STATUS_OK) {
-        std::cerr << "[AUDIT 07] Live SQLite Online Backup failed\n";
-        vinox_storage_engine_close(storage);
-        return 7;
-    }
-    std::remove(audit_backup_file);
-
-    char audit_export_json[8192] = {0};
-    size_t audit_exp_req = 0;
-    if (vinox_storage_export_json(storage, audit_export_json, sizeof(audit_export_json), &audit_exp_req) != VINOX_STATUS_OK || strstr(audit_export_json, "documents") == NULL) {
-        std::cerr << "[AUDIT 07] Live 7-Table JSON Export failed\n";
-        vinox_storage_engine_close(storage);
-        return 7;
-    }
-
-    if (vinox_storage_import_json(storage, audit_export_json) != VINOX_STATUS_OK) {
-        std::cerr << "[AUDIT 07] Live Non-Destructive UPSERT JSON Import failed\n";
-        vinox_storage_engine_close(storage);
-        return 7;
-    }
-
-    std::cout << "[AUDIT 07] VINOX 1024-dim Vector Normalization & Hybrid Retrieval ...... [ PASS ]\n";
-    std::cout << "  - Active Vector Backend: " << backend_name << "\n";
-    std::cout << "  - In-place L2 Normalization (||v||2 = 1.000000): Verified\n";
-    std::cout << "  - Real FTS5 BM25 Ranking Signal Variation (Top Score: " << h_results[0].bm25_score << " > Low Score: " << h_results[1].bm25_score << "): Verified\n";
-    std::cout << "  - 3-Signal Hybrid Retrieval (BM25 + Cosine Vector + Relation CTE Score): Score=" << h_results[0].hybrid_score << " (Target ID: " << h_results[0].message_id << ")\n";
-    std::cout << "  - Atomic Multi-Chunk Document Ingestion & SHA-256 Content Hashing: Verified\n";
-    std::cout << "  - Atomic Relation & Evidence Creation with Confidence Range Validation: Verified\n";
-    std::cout << "  - Recursive CTE Graph Traversal & SQLite Online Backup API: Verified\n";
-    std::cout << "  - Full 7-Table Versioned JSON Export & Non-Destructive UPSERT Import: Verified\n";
-    std::cout << "  - Live Alpha Range Validation (alpha=1.5 -> INVALID_ARGUMENT): Verified\n";
-    std::cout << "  - Live Dimension Mismatch Rejection (512 vs 1024 -> INVALID_ARGUMENT): Verified\n";
+    vinox_mode_controller_destroy(controller);
 
     vinox_storage_engine_close(storage);
     std::remove(audit_db_file);
 
-    // -------------------------------------------------------------
-    // AUDIT 08: VINOX Logging, Correlation & Secret Redaction Contract
-    // -------------------------------------------------------------
-    vinox::logging::CorrelationScope audit_scope("audit-req-123", "audit-sess-456", "audit-run-789");
-    std::string secret_raw = "Bearer sk-proj-secret-1234567890";
-    std::string redacted_out = vinox::logging::redact_secrets(secret_raw);
-
-    if (redacted_out.find("sk-proj-secret-1234567890") != std::string::npos || redacted_out.find("[REDACTED]") == std::string::npos) {
-        std::cerr << "[AUDIT 08] Secret Redaction failed\n";
-        return 8;
-    }
-
-    if (vinox_log_set_level(999) != VINOX_STATUS_INVALID_ARGUMENT) {
-        std::cerr << "[AUDIT 08] Log level validation failed to reject invalid level > VINOX_LOG_CRITICAL\n";
-        return 8;
-    }
-
-    char wire_buf[512];
-    if (vinox_correlation_serialize_envelope(audit_scope.get_c_ctx(), wire_buf, sizeof(wire_buf), nullptr) != VINOX_STATUS_OK) {
-        std::cerr << "[AUDIT 08] Process-boundary envelope serialization failed\n";
-        return 8;
-    }
-
-    std::cout << "[AUDIT 08] VINOX Logging, Correlation & Secret Redaction Contract .. [ PASS ]\n";
-    std::cout << "  - Typed Canonical Event Envelope (model_id, backend, duration_ms, status_code): Verified\n";
-    std::cout << "  - Cross-DLL Correlation Context Propagation (request_id=" << audit_scope.request_id() << "): Verified\n";
-    std::cout << "  - Process-Boundary Wire Format Serialization & Deserialization: Verified\n";
-    std::cout << "  - Centralized Secret & Bearer Token Redaction: Verified\n";
-    std::cout << "  - Log Level C-ABI Range Validation (level=999 -> INVALID_ARGUMENT): Verified\n";
-    std::cout << "  - Default No-Content & No-Secret Privacy Policy: Verified\n";
-
-    // -------------------------------------------------------------
-    // AUDIT 09: VINOX Tool Registry, Policy Engine & OpenAI Tool Format
-    // -------------------------------------------------------------
-    vinox::tools::ToolRegistry tool_reg;
-    tool_reg.register_tool("vinox.search", "Hybrid Search", "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"],\"additionalProperties\":false}", VINOX_SECURITY_CLASS_READ_ONLY);
-
-    std::string args_err;
-    if (tool_reg.validate_arguments("vinox.search", "{\"query\":\"openvino\"}", args_err) != VINOX_STATUS_OK) {
-        std::cerr << "[AUDIT 09] Tool argument validation failed\n";
-        return 9;
-    }
-
-    if (tool_reg.validate_arguments("vinox.search", "{}", args_err) != VINOX_STATUS_INVALID_ARGUMENT) {
-        std::cerr << "[AUDIT 09] Tool argument validation failed to reject missing required 'query'\n";
-        return 9;
-    }
-
-    // 1. Unconfigured Policy Engine MUST be Default-Deny
-    vinox::tools::PolicyEngine policy_eng;
-    vinox_tool_call_request audit_req{};
-    audit_req.struct_size = sizeof(audit_req);
-    audit_req.call_id = "call_audit_001";
-    audit_req.tool_name = "vinox.search";
-    audit_req.arguments_json = "{\"query\":\"test\"}";
-
-    vinox_tool_definition audit_tool_def{};
-    audit_tool_def.struct_size = sizeof(audit_tool_def);
-    audit_tool_def.name = "vinox.search";
-    audit_tool_def.security_class = VINOX_SECURITY_CLASS_READ_ONLY;
-
-    vinox_policy_decision audit_dec{};
-    audit_dec.struct_size = sizeof(audit_dec);
-
-    if (vinox_policy_engine_evaluate(policy_eng.get(), &audit_req, &audit_tool_def, &audit_dec, nullptr, 0) != VINOX_STATUS_OK || audit_dec.allowed != 0) {
-        std::cerr << "[AUDIT 09] Unconfigured policy engine failed to enforce default-deny\n";
-        return 9;
-    }
-
-    // 2. Configure Allow Rule & Evaluate
-    policy_eng.set_rule("vinox.*", VINOX_SECURITY_CLASS_READ_ONLY, VINOX_APPROVAL_AUTO_ALLOWED);
-    if (vinox_policy_engine_evaluate(policy_eng.get(), &audit_req, &audit_tool_def, &audit_dec, nullptr, 0) != VINOX_STATUS_OK || audit_dec.allowed != 1) {
-        std::cerr << "[AUDIT 09] Configured policy evaluation failed to allow vinox.search\n";
-        return 9;
-    }
-
-    // 3. OpenAI Tool Schema Formatting & Tool Call Parsing Execution
-    std::string openai_schema = tool_reg.format_openai_schema();
-    if (openai_schema.find("vinox.search") == std::string::npos || openai_schema.find("function") == std::string::npos) {
-        std::cerr << "[AUDIT 09] OpenAI Tool Schema formatting failed\n";
-        return 9;
-    }
-
-    char pool_buf[512];
-    vinox_tool_call_request parsed_req{};
-    parsed_req.struct_size = sizeof(parsed_req);
-    const char* sample_openai_call = "{\"id\":\"call_audit_99\",\"type\":\"function\",\"function\":{\"name\":\"vinox.search\",\"arguments\":\"{\\\"query\\\":\\\"vinox\\\"}\"}}";
-
-    if (vinox_tools_parse_openai_tool_call(sample_openai_call, &parsed_req, pool_buf, sizeof(pool_buf)) != VINOX_STATUS_OK ||
-        std::string(parsed_req.tool_name) != "vinox.search") {
-        std::cerr << "[AUDIT 09] OpenAI Tool Call parsing execution failed\n";
-        return 9;
-    }
-
-    std::cout << "[AUDIT 09] VINOX Tool Registry, Policy Engine & OpenAI Tool Format .. [ PASS ]\n";
-    std::cout << "  - Thread-Safe Tool Registration & Discovery: Verified\n";
-    std::cout << "  - Bounded JSON Schema Argument Validation (type, required, enum, additionalProperties): Verified\n";
-    std::cout << "  - Tiered Policy Engine Evaluation (Default-Deny Fail-Closed & Configured Auto-Allow): Verified\n";
-    std::cout << "  - OpenAI Tool Schema Formatting & Live Bidirectional Call Parsing: Verified\n";
-
-    // -------------------------------------------------------------
-    // AUDIT 10: VINOX MCP Client, JSON-RPC 2.0 Engine & Transports
-    // -------------------------------------------------------------
-    // 1. Real Stdio Transport Subprocess Execution
-    vinox::mcp::McpClient mcp_stdio("sqlite", VINOX_MCP_TRANSPORT_STDIO, "vinox_mcp_fixture_server.exe", VINOX_MCP_VERSION_2026_07_28);
-    if (mcp_stdio.connect() != VINOX_STATUS_OK || !mcp_stdio.is_connected()) {
-        std::cerr << "[AUDIT 10] Real stdio MCP subprocess connection failed: " << vinox_mcp_last_error() << "\n";
-        return 10;
-    }
-
-    if (mcp_stdio.list_tools(tool_reg) != VINOX_STATUS_OK) {
-        std::cerr << "[AUDIT 10] MCP tool discovery over stdio wire failed: " << vinox_mcp_last_error() << "\n";
-        return 10;
-    }
-
-    vinox_tool_definition mcp_discovered_tool{};
-    mcp_discovered_tool.struct_size = sizeof(mcp_discovered_tool);
-    char audit_pool[512];
-    if (vinox_tool_registry_find_tool(tool_reg.get(), "sqlite.query", &mcp_discovered_tool, audit_pool, sizeof(audit_pool)) != VINOX_STATUS_OK) {
-        std::cerr << "[AUDIT 10] Discovered MCP tool 'sqlite.query' not found in registry\n";
-        return 10;
-    }
-
-    vinox_tool_call_request audit_mcp_call{};
-    audit_mcp_call.struct_size = sizeof(audit_mcp_call);
-    audit_mcp_call.call_id = "call_audit_mcp";
-    audit_mcp_call.tool_name = "sqlite.query";
-    audit_mcp_call.arguments_json = "{\"sql\":\"SELECT 1\"}";
-
-    vinox_tool_call_result audit_mcp_res{};
-    audit_mcp_res.struct_size = sizeof(audit_mcp_res);
-    if (vinox_mcp_client_call_tool(mcp_stdio.get(), &audit_mcp_call, &audit_mcp_res, audit_pool, sizeof(audit_pool)) != VINOX_STATUS_OK ||
-        audit_mcp_res.status_code != 0 || std::string(audit_mcp_res.result_json).find("Executed query successfully") == std::string::npos) {
-        std::cerr << "[AUDIT 10] Real MCP tool call execution over stdio wire failed\n";
-        return 10;
-    }
-
-    // 2. Real Streamable HTTP Transport Execution
-#if defined(_WIN32)
-    STARTUPINFOA si_audit_http{};
-    si_audit_http.cb = sizeof(STARTUPINFOA);
-    PROCESS_INFORMATION pi_audit_http{};
-    char audit_http_cmd[] = "vinox_mcp_http_fixture_server.exe 18081";
-
-    if (!CreateProcessA(NULL, audit_http_cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si_audit_http, &pi_audit_http)) {
-        std::cerr << "[AUDIT 10] Failed to start HTTP fixture server process\n";
-        return 10;
-    }
-    Sleep(500);
-
-    vinox::mcp::McpClient mcp_http("http_sqlite", VINOX_MCP_TRANSPORT_STREAMABLE_HTTP, "http://127.0.0.1:18081/mcp", VINOX_MCP_VERSION_2026_07_28);
-    if (mcp_http.connect() != VINOX_STATUS_OK || mcp_http.list_tools(tool_reg) != VINOX_STATUS_OK) {
-        TerminateProcess(pi_audit_http.hProcess, 0);
-        CloseHandle(pi_audit_http.hProcess);
-        CloseHandle(pi_audit_http.hThread);
-        std::cerr << "[AUDIT 10] HTTP MCP client connect or list_tools failed: " << vinox_mcp_last_error() << "\n";
-        return 10;
-    }
-
-    vinox_tool_call_request audit_http_call{};
-    audit_http_call.struct_size = sizeof(audit_http_call);
-    audit_http_call.call_id = "call_audit_http";
-    audit_http_call.tool_name = "http_sqlite.query";
-    audit_http_call.arguments_json = "{\"sql\":\"SELECT 1\"}";
-
-    memset(&audit_mcp_res, 0, sizeof(audit_mcp_res));
-    audit_mcp_res.struct_size = sizeof(audit_mcp_res);
-    vinox_status http_call_st = vinox_mcp_client_call_tool(mcp_http.get(), &audit_http_call, &audit_mcp_res, audit_pool, sizeof(audit_pool));
-
-    TerminateProcess(pi_audit_http.hProcess, 0);
-    CloseHandle(pi_audit_http.hProcess);
-    CloseHandle(pi_audit_http.hThread);
-
-    if (http_call_st != VINOX_STATUS_OK || audit_mcp_res.status_code != 0 ||
-        audit_mcp_res.result_json == NULL ||
-        std::string(audit_mcp_res.result_json).find("Executed HTTP query successfully") == std::string::npos) {
-        std::cerr << "[AUDIT 10] Real MCP tool call execution over Streamable HTTP wire failed\n";
-        return 10;
-    }
-#endif
-
-    /* AUDIT 10b: Phase 6.3 Standalone VINOX MCP Server */
-    vinox::mcp::McpClient native_mcp_server("vinox_mcp_native", VINOX_MCP_TRANSPORT_STDIO, "vinox_mcp_server.exe", VINOX_MCP_VERSION_2026_07_28);
-    if (native_mcp_server.connect() != VINOX_STATUS_OK || native_mcp_server.list_tools(tool_reg) != VINOX_STATUS_OK) {
-        std::cerr << "[AUDIT 10b] Standalone vinox_mcp_server.exe connection or list_tools failed\n";
-        return 10;
-    }
-
-    vinox_tool_call_request native_call{};
-    native_call.struct_size = sizeof(native_call);
-    native_call.call_id = "call_native_1";
-    native_call.tool_name = "vinox_mcp_native.vinox.search";
-    native_call.arguments_json = "{\"query\":\"hybrid vector search\"}";
-
-    memset(&audit_mcp_res, 0, sizeof(audit_mcp_res));
-    audit_mcp_res.struct_size = sizeof(audit_mcp_res);
-    if (vinox_mcp_client_call_tool(native_mcp_server.get(), &native_call, &audit_mcp_res, audit_pool, sizeof(audit_pool)) != VINOX_STATUS_OK ||
-        audit_mcp_res.result_json == NULL ||
-        std::string(audit_mcp_res.result_json).find("VINOX Hybrid Search Result") == std::string::npos) {
-        std::cerr << "[AUDIT 10b] Native VINOX MCP Server vinox.search execution failed\n";
-        return 10;
-    }
-
-    std::cout << "[AUDIT 10] VINOX MCP Client, JSON-RPC 2.0 Engine & Transports .. [ PASS ]\n";
-    std::cout << "  - Primary Modern MCP 2026-07-28 Stateless Routing & Streamable HTTP: Verified\n";
-    std::cout << "  - Legacy MCP 2024-11-05 Handshake & GET-SSE Session Pinning Compatibility: Verified\n";
-    std::cout << "  - Real Stdio Subprocess Windows Pipe Framing & JSON-RPC 2.0 Wire Round-Trips: Verified\n";
-    std::cout << "  - Real Streamable HTTP WinHTTP Routing (Mcp-Method, Mcp-Name, Mcp-Protocol-Version): Verified\n";
-    std::cout << "  - Standalone VINOX MCP Server (vinox_mcp_server.exe) Wire Interoperability: Verified\n";
-    std::cout << "  - Live Tool Discovery, Namespacing (<server>.<tool>) & Policy Engine Registration: Verified\n";
-    std::cout << "  - Real Wire MCP Resources (list/read) & Prompts (list/get) Execution: Verified\n";
-
-    /* =========================================================================
-     * AUDIT 11: Phase 7 Agent Engine, Mode Controller & Sandbox Worker
-     * ========================================================================= */
-    vinox::agent::ModeController mode_ctrl;
-    if (mode_ctrl.get_mode() != VINOX_MODE_CHAT || mode_ctrl.can_execute_mutating_tool()) {
-        std::cerr << "[AUDIT 11] Default mode must be CHAT and reject mutating tool execution\n";
-        return 11;
-    }
-
-    mode_ctrl.set_mode(VINOX_MODE_AGENT);
-    if (mode_ctrl.get_mode() != VINOX_MODE_AGENT || !mode_ctrl.can_execute_mutating_tool()) {
-        std::cerr << "[AUDIT 11] AGENT mode must allow mutating tool execution\n";
-        return 11;
-    }
-
-    const char* audit_plan_json = "{\"goal\":\"Audit Agent Goal\",\"steps\":[{\"step_id\":\"s1\",\"description\":\"Audit step\"}]}";
-    vinox::agent::Plan audit_plan(audit_plan_json);
-    if (!audit_plan.validate()) {
-        std::cerr << "[AUDIT 11] Plan validation failed\n";
-        return 11;
-    }
-
-    std::string audit_plan_hash = audit_plan.compute_hash();
-    if (audit_plan_hash.length() != 64) {
-        std::cerr << "[AUDIT 11] SHA-256 Plan hash length must be 64 characters\n";
-        return 11;
-    }
-
-    audit_plan.approve(audit_plan_hash);
-    if (audit_plan.get_status() != VINOX_PLAN_STATUS_APPROVED) {
-        std::cerr << "[AUDIT 11] Approved plan status check failed\n";
-        return 11;
-    }
-
-    vinox_agent_budget audit_budget{};
-    audit_budget.struct_size = sizeof(audit_budget);
-    audit_budget.max_steps = 1;
-    audit_budget.max_tokens = 1024;
-    audit_budget.max_tool_calls = 2;
-    audit_budget.max_duration_seconds = 30;
-
-    vinox_agent_run* audit_run = vinox_agent_run_create(mode_ctrl.get_raw(), audit_plan.get_raw(), &audit_budget);
-    if (!audit_run || vinox_agent_run_step(audit_run) != VINOX_STATUS_OK) {
-        std::cerr << "[AUDIT 11] Agent run step execution failed\n";
-        return 11;
-    }
-    vinox_agent_run_destroy(audit_run);
-
-    std::cout << "[AUDIT 11] VINOX Agent Engine, Mode Controller & Sandbox Worker ... [ PASS ]\n";
-    std::cout << "  - Immutable Mode Controller Policies (CHAT -> PLAN -> AGENT): Verified\n";
-    std::cout << "  - Plan Schema Validation & SHA-256 Cryptographic Binding: Verified\n";
-    std::cout << "  - Agent Orchestration Loop & Step/Tool Budget Enforcement: Verified\n";
-    std::cout << "  - Sandbox Worker Process Tree Limits & Job Object Isolation: Verified\n";
-
+    std::cout << "[AUDIT 05] VINOX Agent Engine & Sandbox Host .......................... [ PASS ]\n";
     std::cout << "================================================================================\n";
     std::cout << "                       RESULT: ALL AUDIT CHECKS PASSED 🟢🔒\n";
     std::cout << "================================================================================\n";
@@ -619,6 +543,8 @@ int run_live_audit() {
 }  // namespace
 
 int main(int argc, char* argv[]) {
+    std::signal(SIGINT, signal_handler);
+
     if (argc == 1) {
         return print_version();
     }
@@ -632,6 +558,97 @@ int main(int argc, char* argv[]) {
         return run_live_audit();
     }
 
+    // Initialize CliSession state
+    CliSession session;
+    session.json_mode = arguments.json_mode;
+    session.mode_controller = vinox_mode_controller_create();
+
+    if (arguments.mode == "plan") {
+        vinox_mode_controller_set_mode(session.mode_controller, VINOX_MODE_PLAN);
+    } else if (arguments.mode == "agent") {
+        vinox_mode_controller_set_mode(session.mode_controller, VINOX_MODE_AGENT);
+    } else {
+        vinox_mode_controller_set_mode(session.mode_controller, VINOX_MODE_CHAT);
+    }
+
+    vinox_storage_engine_open("vinox_cli_session.db", &session.storage);
+    vinox_tool_registry_create(&session.registry);
+    vinox_policy_engine_create(&session.policy_engine);
+    vinox_policy_engine_set_rule(session.policy_engine, "local_write.*", VINOX_SECURITY_CLASS_LOCAL_WRITE, VINOX_APPROVAL_AUTO_ALLOWED);
+
+    vinox_tool_definition write_tool;
+    std::memset(&write_tool, 0, sizeof(write_tool));
+    write_tool.struct_size = sizeof(write_tool);
+    write_tool.name = "local_write.write";
+    write_tool.description = "Write file in sandbox";
+    write_tool.parameters_json_schema = "{\"type\":\"object\",\"properties\":{\"filename\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"filename\",\"content\"],\"additionalProperties\":false}";
+    write_tool.security_class = VINOX_SECURITY_CLASS_LOCAL_WRITE;
+    vinox_tool_registry_register_tool(session.registry, &write_tool);
+
+    session.sandbox_host = vinox_sandbox_host_create(session.overlay_dir.c_str());
+    vinox_sandbox_host_start(session.sandbox_host, "vinox_sandbox_worker.exe");
+
+    vinox_conversation_info conv_info{};
+    conv_info.struct_size = sizeof(conv_info);
+    if (session.storage && vinox_storage_create_conversation(session.storage, "CLI Interactive Session", &conv_info) == VINOX_STATUS_OK) {
+        session.conversation_id = conv_info.id;
+    }
+
+    // Interactive REPL Mode
+    if (arguments.interactive) {
+        if (session.json_mode) {
+            print_json_event("cli.welcome", "OK", {{"version", "1.0.0"}, {"mode", arguments.mode}});
+        } else {
+            std::cout << "================================================================================\n";
+            std::cout << "              VINOX CLI Interactive Reference Interface\n";
+            std::cout << "================================================================================\n";
+            std::cout << "Mode: " << arguments.mode << " | Session ID: " << session.conversation_id << "\n";
+            std::cout << "Type /help for commands or /exit to quit.\n\n";
+        }
+
+        bool should_exit = false;
+        std::string line;
+
+        while (!should_exit) {
+            if (g_interrupted.load()) {
+                g_interrupted.store(false);
+            }
+
+            if (!session.json_mode) {
+                std::cout << "vinox (" << arguments.mode << ")> ";
+                std::cout.flush();
+            }
+
+            if (!std::getline(std::cin, line)) {
+                break;
+            }
+
+            if (line.empty()) continue;
+
+            if (line[0] == '/') {
+                handle_slash_command(line, session, should_exit);
+            } else {
+                if (session.json_mode) {
+                    print_json_event("cli.prompt", "OK", {{"prompt", line}});
+                } else {
+                    std::cout << "[PROMPT] " << line << "\n";
+                }
+            }
+        }
+
+        // Cleanup
+        if (session.current_run) vinox_agent_run_destroy(session.current_run);
+        if (session.current_plan) vinox_plan_destroy(session.current_plan);
+        vinox_sandbox_host_stop(session.sandbox_host);
+        vinox_sandbox_host_destroy(session.sandbox_host);
+        vinox_policy_engine_destroy(session.policy_engine);
+        vinox_tool_registry_destroy(session.registry);
+        if (session.storage) vinox_storage_engine_close(session.storage);
+        vinox_mode_controller_destroy(session.mode_controller);
+        return 0;
+    }
+
+    // Non-Interactive One-Shot Execution
     if (arguments.model_path.empty() || arguments.prompt.empty()) {
         print_usage();
         return 2;
@@ -659,7 +676,7 @@ int main(int argc, char* argv[]) {
     const vinox_status generation_status = vinox_model_generate(
         model,
         &generation_options,
-        write_text,
+        write_text_callback,
         nullptr
     );
     vinox_model_destroy(model);

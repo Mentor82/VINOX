@@ -265,7 +265,7 @@ endif()
 add_executable(vinox_cli
     src/cli/main.cpp
 )
-target_link_libraries(vinox_cli PRIVATE vinox::core vinox::serving vinox::storage vinox::agent)
+target_link_libraries(vinox_cli PRIVATE vinox::core vinox::serving vinox::storage vinox::agent nlohmann_json::nlohmann_json)
 if(TARGET vinox_openvino)
     target_link_libraries(vinox_cli PRIVATE vinox_openvino)
 endif()
@@ -331,6 +331,11 @@ if(BUILD_TESTING)
     target_link_libraries(vinox_sandbox_smoke PRIVATE vinox::agent)
     add_dependencies(vinox_sandbox_smoke vinox_sandbox_worker)
     add_test(NAME sandbox_smoke COMMAND vinox_sandbox_smoke)
+
+    add_executable(vinox_cli_smoke tests/cli_smoke.c)
+    target_link_libraries(vinox_cli_smoke PRIVATE vinox::agent vinox::storage vinox::core)
+    add_dependencies(vinox_cli_smoke vinox_sandbox_worker vinox_cli)
+    add_test(NAME cli_smoke COMMAND vinox_cli_smoke)
 
     add_test(NAME audit_smoke COMMAND vinox_cli --audit)
     if(WIN32 AND VINOX_OPENVINO_SDK_ROOT)
