@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 #include <new>
 #include <atomic>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <set>
@@ -28,15 +29,17 @@ struct vinox_agent_run {
     vinox_plan* plan{nullptr};
     vinox_agent_budget budget{};
     int current_step_idx{0};
-    int completed_steps{0};
-    int total_tool_calls{0};
-    int total_tokens_used{0};
+    std::atomic<int> completed_steps{0};
+    std::atomic<int> total_tool_calls{0};
+    std::atomic<int> total_tokens_used{0};
     std::chrono::steady_clock::time_point start_time;
-    vinox_plan_status run_status{VINOX_PLAN_STATUS_READY};
+    std::atomic<vinox_plan_status> run_status{VINOX_PLAN_STATUS_READY};
+    std::atomic<bool> cancel_requested{false};
     std::vector<AgentPlanStep> steps;
     vinox_tool_registry* registry{nullptr};
     vinox_policy_engine* policy_engine{nullptr};
     vinox_sandbox_host* sandbox_host{nullptr};
+    std::mutex run_mutex;
 };
 
 extern "C" {
@@ -152,11 +155,29 @@ VINOX_API vinox_status VINOX_CALL vinox_agent_run_set_sandbox(vinox_agent_run* r
 
 VINOX_API vinox_status VINOX_CALL vinox_agent_run_step(vinox_agent_run* run) {
     if (!run) return VINOX_STATUS_INVALID_ARGUMENT;
-    if (run->run_status != VINOX_PLAN_STATUS_RUNNING) return VINOX_STATUS_INVALID_STATE;
+
+    if (run->cancel_requested.load() || run->run_status.load() == VINOX_PLAN_STATUS_CANCELLED) {
+        run->run_status.store(VINOX_PLAN_STATUS_CANCELLED);
+        return VINOX_STATUS_CANCELLED;
+    }
+
+    vinox_plan_status current_st = run->run_status.load();
+    if (current_st == VINOX_PLAN_STATUS_READY) {
+        run->run_status.store(VINOX_PLAN_STATUS_RUNNING);
+    } else if (current_st != VINOX_PLAN_STATUS_RUNNING) {
+        return VINOX_STATUS_INVALID_STATE;
+    }
+
+    std::lock_guard<std::mutex> lock(run->run_mutex);
+
+    if (run->cancel_requested.load()) {
+        run->run_status.store(VINOX_PLAN_STATUS_CANCELLED);
+        return VINOX_STATUS_CANCELLED;
+    }
 
     // 1. Check Mode Controller Invariant: Mode MUST be AGENT mode
     if (vinox_mode_controller_get_mode(run->mode_controller) != VINOX_MODE_AGENT) {
-        run->run_status = VINOX_PLAN_STATUS_BLOCKED;
+        run->run_status.store(VINOX_PLAN_STATUS_BLOCKED);
         return VINOX_STATUS_INVALID_STATE;
     }
 
@@ -164,7 +185,7 @@ VINOX_API vinox_status VINOX_CALL vinox_agent_run_step(vinox_agent_run* run) {
     auto now = std::chrono::steady_clock::now();
     double elapsed_sec = std::chrono::duration<double>(now - run->start_time).count();
     if (elapsed_sec > run->budget.max_duration_seconds) {
-        run->run_status = VINOX_PLAN_STATUS_FAILED;
+        run->run_status.store(VINOX_PLAN_STATUS_FAILED);
         return VINOX_STATUS_OUT_OF_RANGE; // Duration deadline exceeded!
     }
 
@@ -203,22 +224,22 @@ VINOX_API vinox_status VINOX_CALL vinox_agent_run_step(vinox_agent_run* run) {
     }
 
     if (all_completed || run->steps.empty()) {
-        run->run_status = VINOX_PLAN_STATUS_COMPLETED;
+        run->run_status.store(VINOX_PLAN_STATUS_COMPLETED);
         return VINOX_STATUS_OK;
     }
 
     if (!ready_step) {
         if (blocked_by_dependencies) {
-            run->run_status = VINOX_PLAN_STATUS_BLOCKED;
+            run->run_status.store(VINOX_PLAN_STATUS_BLOCKED);
             return VINOX_STATUS_INVALID_STATE; // Blocked by unsatisfied dependencies!
         }
-        run->run_status = VINOX_PLAN_STATUS_COMPLETED;
+        run->run_status.store(VINOX_PLAN_STATUS_COMPLETED);
         return VINOX_STATUS_OK;
     }
 
     // 4. Check Step Budget Limits
-    if (run->completed_steps >= run->budget.max_steps) {
-        run->run_status = VINOX_PLAN_STATUS_FAILED;
+    if (run->completed_steps.load() >= run->budget.max_steps) {
+        run->run_status.store(VINOX_PLAN_STATUS_FAILED);
         return VINOX_STATUS_OUT_OF_RANGE;
     }
 
@@ -228,21 +249,27 @@ VINOX_API vinox_status VINOX_CALL vinox_agent_run_step(vinox_agent_run* run) {
     if (!ready_step->tool_calls.empty()) {
         // Nephy Finding 1: Mandatory Governance Gate (Fail-Closed if missing!)
         if (!run->registry || !run->policy_engine) {
-            run->run_status = VINOX_PLAN_STATUS_FAILED;
+            run->run_status.store(VINOX_PLAN_STATUS_FAILED);
             return VINOX_STATUS_PERMISSION_DENIED;
         }
 
         // Nephy Follow-up Review Fix: Mandatory Sandbox Executor Gate (Fail-Closed if missing!)
         if (!run->sandbox_host) {
-            run->run_status = VINOX_PLAN_STATUS_FAILED;
+            run->run_status.store(VINOX_PLAN_STATUS_FAILED);
             return VINOX_STATUS_INVALID_STATE; // Tool step execution impossible without bound sandbox executor!
         }
     }
 
     for (const auto& tc : ready_step->tool_calls) {
-        if (run->total_tool_calls >= run->budget.max_tool_calls) {
-            run->run_status = VINOX_PLAN_STATUS_FAILED;
+        if (run->total_tool_calls.load() >= run->budget.max_tool_calls) {
+            run->run_status.store(VINOX_PLAN_STATUS_FAILED);
             return VINOX_STATUS_OUT_OF_RANGE;
+        }
+
+        if (run->cancel_requested.load()) {
+            ready_step->completed = false;
+            run->run_status.store(VINOX_PLAN_STATUS_CANCELLED);
+            return VINOX_STATUS_CANCELLED;
         }
 
         // Phase 6 Tool Registry Lookup & Parameter Schema Validation
@@ -252,13 +279,13 @@ VINOX_API vinox_status VINOX_CALL vinox_agent_run_step(vinox_agent_run* run) {
         tdef.struct_size = sizeof(tdef);
 
         if (vinox_tool_registry_find_tool(run->registry, tc.name.c_str(), &tdef, tpool, sizeof(tpool)) != VINOX_STATUS_OK) {
-            run->run_status = VINOX_PLAN_STATUS_FAILED;
+            run->run_status.store(VINOX_PLAN_STATUS_FAILED);
             return VINOX_STATUS_NOT_FOUND; // Tool not registered!
         }
 
         char val_err[512] = {0};
         if (vinox_tool_registry_validate_arguments(run->registry, tc.name.c_str(), tc.arguments_json.c_str(), val_err, sizeof(val_err)) != VINOX_STATUS_OK) {
-            run->run_status = VINOX_PLAN_STATUS_FAILED;
+            run->run_status.store(VINOX_PLAN_STATUS_FAILED);
             return VINOX_STATUS_INVALID_ARGUMENT; // Schema validation error!
         }
 
@@ -276,32 +303,45 @@ VINOX_API vinox_status VINOX_CALL vinox_agent_run_step(vinox_agent_run* run) {
         char reason[256] = {0};
 
         if (vinox_policy_engine_evaluate(run->policy_engine, &req_call, &tdef, &pdecision, reason, sizeof(reason)) != VINOX_STATUS_OK || !pdecision.allowed) {
-            run->run_status = VINOX_PLAN_STATUS_BLOCKED;
+            run->run_status.store(VINOX_PLAN_STATUS_BLOCKED);
             return VINOX_STATUS_PERMISSION_DENIED; // Governance Policy Refusal Gate!
         }
 
         // ACTUAL TOOL EXECUTION DISPATCH via Sandbox Worker!
         char exec_res_buf[4096] = {0};
         vinox_status exec_st = vinox_sandbox_host_exec_tool(run->sandbox_host, tc.name.c_str(), tc.arguments_json.c_str(), exec_res_buf, sizeof(exec_res_buf));
+
+        if (run->cancel_requested.load() || exec_st == VINOX_STATUS_CANCELLED) {
+            ready_step->completed = false;
+            run->run_status.store(VINOX_PLAN_STATUS_CANCELLED);
+            return VINOX_STATUS_CANCELLED;
+        }
+
         if (exec_st != VINOX_STATUS_OK || strstr(exec_res_buf, "\"status\":\"OK\"") == NULL) {
-            run->run_status = VINOX_PLAN_STATUS_FAILED;
+            run->run_status.store(VINOX_PLAN_STATUS_FAILED);
             return VINOX_STATUS_RUNTIME_ERROR; // Real tool execution failure!
         }
 
-        run->total_tool_calls++;
+        run->total_tool_calls.fetch_add(1);
         step_token_budget_units += (tc.arguments_json.length() / 4) + 16;
     }
 
     // Token & Cost Accounting
-    run->total_tokens_used += static_cast<int>(step_token_budget_units);
-    if (run->total_tokens_used >= run->budget.max_tokens) {
-        run->run_status = VINOX_PLAN_STATUS_FAILED;
+    run->total_tokens_used.fetch_add(static_cast<int>(step_token_budget_units));
+    if (run->total_tokens_used.load() >= run->budget.max_tokens) {
+        run->run_status.store(VINOX_PLAN_STATUS_FAILED);
         return VINOX_STATUS_OUT_OF_RANGE; // Max tokens budget exceeded!
+    }
+
+    if (run->cancel_requested.load()) {
+        ready_step->completed = false;
+        run->run_status.store(VINOX_PLAN_STATUS_CANCELLED);
+        return VINOX_STATUS_CANCELLED;
     }
 
     // Mark Step Completed ONLY after Governance & ACTUAL Sandbox Execution succeed 100%!
     ready_step->completed = true;
-    run->completed_steps++;
+    run->completed_steps.fetch_add(1);
     run->current_step_idx++;
 
     // Check if all steps in plan completed
@@ -314,7 +354,7 @@ VINOX_API vinox_status VINOX_CALL vinox_agent_run_step(vinox_agent_run* run) {
     }
 
     if (all_done) {
-        run->run_status = VINOX_PLAN_STATUS_COMPLETED;
+        run->run_status.store(VINOX_PLAN_STATUS_COMPLETED);
     }
 
     return VINOX_STATUS_OK;
@@ -322,32 +362,36 @@ VINOX_API vinox_status VINOX_CALL vinox_agent_run_step(vinox_agent_run* run) {
 
 VINOX_API vinox_status VINOX_CALL vinox_agent_run_pause(vinox_agent_run* run) {
     if (!run) return VINOX_STATUS_INVALID_ARGUMENT;
-    if (run->run_status != VINOX_PLAN_STATUS_RUNNING) return VINOX_STATUS_INVALID_STATE;
-    run->run_status = VINOX_PLAN_STATUS_PAUSED;
+    if (run->run_status.load() != VINOX_PLAN_STATUS_RUNNING) return VINOX_STATUS_INVALID_STATE;
+    run->run_status.store(VINOX_PLAN_STATUS_PAUSED);
     return VINOX_STATUS_OK;
 }
 
 VINOX_API vinox_status VINOX_CALL vinox_agent_run_resume(vinox_agent_run* run) {
     if (!run) return VINOX_STATUS_INVALID_ARGUMENT;
-    if (run->run_status != VINOX_PLAN_STATUS_PAUSED) return VINOX_STATUS_INVALID_STATE;
-    run->run_status = VINOX_PLAN_STATUS_RUNNING;
+    if (run->run_status.load() != VINOX_PLAN_STATUS_PAUSED) return VINOX_STATUS_INVALID_STATE;
+    run->run_status.store(VINOX_PLAN_STATUS_RUNNING);
     return VINOX_STATUS_OK;
 }
 
 VINOX_API vinox_status VINOX_CALL vinox_agent_run_cancel(vinox_agent_run* run) {
     if (!run) return VINOX_STATUS_INVALID_ARGUMENT;
-    run->run_status = VINOX_PLAN_STATUS_CANCELLED;
+    run->cancel_requested.store(true);
+    run->run_status.store(VINOX_PLAN_STATUS_CANCELLED);
+    if (run->sandbox_host) {
+        vinox_sandbox_host_cancel(run->sandbox_host);
+    }
     return VINOX_STATUS_OK;
 }
 
 VINOX_API vinox_plan_status VINOX_CALL vinox_agent_run_get_status(const vinox_agent_run* run) {
     if (!run) return VINOX_PLAN_STATUS_FAILED;
-    return run->run_status;
+    return run->run_status.load();
 }
 
 VINOX_API int VINOX_CALL vinox_agent_run_get_completed_steps(const vinox_agent_run* run) {
     if (!run) return 0;
-    return run->completed_steps;
+    return run->completed_steps.load();
 }
 
 } // extern "C"

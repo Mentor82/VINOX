@@ -16,6 +16,7 @@ namespace fs = std::filesystem;
 
 struct vinox_sandbox_host {
     std::string overlay_dir;
+    std::atomic<bool> cancel_requested{false};
 #if defined(_WIN32)
     HANDLE hProcess{NULL};
     HANDLE hThread{NULL};
@@ -131,6 +132,13 @@ VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_start(vinox_sandbox_host* h
 
 VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_exec_tool(vinox_sandbox_host* host, const char* tool_name, const char* args_json, char* out_buf, size_t out_buf_sz) {
     if (!host || !tool_name || !out_buf || out_buf_sz < 1) return VINOX_STATUS_INVALID_ARGUMENT;
+
+    if (host->cancel_requested.load()) {
+        std::string err_msg = "{\"status\":\"ERROR\",\"error\":\"INDETERMINATE_OUTCOME_MUTATION_CANCELLED: Sandbox execution cancelled before dispatch\"}";
+        if (err_msg.length() >= out_buf_sz) return VINOX_STATUS_OUT_OF_RANGE;
+        strncpy_s(out_buf, out_buf_sz, err_msg.c_str(), _TRUNCATE);
+        return VINOX_STATUS_CANCELLED;
+    }
 
 #if defined(_WIN32)
     if (!host->hChildStdinWrite || !host->hChildStdoutRead) return VINOX_STATUS_INVALID_STATE;
@@ -326,6 +334,21 @@ VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_stop(vinox_sandbox_host* ho
     }
 #endif
 
+    return VINOX_STATUS_OK;
+}
+
+VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_cancel(vinox_sandbox_host* host) {
+    if (!host) return VINOX_STATUS_INVALID_ARGUMENT;
+    host->cancel_requested.store(true);
+#if defined(_WIN32)
+    if (host->hProcess) {
+        TerminateProcess(host->hProcess, 1);
+        if (host->hProcess) CloseHandle(host->hProcess);
+        if (host->hThread) CloseHandle(host->hThread);
+        host->hProcess = NULL;
+        host->hThread = NULL;
+    }
+#endif
     return VINOX_STATUS_OK;
 }
 

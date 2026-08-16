@@ -12,6 +12,10 @@
 #  include <windows.h>
 #endif
 
+#include <thread>
+#include <atomic>
+#include "vinox/vinox_agent.h"
+#include "vinox/tools.h"
 #include <nlohmann/json.hpp>
 
 int run_cli_process_with_input(const std::string& cli_args, const std::string& input_text, std::string& output_text, int& exit_code) {
@@ -399,6 +403,71 @@ int main(void) {
             std::cerr << "FAILED 04: Multi-turn chat session test failed: " << chat_out << "\n";
             return 1;
         }
+    }
+
+    // 5. In-Flight Sandbox Subprocess Cancellation & Zero Step Completion Test
+    vinox_mode_controller* mode_ctrl = vinox_mode_controller_create();
+    vinox_mode_controller_set_mode(mode_ctrl, VINOX_MODE_AGENT);
+
+    const char* cancel_plan_json = "{\"version\":1,\"goal\":\"Inflight Cancel Goal\",\"steps\":[{\"step_id\":\"step1\",\"description\":\"Inflight Tool Step\",\"dependencies\":[],\"tool_calls\":[{\"name\":\"local_write.write\",\"arguments_json\":\"{\\\"file_path\\\":\\\"cancel_test.txt\\\",\\\"content\\\":\\\"cancellation test\\\"}\"}]}]}";
+    vinox_plan* cancel_plan = vinox_plan_create(cancel_plan_json);
+    char plan_hash[128] = {0};
+    vinox_plan_compute_hash(cancel_plan, plan_hash, sizeof(plan_hash));
+    vinox_plan_approve(cancel_plan, plan_hash);
+
+    vinox_agent_budget budget{};
+    budget.max_steps = 10;
+    budget.max_tool_calls = 10;
+    budget.max_tokens = 10000;
+    budget.max_duration_seconds = 60;
+
+    vinox_agent_run* run = vinox_agent_run_create(mode_ctrl, cancel_plan, &budget);
+    vinox_tool_registry* reg = nullptr;
+    vinox_policy_engine* pol = nullptr;
+    vinox_tool_registry_create(&reg);
+    vinox_policy_engine_create(&pol);
+
+    vinox_tool_definition wdef{};
+    wdef.struct_size = sizeof(wdef);
+    wdef.name = "local_write.write";
+    wdef.description = "Write file";
+    wdef.security_class = 1;
+    wdef.parameters_json_schema = "{\"type\":\"object\"}";
+    vinox_tool_registry_register_tool(reg, &wdef);
+
+    vinox_policy_engine_set_rule(pol, "*", 4, 0);
+
+    vinox_sandbox_host* sb = vinox_sandbox_host_create(".cli_sandbox_overlay");
+    vinox_sandbox_host_start(sb, "out\\windows-msvc-debug\\build\\vinox_sandbox_worker.exe");
+
+    vinox_agent_run_set_governance(run, reg, pol);
+    vinox_agent_run_set_sandbox(run, sb);
+
+    std::atomic<vinox_status> step_status{VINOX_STATUS_OK};
+    std::thread worker([run, &step_status]() {
+        step_status.store(vinox_agent_run_step(run));
+    });
+
+    // Immediate in-flight cancel
+    vinox_agent_run_cancel(run);
+
+    if (worker.joinable()) worker.join();
+
+    vinox_plan_status final_st = vinox_agent_run_get_status(run);
+    int completed = vinox_agent_run_get_completed_steps(run);
+
+    vinox_sandbox_host_destroy(sb);
+    vinox_policy_engine_destroy(pol);
+    vinox_tool_registry_destroy(reg);
+    vinox_agent_run_destroy(run);
+    vinox_plan_destroy(cancel_plan);
+    vinox_mode_controller_destroy(mode_ctrl);
+
+    if (final_st == VINOX_PLAN_STATUS_CANCELLED && completed == 0) {
+        std::cout << "  [PASS 05] In-Flight Sandbox Subprocess Cancellation & Zero Step Completion: Verified (CANCELLED)\n";
+    } else {
+        std::cerr << "FAILED 05: In-flight cancellation test failed. Status: " << final_st << ", Completed steps: " << completed << "\n";
+        return 1;
     }
 
     std::cout << "SUCCESS: All VINOX Phase 8 CLI Process-Level E2E & Contract Verification tests passed! 🟢🔒\n";

@@ -73,6 +73,7 @@ VINOX_API vinox_sandbox_host* VINOX_CALL vinox_sandbox_host_create(const char* o
 VINOX_API void VINOX_CALL vinox_sandbox_host_destroy(vinox_sandbox_host* host);
 VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_start(vinox_sandbox_host* host, const char* worker_exe_path);
 VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_exec_tool(vinox_sandbox_host* host, const char* tool_name, const char* args_json, char* out_buf, size_t out_buf_sz);
+VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_cancel(vinox_sandbox_host* host);
 VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_stop(vinox_sandbox_host* host);
 
 /* Artifact Takeover Commit */

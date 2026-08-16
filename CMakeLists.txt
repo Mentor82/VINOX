@@ -338,7 +338,8 @@ if(BUILD_TESTING)
     add_test(NAME core_e2e_smoke COMMAND vinox_core_e2e_smoke)
 
     add_executable(vinox_cli_process_smoke tests/cli_process_smoke.cpp)
-    target_link_libraries(vinox_cli_process_smoke PRIVATE nlohmann_json::nlohmann_json)
+    target_include_directories(vinox_cli_process_smoke PRIVATE include)
+    target_link_libraries(vinox_cli_process_smoke PRIVATE nlohmann_json::nlohmann_json vinox_agent vinox_core)
     add_dependencies(vinox_cli_process_smoke vinox_cli vinox_sandbox_worker)
     add_test(NAME cli_process_smoke COMMAND vinox_cli_process_smoke)
 
