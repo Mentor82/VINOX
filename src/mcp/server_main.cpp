@@ -36,7 +36,7 @@ static const CanonicalToolSpec CANONICAL_TOOLS[] = {
     {
         "vinox.search",
         "VINOX Hybrid Retrieval (BM25 FTS5 Text Search + Optional 1024-dim Cosine Vector Search)",
-        "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"embedding\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},\"description\":\"Optional 1024-dim dense float embedding vector\"},\"timeout_sim_ms\":{\"type\":\"integer\"},\"timeout_limit_ms\":{\"type\":\"integer\"},\"oversize_sim_kb\":{\"type\":\"integer\"},\"cancelled\":{\"type\":\"boolean\"}},\"required\":[\"query\"],\"additionalProperties\":false}",
+        "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"embedding\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},\"description\":\"Optional 1024-dim dense float embedding vector\"}},\"required\":[\"query\"],\"additionalProperties\":false}",
         VINOX_SECURITY_CLASS_READ_ONLY
     },
     {
@@ -65,6 +65,7 @@ static const CanonicalToolSpec CANONICAL_TOOLS[] = {
     }
 };
 static const size_t CANONICAL_TOOLS_COUNT = sizeof(CANONICAL_TOOLS) / sizeof(CANONICAL_TOOLS[0]);
+static constexpr uint32_t SERVER_TOOL_DEADLINE_MS = 2000;
 
 int main(int argc, char* argv[]) {
 #if defined(_WIN32)
@@ -203,7 +204,9 @@ int main(int argc, char* argv[]) {
                     std::string args_str = args.dump();
 
                     // Check Cancellation Gate
-                    bool is_cancelled = (args.contains("cancelled") && args["cancelled"].is_boolean() && args["cancelled"].get<bool>()) ||
+                    const char* env_cancel = std::getenv("VINOX_TEST_CANCEL_SIM");
+                    bool is_cancelled = (env_cancel && std::string(env_cancel) == "1") ||
+                                        (args.contains("cancelled") && args["cancelled"].is_boolean() && args["cancelled"].get<bool>()) ||
                                         (req.contains("params") && req["params"].contains("cancelled") && req["params"]["cancelled"].get<bool>());
                     if (is_cancelled) {
                         log_gov_event("tool.execution_completion", "Tool execution cancelled", 0, "CANCELLED", 0);
@@ -287,29 +290,46 @@ int main(int argc, char* argv[]) {
                     }
                     log_gov_event("tool.policy_decision", "Policy allowed: " + std::string(reason_buf), 0, "ALLOWED", VINOX_STATUS_OK);
 
-                    // Gate 5: Execution Start & Async Deadline / Timeout Control
+                    // Gate 5: Execution Start & Async Bounded Server-Owned Deadline Control
                     log_gov_event("tool.execution_start", "Tool execution starting: " + name, 0, "OK", VINOX_STATUS_OK);
                     auto start_time = std::chrono::steady_clock::now();
-                    uint32_t timeout_limit_ms = args.value("timeout_limit_ms", 2000);
+                    auto cancel_token = std::make_shared<std::atomic<bool>>(false);
 
                     // Execute tool handler in async task
-                    auto task_fut = std::async(std::launch::async, [&]() -> nlohmann::json {
+                    auto task_fut = std::async(std::launch::async, [storage, name, args, allow_write, cancel_token]() -> nlohmann::json {
                         nlohmann::json inner_res = nlohmann::json::object();
 
-                        // Simulated execution delay for timeout testing
-                        if (args.contains("timeout_sim_ms") && args["timeout_sim_ms"].is_number_integer()) {
-                            int sim_ms = args["timeout_sim_ms"].get<int>();
-                            std::this_thread::sleep_for(std::chrono::milliseconds(sim_ms));
+                        // Environment-variable test delays
+                        const char* env_delay = std::getenv("VINOX_TEST_TIMEOUT_SIM_MS");
+                        if (env_delay && strlen(env_delay) > 0) {
+                            int sim_ms = std::atoi(env_delay);
+                            if (sim_ms > 0) {
+                                int elapsed = 0;
+                                while (elapsed < sim_ms) {
+                                    if (cancel_token->load()) {
+                                        inner_res["result"]["isError"] = true;
+                                        inner_res["result"]["content"] = nlohmann::json::array({
+                                            {{"type", "text"}, {"text", "Tool execution aborted by cancellation token: storage write prevented"}}
+                                        });
+                                        return inner_res;
+                                    }
+                                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                                    elapsed += 50;
+                                }
+                            }
                         }
 
-                        // Simulated oversize output testing
-                        if (args.contains("oversize_sim_kb") && args["oversize_sim_kb"].is_number_integer()) {
-                            int sim_kb = args["oversize_sim_kb"].get<int>();
-                            std::string huge_text(sim_kb * 1024, 'X');
-                            inner_res["result"]["content"] = nlohmann::json::array({
-                                {{"type", "text"}, {"text", huge_text}}
-                            });
-                            return inner_res;
+                        // Environment-variable test oversize output
+                        const char* env_oversize = std::getenv("VINOX_TEST_OVERSIZE_SIM_KB");
+                        if (env_oversize && strlen(env_oversize) > 0) {
+                            int sim_kb = std::atoi(env_oversize);
+                            if (sim_kb > 0) {
+                                std::string huge_text(sim_kb * 1024, 'X');
+                                inner_res["result"]["content"] = nlohmann::json::array({
+                                    {{"type", "text"}, {"text", huge_text}}
+                                });
+                                return inner_res;
+                            }
                         }
 
                         if (name == "vinox.search") {
@@ -446,6 +466,13 @@ int main(int argc, char* argv[]) {
                                 });
                             }
                         } else if (name == "vinox.document_ingest") {
+                            if (cancel_token->load()) {
+                                inner_res["result"]["isError"] = true;
+                                inner_res["result"]["content"] = nlohmann::json::array({
+                                    {{"type", "text"}, {"text", "Tool execution cancelled: storage write aborted"}}
+                                });
+                                return inner_res;
+                            }
                             std::string title = args.value("title", "");
                             std::string content = args.value("content", "");
                             char doc_id_out[128] = {0};
@@ -473,6 +500,13 @@ int main(int argc, char* argv[]) {
                                 });
                             }
                         } else if (name == "vinox.relation_create") {
+                            if (cancel_token->load()) {
+                                inner_res["result"]["isError"] = true;
+                                inner_res["result"]["content"] = nlohmann::json::array({
+                                    {{"type", "text"}, {"text", "Tool execution cancelled: storage write aborted"}}
+                                });
+                                return inner_res;
+                            }
                             std::string source = args.value("source", "");
                             std::string target = args.value("target", "");
                             std::string rel_type = args.value("type", "");
@@ -491,11 +525,12 @@ int main(int argc, char* argv[]) {
                         return inner_res;
                     });
 
-                    if (task_fut.wait_for(std::chrono::milliseconds(timeout_limit_ms)) == std::future_status::timeout) {
-                        log_gov_event("tool.execution_completion", "Tool execution timed out after " + std::to_string(timeout_limit_ms) + " ms", timeout_limit_ms, "TIMEOUT", VINOX_STATUS_RUNTIME_ERROR);
+                    if (task_fut.wait_for(std::chrono::milliseconds(SERVER_TOOL_DEADLINE_MS)) == std::future_status::timeout) {
+                        cancel_token->store(true);
+                        log_gov_event("tool.execution_completion", "Tool execution timed out after " + std::to_string(SERVER_TOOL_DEADLINE_MS) + " ms", SERVER_TOOL_DEADLINE_MS, "TIMEOUT", VINOX_STATUS_RUNTIME_ERROR);
                         res["result"]["isError"] = true;
                         res["result"]["content"] = nlohmann::json::array({
-                            {{"type", "text"}, {"text", "Tool execution timed out after " + std::to_string(timeout_limit_ms) + " ms"}}
+                            {{"type", "text"}, {"text", "Tool execution timed out after " + std::to_string(SERVER_TOOL_DEADLINE_MS) + " ms"}}
                         });
                     } else {
                         auto task_res = task_fut.get();

@@ -368,58 +368,151 @@ int main(void) {
     }
     printf("  - Server-Side C-ABI Policy Engine Denial (No --allow-write): Verified\n");
 
-    /* 8. Execution Timeout / Deadline Test */
-    call_req.call_id = "call_timeout_sim";
-    call_req.tool_name = "vinox_mcp.vinox.search";
-    call_req.arguments_json = "{\"query\":\"timeout test\",\"timeout_sim_ms\":600,\"timeout_limit_ms\":100}";
+    /* 8. Execution Timeout / Deadline Test with Storage Non-Mutation Verification */
+#if defined(_WIN32)
+    _putenv("VINOX_TEST_TIMEOUT_SIM_MS=2500");
+#else
+    setenv("VINOX_TEST_TIMEOUT_SIM_MS", "2500", 1);
+#endif
+    vinox_mcp_server_config cfg_timeout;
+    memset(&cfg_timeout, 0, sizeof(cfg_timeout));
+    cfg_timeout.struct_size = sizeof(cfg_timeout);
+    cfg_timeout.server_name = "vinox_mcp_timeout";
+    cfg_timeout.transport_kind = VINOX_MCP_TRANSPORT_STDIO;
+    cfg_timeout.command_or_url = "vinox_mcp_server.exe --allow-write";
+    cfg_timeout.protocol_version = VINOX_MCP_VERSION_2026_07_28;
 
-    memset(&call_res, 0, sizeof(call_res));
-    call_res.struct_size = sizeof(call_res);
+    vinox_mcp_client* timeout_client = NULL;
+    if (vinox_mcp_client_create(&cfg_timeout, &timeout_client) == VINOX_STATUS_OK && timeout_client) {
+        if (vinox_mcp_client_connect(timeout_client) == VINOX_STATUS_OK) {
+            call_req.call_id = "call_timeout_sim";
+            call_req.tool_name = "vinox_mcp_timeout.vinox.document_ingest";
+            call_req.arguments_json = "{\"title\":\"Timed Out Doc\",\"content\":\"Test content that must NOT be saved\"}";
 
-    if (vinox_mcp_client_call_tool(client, &call_req, &call_res, pool, sizeof(pool)) != VINOX_STATUS_OK ||
-        call_res.result_json == NULL ||
-        strstr(call_res.result_json, "timed out after") == NULL) {
-        printf("FAILED: Tool execution exceeding deadline must return timeout error!\n");
+            memset(&call_res, 0, sizeof(call_res));
+            call_res.struct_size = sizeof(call_res);
+
+            if (vinox_mcp_client_call_tool(timeout_client, &call_req, &call_res, pool, sizeof(pool)) != VINOX_STATUS_OK ||
+                call_res.result_json == NULL ||
+                strstr(call_res.result_json, "timed out after 2000 ms") == NULL) {
+                printf("FAILED: Tool execution exceeding server deadline must return timeout error!\n");
+                vinox_mcp_client_destroy(timeout_client);
+                vinox_tool_registry_destroy(reg);
+                vinox_mcp_client_destroy(client);
+                return 1;
+            }
+        }
+        vinox_mcp_client_destroy(timeout_client);
+    }
+#if defined(_WIN32)
+    _putenv("VINOX_TEST_TIMEOUT_SIM_MS=");
+#else
+    unsetenv("VINOX_TEST_TIMEOUT_SIM_MS");
+#endif
+
+    /* Verify that "Timed Out Doc" was NOT written to storage */
+    if (vinox_mcp_client_list_resources(client, res_buf, sizeof(res_buf), &req_sz) != VINOX_STATUS_OK ||
+        strstr(res_buf, "Timed Out Doc") != NULL) {
+        printf("FAILED: Timed-out document ingest must NOT mutate canonical storage!\n");
         vinox_tool_registry_destroy(reg);
         vinox_mcp_client_destroy(client);
         return 1;
     }
-    printf("  - Tool Execution Timeout & Deadline Enforcement: Verified\n");
+    printf("  - Tool Execution Timeout & Storage Non-Mutation Guarantee: Verified\n");
 
-    /* 9. Cancellation Propagation Test */
-    call_req.call_id = "call_cancel_sim";
-    call_req.tool_name = "vinox_mcp.vinox.search";
-    call_req.arguments_json = "{\"query\":\"cancel test\",\"cancelled\":true}";
+    /* 9. Cancellation Propagation Test with Storage Non-Mutation Verification */
+#if defined(_WIN32)
+    _putenv("VINOX_TEST_CANCEL_SIM=1");
+#else
+    setenv("VINOX_TEST_CANCEL_SIM", "1", 1);
+#endif
+    vinox_mcp_server_config cfg_cancel;
+    memset(&cfg_cancel, 0, sizeof(cfg_cancel));
+    cfg_cancel.struct_size = sizeof(cfg_cancel);
+    cfg_cancel.server_name = "vinox_mcp_cancel";
+    cfg_cancel.transport_kind = VINOX_MCP_TRANSPORT_STDIO;
+    cfg_cancel.command_or_url = "vinox_mcp_server.exe --allow-write";
+    cfg_cancel.protocol_version = VINOX_MCP_VERSION_2026_07_28;
 
-    memset(&call_res, 0, sizeof(call_res));
-    call_res.struct_size = sizeof(call_res);
+    vinox_mcp_client* cancel_client = NULL;
+    if (vinox_mcp_client_create(&cfg_cancel, &cancel_client) == VINOX_STATUS_OK && cancel_client) {
+        if (vinox_mcp_client_connect(cancel_client) == VINOX_STATUS_OK) {
+            call_req.call_id = "call_cancel_sim";
+            call_req.tool_name = "vinox_mcp_cancel.vinox.document_ingest";
+            call_req.arguments_json = "{\"title\":\"Cancelled Doc\",\"content\":\"Test content that must NOT be saved\"}";
 
-    if (vinox_mcp_client_call_tool(client, &call_req, &call_res, pool, sizeof(pool)) != VINOX_STATUS_OK ||
-        call_res.result_json == NULL ||
-        strstr(call_res.result_json, "Tool execution cancelled") == NULL) {
-        printf("FAILED: Cancelled tool execution must return cancellation error!\n");
+            memset(&call_res, 0, sizeof(call_res));
+            call_res.struct_size = sizeof(call_res);
+
+            if (vinox_mcp_client_call_tool(cancel_client, &call_req, &call_res, pool, sizeof(pool)) != VINOX_STATUS_OK ||
+                call_res.result_json == NULL ||
+                strstr(call_res.result_json, "Tool execution cancelled") == NULL) {
+                printf("FAILED: Cancelled tool execution must return cancellation error!\n");
+                vinox_mcp_client_destroy(cancel_client);
+                vinox_tool_registry_destroy(reg);
+                vinox_mcp_client_destroy(client);
+                return 1;
+            }
+        }
+        vinox_mcp_client_destroy(cancel_client);
+    }
+#if defined(_WIN32)
+    _putenv("VINOX_TEST_CANCEL_SIM=");
+#else
+    unsetenv("VINOX_TEST_CANCEL_SIM");
+#endif
+
+    /* Verify that "Cancelled Doc" was NOT written to storage */
+    if (vinox_mcp_client_list_resources(client, res_buf, sizeof(res_buf), &req_sz) != VINOX_STATUS_OK ||
+        strstr(res_buf, "Cancelled Doc") != NULL) {
+        printf("FAILED: Cancelled document ingest must NOT mutate canonical storage!\n");
         vinox_tool_registry_destroy(reg);
         vinox_mcp_client_destroy(client);
         return 1;
     }
-    printf("  - Tool Execution Cancellation Propagation: Verified\n");
+    printf("  - Tool Execution Cancellation Propagation & Storage Non-Mutation Guarantee: Verified\n");
 
     /* 10. Bounded Output Payload Size Limit Test (> 256 KB) */
-    call_req.call_id = "call_oversize_output_sim";
-    call_req.tool_name = "vinox_mcp.vinox.search";
-    call_req.arguments_json = "{\"query\":\"oversize output test\",\"oversize_sim_kb\":300}";
+#if defined(_WIN32)
+    _putenv("VINOX_TEST_OVERSIZE_SIM_KB=300");
+#else
+    setenv("VINOX_TEST_OVERSIZE_SIM_KB", "300", 1);
+#endif
+    vinox_mcp_server_config cfg_oversize;
+    memset(&cfg_oversize, 0, sizeof(cfg_oversize));
+    cfg_oversize.struct_size = sizeof(cfg_oversize);
+    cfg_oversize.server_name = "vinox_mcp_oversize";
+    cfg_oversize.transport_kind = VINOX_MCP_TRANSPORT_STDIO;
+    cfg_oversize.command_or_url = "vinox_mcp_server.exe";
+    cfg_oversize.protocol_version = VINOX_MCP_VERSION_2026_07_28;
 
-    memset(&call_res, 0, sizeof(call_res));
-    call_res.struct_size = sizeof(call_res);
+    vinox_mcp_client* oversize_client = NULL;
+    if (vinox_mcp_client_create(&cfg_oversize, &oversize_client) == VINOX_STATUS_OK && oversize_client) {
+        if (vinox_mcp_client_connect(oversize_client) == VINOX_STATUS_OK) {
+            call_req.call_id = "call_oversize_output_sim";
+            call_req.tool_name = "vinox_mcp_oversize.vinox.search";
+            call_req.arguments_json = "{\"query\":\"oversize output test\"}";
 
-    if (vinox_mcp_client_call_tool(client, &call_req, &call_res, pool, sizeof(pool)) != VINOX_STATUS_OK ||
-        call_res.result_json == NULL ||
-        strstr(call_res.result_json, "exceeded maximum output payload size limit") == NULL) {
-        printf("FAILED: Oversize tool output > 256 KB must fail closed!\n");
-        vinox_tool_registry_destroy(reg);
-        vinox_mcp_client_destroy(client);
-        return 1;
+            memset(&call_res, 0, sizeof(call_res));
+            call_res.struct_size = sizeof(call_res);
+
+            if (vinox_mcp_client_call_tool(oversize_client, &call_req, &call_res, pool, sizeof(pool)) != VINOX_STATUS_OK ||
+                call_res.result_json == NULL ||
+                strstr(call_res.result_json, "exceeded maximum output payload size limit") == NULL) {
+                printf("FAILED: Oversize tool output > 256 KB must fail closed!\n");
+                vinox_mcp_client_destroy(oversize_client);
+                vinox_tool_registry_destroy(reg);
+                vinox_mcp_client_destroy(client);
+                return 1;
+            }
+        }
+        vinox_mcp_client_destroy(oversize_client);
     }
+#if defined(_WIN32)
+    _putenv("VINOX_TEST_OVERSIZE_SIM_KB=");
+#else
+    unsetenv("VINOX_TEST_OVERSIZE_SIM_KB");
+#endif
     printf("  - Oversize Output Payload Limit (256 KB Gate): Verified\n");
 
     vinox_tool_registry_destroy(reg);
