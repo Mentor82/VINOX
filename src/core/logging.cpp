@@ -324,9 +324,6 @@ vinox_status vinox_correlation_deserialize_envelope(
     const char* op_id = VINOX_FIELD_PRESENT_MEMBER(correlation_out, operation_id) ? copy_field("operation_id") : nullptr;
 
     if (pool_failed) {
-        uint32_t original_size = correlation_out->struct_size;
-        std::memset(correlation_out, 0, sizeof(*correlation_out));
-        correlation_out->struct_size = original_size;
         vinox_set_last_error("string_pool_buf exhausted during correlation envelope deserialization");
         return VINOX_STATUS_INVALID_ARGUMENT;
     }

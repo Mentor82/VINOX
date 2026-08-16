@@ -65,6 +65,21 @@ int main(void) {
         return 7;
     }
 
+    // Prefix-ABI struct pool exhaustion safety test (smaller caller struct)
+    typedef struct partial_correlation_context {
+        uint32_t struct_size;
+        const char* request_id;
+    } partial_correlation_context;
+
+    partial_correlation_context partial_ctx_out;
+    memset(&partial_ctx_out, 0xAB, sizeof(partial_ctx_out));
+    partial_ctx_out.struct_size = (uint32_t)sizeof(partial_ctx_out);
+
+    if (vinox_correlation_deserialize_envelope(wire_buf, (vinox_correlation_context*)&partial_ctx_out, tiny_pool, sizeof(tiny_pool)) != VINOX_STATUS_INVALID_ARGUMENT) {
+        printf("FAILED: Prefix-ABI struct pool exhaustion safety test failed\n");
+        return 7;
+    }
+
     // Happy path deserialization
     if (vinox_correlation_deserialize_envelope(wire_buf, &test_ctx, pool_buf, sizeof(pool_buf)) != VINOX_STATUS_OK ||
         strcmp(test_ctx.request_id, "req-boundary-101") != 0) {
