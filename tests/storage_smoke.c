@@ -417,9 +417,10 @@ int main(void) {
     // TEST 10: Phase 5.3 Multi-Chunk Ingestion & SHA-256 Hash
     // -------------------------------------------------------------
     char doc_id[64] = {0};
-    char large_content[1501];
-    memset(large_content, 'A', 1500);
-    large_content[1500] = '\0';
+    char large_content[2048] = {0};
+    for (int i = 0; i < 20; ++i) {
+        strncat(large_content, "OpenVINO C++ Infrastructure Architecture Document Chunking Test. ", sizeof(large_content) - strlen(large_content) - 1);
+    }
 
     if (vinox_storage_document_ingest(engine, "Large Manual", large_content, doc_id, sizeof(doc_id)) != VINOX_STATUS_OK ||
         strlen(doc_id) == 0) {
@@ -459,6 +460,37 @@ int main(void) {
             }
         }
         sqlite3_finalize(doc_stmt);
+    }
+
+    // Verify Chunk FTS5 Search & Chunk Vector Embedding Storage
+    size_t chunk_matches = 0;
+    if (vinox_storage_search_chunks_fts(engine, "Infrastructure", 10, &chunk_matches) != VINOX_STATUS_OK || chunk_matches == 0) {
+        printf("FAILED: Chunk FTS5 search failed\n");
+        sqlite3_close(raw_db);
+        vinox_storage_engine_close(engine);
+        return 373;
+    }
+
+    char actual_chunk_id[64] = {0};
+    sqlite3_close(raw_db);
+    sqlite3_open(db_file, &raw_db);
+    sqlite3_stmt* cid_stmt = NULL;
+    if (sqlite3_prepare_v2(raw_db, "SELECT id FROM chunks WHERE document_id = ? LIMIT 1;", -1, &cid_stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(cid_stmt, 1, doc_id, -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(cid_stmt) == SQLITE_ROW) {
+            const char* cid = (const char*)sqlite3_column_text(cid_stmt, 0);
+            if (cid) strncpy(actual_chunk_id, cid, sizeof(actual_chunk_id) - 1);
+        }
+        sqlite3_finalize(cid_stmt);
+    }
+
+    float dummy_chunk_emb[1024];
+    for (int i = 0; i < 1024; ++i) dummy_chunk_emb[i] = 0.5f;
+    if (strlen(actual_chunk_id) == 0 || vinox_storage_store_chunk_embedding(engine, actual_chunk_id, dummy_chunk_emb, 1024) != VINOX_STATUS_OK) {
+        printf("FAILED: Chunk embedding storage failed: %s\n", vinox_storage_last_error());
+        sqlite3_close(raw_db);
+        vinox_storage_engine_close(engine);
+        return 374;
     }
 
     // -------------------------------------------------------------

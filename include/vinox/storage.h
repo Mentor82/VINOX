@@ -155,6 +155,20 @@ VINOX_API vinox_status vinox_storage_relations_query_cte(
     size_t json_out_size
 );
 
+VINOX_API vinox_status vinox_storage_store_chunk_embedding(
+    vinox_storage_engine* engine,
+    const char* chunk_id,
+    const float* embedding_data,
+    size_t dim
+);
+
+VINOX_API vinox_status vinox_storage_search_chunks_fts(
+    const vinox_storage_engine* engine,
+    const char* query,
+    size_t max_results,
+    size_t* match_count_out
+);
+
 /* Phase 5.4 — Storage Lifecycle, Online Backup & Portability API */
 VINOX_API vinox_status vinox_storage_backup_online(
     vinox_storage_engine* engine,

@@ -1018,6 +1018,80 @@ VINOX_API vinox_status vinox_storage_relations_query_cte(
     return VINOX_STATUS_OK;
 }
 
+VINOX_API vinox_status vinox_storage_store_chunk_embedding(
+    vinox_storage_engine* engine,
+    const char* chunk_id,
+    const float* embedding_data,
+    size_t dim
+) {
+    if (!engine || !chunk_id || chunk_id[0] == '\0' || !embedding_data || dim == 0) {
+        return fail_arg("Invalid argument for vinox_storage_store_chunk_embedding");
+    }
+    std::lock_guard<std::mutex> lock(engine->mutex);
+
+    std::vector<float> vec(embedding_data, embedding_data + dim);
+    vinox::storage::l2_normalize(vec);
+    uint64_t now = current_timestamp_ms();
+
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "INSERT OR REPLACE INTO chunk_embeddings (chunk_id, embedding, dim, created_at_ms) VALUES (?, ?, ?, ?);";
+    if (sqlite3_prepare_v2(engine->db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        std::string err = std::string("Failed to prepare chunk_embeddings insert: ") + sqlite3_errmsg(engine->db);
+        return fail_runtime(err.c_str());
+    }
+
+    sqlite3_bind_text(stmt, 1, chunk_id, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_blob(stmt, 2, vec.data(), static_cast<int>(vec.size() * sizeof(float)), SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 3, static_cast<int>(dim));
+    sqlite3_bind_int64(stmt, 4, static_cast<sqlite3_int64>(now));
+
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        sqlite3_finalize(stmt);
+        return fail_runtime("Failed to insert chunk embedding");
+    }
+    sqlite3_finalize(stmt);
+
+    std::string err;
+    if (engine->vector_backend && (engine->index_dim == 0 || engine->index_dim == dim)) {
+        engine->vector_backend->store_embedding(engine->db, chunk_id, vec, err);
+    }
+
+    return VINOX_STATUS_OK;
+}
+
+VINOX_API vinox_status vinox_storage_search_chunks_fts(
+    const vinox_storage_engine* engine,
+    const char* query,
+    size_t max_results,
+    size_t* match_count_out
+) {
+    (void)max_results;
+    if (!engine || !query || query[0] == '\0') {
+        return fail_arg("Invalid argument for vinox_storage_search_chunks_fts");
+    }
+    std::lock_guard<std::mutex> lock(const_cast<vinox_storage_engine*>(engine)->mutex);
+
+    const char* sql = "SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(engine->db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return fail_runtime("Failed to prepare chunks_fts query");
+    }
+
+    sqlite3_bind_text(stmt, 1, query, -1, SQLITE_STATIC);
+
+    size_t count = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        count = static_cast<size_t>(sqlite3_column_int(stmt, 0));
+    }
+    sqlite3_finalize(stmt);
+
+    if (match_count_out) {
+        *match_count_out = count;
+    }
+
+    return VINOX_STATUS_OK;
+}
+
 /* Phase 5.4 — Storage Lifecycle, Online Backup & Portability Implementation */
 VINOX_API vinox_status vinox_storage_backup_online(
     vinox_storage_engine* engine,
@@ -1148,6 +1222,14 @@ VINOX_API vinox_status vinox_storage_export_json(
         item["dimension"] = sqlite3_column_int(stmt, 2);
         item["metric"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
         item["created_at_ms"] = sqlite3_column_int64(stmt, 4);
+        return item;
+    });
+
+    root["chunk_embeddings"] = export_table("SELECT chunk_id, dim, created_at_ms FROM chunk_embeddings;", [](sqlite3_stmt* stmt) {
+        nlohmann::json item;
+        item["chunk_id"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        item["dim"] = sqlite3_column_int(stmt, 1);
+        item["created_at_ms"] = sqlite3_column_int64(stmt, 2);
         return item;
     });
 

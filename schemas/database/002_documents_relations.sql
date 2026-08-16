@@ -41,6 +41,16 @@ CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
     INSERT INTO chunks_fts(rowid, content) VALUES (new.rowid, new.content);
 END;
 
+CREATE TABLE IF NOT EXISTS typed_relations (
+    id TEXT PRIMARY KEY,
+    source_id TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    relation_type TEXT NOT NULL,
+    evidence_text TEXT,
+    confidence REAL NOT NULL DEFAULT 1.0,
+    created_at_ms INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS evidence (
     id TEXT PRIMARY KEY,
     relation_id TEXT NOT NULL,
@@ -56,4 +66,12 @@ CREATE TABLE IF NOT EXISTS embedding_profiles (
     dimension INTEGER NOT NULL,
     metric TEXT NOT NULL DEFAULT 'cosine',
     created_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS chunk_embeddings (
+    chunk_id TEXT PRIMARY KEY,
+    embedding BLOB NOT NULL,
+    dim INTEGER NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    FOREIGN KEY(chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
 );
