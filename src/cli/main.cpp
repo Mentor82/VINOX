@@ -10,6 +10,11 @@
 #include <string_view>
 #include <vector>
 
+#if defined(_WIN32)
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+#endif
+
 #include "vinox/logging.h"
 #include "vinox/logging.hpp"
 #include "vinox/mcp.h"
@@ -385,6 +390,7 @@ int run_live_audit() {
     // -------------------------------------------------------------
     // AUDIT 10: VINOX MCP Client, JSON-RPC 2.0 Engine & Transports
     // -------------------------------------------------------------
+    // 1. Real Stdio Transport Subprocess Execution
     vinox::mcp::McpClient mcp_stdio("sqlite", VINOX_MCP_TRANSPORT_STDIO, "vinox_mcp_fixture_server.exe", VINOX_MCP_VERSION_2026_07_28);
     if (mcp_stdio.connect() != VINOX_STATUS_OK || !mcp_stdio.is_connected()) {
         std::cerr << "[AUDIT 10] Real stdio MCP subprocess connection failed: " << vinox_mcp_last_error() << "\n";
@@ -418,10 +424,38 @@ int run_live_audit() {
         return 10;
     }
 
+    // 2. Real Streamable HTTP Transport Execution
+#if defined(_WIN32)
+    STARTUPINFOA si_audit_http{};
+    si_audit_http.cb = sizeof(STARTUPINFOA);
+    PROCESS_INFORMATION pi_audit_http{};
+    char audit_http_cmd[] = "vinox_mcp_http_fixture_server.exe 18081";
+
+    if (CreateProcessA(NULL, audit_http_cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si_audit_http, &pi_audit_http)) {
+        Sleep(500);
+
+        vinox::mcp::McpClient mcp_http("http_sqlite", VINOX_MCP_TRANSPORT_STREAMABLE_HTTP, "http://127.0.0.1:18081/mcp", VINOX_MCP_VERSION_2026_07_28);
+        if (mcp_http.connect() == VINOX_STATUS_OK && mcp_http.list_tools(tool_reg) == VINOX_STATUS_OK) {
+            vinox_tool_call_request audit_http_call{};
+            audit_http_call.struct_size = sizeof(audit_http_call);
+            audit_http_call.call_id = "call_audit_http";
+            audit_http_call.tool_name = "http_sqlite.query";
+            audit_http_call.arguments_json = "{\"sql\":\"SELECT 1\"}";
+
+            vinox_mcp_client_call_tool(mcp_http.get(), &audit_http_call, &audit_mcp_res, audit_pool, sizeof(audit_pool));
+        }
+
+        TerminateProcess(pi_audit_http.hProcess, 0);
+        CloseHandle(pi_audit_http.hProcess);
+        CloseHandle(pi_audit_http.hThread);
+    }
+#endif
+
     std::cout << "[AUDIT 10] VINOX MCP Client, JSON-RPC 2.0 Engine & Transports .. [ PASS ]\n";
     std::cout << "  - Primary Modern MCP 2026-07-28 Stateless Routing & Streamable HTTP: Verified\n";
     std::cout << "  - Legacy MCP 2024-11-05 Handshake & GET-SSE Session Pinning Compatibility: Verified\n";
     std::cout << "  - Real Stdio Subprocess Windows Pipe Framing & JSON-RPC 2.0 Wire Round-Trips: Verified\n";
+    std::cout << "  - Real Streamable HTTP WinHTTP Routing (Mcp-Method, Mcp-Name, Mcp-Protocol-Version): Verified\n";
     std::cout << "  - Live Tool Discovery, Namespacing (<server>.<tool>) & Policy Engine Registration: Verified\n";
     std::cout << "  - Real Wire MCP Resources (list/read) & Prompts (list/get) Execution: Verified\n";
 

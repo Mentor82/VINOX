@@ -111,7 +111,6 @@ struct vinox_mcp_client {
             set_mcp_last_error("Failed to write line to stdio stdin pipe");
             return VINOX_STATUS_RUNTIME_ERROR;
         }
-        FlushFileBuffers(h_child_stdin_write);
         return VINOX_STATUS_OK;
 #else
         return VINOX_STATUS_RUNTIME_ERROR;
@@ -175,11 +174,13 @@ struct vinox_mcp_client {
             return VINOX_STATUS_INVALID_ARGUMENT;
         }
 
-        HINTERNET hSession = WinHttpOpen(L"VINOX-MCP-Client/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        HINTERNET hSession = WinHttpOpen(L"VINOX-MCP-Client/1.0", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
         if (!hSession) {
             set_mcp_last_error("WinHttpOpen failed");
             return VINOX_STATUS_RUNTIME_ERROR;
         }
+
+        WinHttpSetTimeouts(hSession, 2000, 2000, 2000, 2000);
 
         HINTERNET hConnect = WinHttpConnect(hSession, url_parts.host.c_str(), url_parts.port, 0);
         if (!hConnect) {
@@ -207,6 +208,7 @@ struct vinox_mcp_client {
         std::wstring w_method(method_name.begin(), method_name.end());
 
         std::wstring headers = L"Content-Type: application/json\r\n"
+                               L"Connection: close\r\n"
                                L"Mcp-Method: " + w_method + L"\r\n"
                                L"Mcp-Name: " + w_server_name + L"\r\n"
                                L"Mcp-Protocol-Version: " + proto_ver + L"\r\n";
@@ -220,7 +222,7 @@ struct vinox_mcp_client {
         BOOL ok = WinHttpSendRequest(
             hRequest,
             headers.c_str(),
-            static_cast<DWORD>(headers.length()),
+            static_cast<DWORD>(-1L),
             (LPVOID)body.c_str(),
             static_cast<DWORD>(body.size()),
             static_cast<DWORD>(body.size()),
@@ -390,7 +392,7 @@ vinox_status vinox_mcp_client_connect(vinox_mcp_client* client) {
         si.hStdInput = client->h_child_stdin_read;
         si.dwFlags |= STARTF_USESTDHANDLES;
 
-        std::string cmd = "cmd.exe /c " + client->command_or_url;
+        std::string cmd = client->command_or_url;
         std::vector<char> cmd_buf(cmd.begin(), cmd.end());
         cmd_buf.push_back('\0');
 

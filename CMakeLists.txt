@@ -242,9 +242,15 @@ if(BUILD_TESTING)
     add_executable(vinox_mcp_fixture_server tests/mcp_fixture_server.cpp)
     target_link_libraries(vinox_mcp_fixture_server PRIVATE nlohmann_json::nlohmann_json)
 
+    add_executable(vinox_mcp_http_fixture_server tests/mcp_http_fixture_server.cpp)
+    target_link_libraries(vinox_mcp_http_fixture_server PRIVATE nlohmann_json::nlohmann_json)
+    if(WIN32)
+        target_link_libraries(vinox_mcp_http_fixture_server PRIVATE ws2_32)
+    endif()
+
     add_executable(vinox_mcp_smoke tests/mcp_smoke.c)
     target_link_libraries(vinox_mcp_smoke PRIVATE vinox::core)
-    add_dependencies(vinox_mcp_smoke vinox_mcp_fixture_server)
+    add_dependencies(vinox_mcp_smoke vinox_mcp_fixture_server vinox_mcp_http_fixture_server)
     add_test(NAME mcp_smoke COMMAND vinox_mcp_smoke)
 
     add_test(NAME audit_smoke COMMAND vinox_cli --audit)
