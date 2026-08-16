@@ -1031,7 +1031,7 @@ streamen, ohne interne Implementierungsdetails zu kennen.
 
 **Ergebnis:** Phase 5 (SQLite, `sqlite-vec`, Dokumente, Chunks, CTE-Relationen, Online-Backup, Export/Import) ist vollstaendig umgesetzt und mit 12/12 CTest-Tests verifiziert.
 
-### Phase 6: Tools und MCP
+### Phase 6: Tools und MCP — 🟢 abgeschlossen
 
 - [x] interne Tool Registry und JSON-Schema-Validierung implementieren
 - [x] Policy Engine, Freigaben, Limits, Audit und Abbruch implementieren
@@ -1040,9 +1040,9 @@ streamen, ohne interne Implementierungsdetails zu kennen.
 - [x] eigenen MCP-Server fuer Suche, Verlauf und Relationen erstellen (real backend + fail-closed governance)
 - [x] OpenAI-Toolformat in das interne Format und zurueck abbilden
 - [x] Phase 6.4 Control Loop, Timeouts/Deadlines, Cancellation, Bounded Output (256 KB) & Fail-Closed Registry Injection
-- Qwen2.5-Instruct auf robuste Toolauswahl und Argumenterzeugung evaluieren
+- [x] Qwen2.5-Instruct auf robuste Toolauswahl und Argumenterzeugung evaluieren
 
-**Ergebnis:** Phase 6.4 (Governance Control Loop, Timeouts/Deadlines, Cancellation, Bounded Payloads, Registry Injection & Audit Lifecycle) ist vollstaendig gehärtet und mit 12/12 CTest-Tests verifiziert. Phase 6 insgesamt bleibt bis zur Qwen2.5-Evaluierung offen.
+**Ergebnis:** Phase 6 (Tools, Policy Engine, MCP Client, MCP Server, Governance Control Loop, JSON Schema Validierung & Qwen2.5-Instruct Toolauswahl-Evaluierung) ist vollständig umgesetzt und mit 13/13 CTest-Tests verifiziert.
 
 ### Phase 7: Agent und Sandbox
 

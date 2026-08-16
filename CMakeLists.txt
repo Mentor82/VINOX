@@ -343,8 +343,13 @@ if(BUILD_TESTING)
         add_executable(vinox_openvino_abi_smoke tests/openvino_abi_smoke.c)
         target_link_libraries(vinox_openvino_abi_smoke PRIVATE vinox::openvino)
         add_test(NAME openvino_abi_smoke COMMAND vinox_openvino_abi_smoke)
+
+        add_executable(vinox_qwen2_5_eval_smoke tests/qwen2_5_eval_smoke.cpp)
+        target_link_libraries(vinox_qwen2_5_eval_smoke PRIVATE vinox::core vinox::openvino vinox::serving vinox::storage nlohmann_json::nlohmann_json)
+        add_test(NAME qwen2_5_eval_smoke COMMAND vinox_qwen2_5_eval_smoke)
+
         if(WIN32 AND VINOX_OPENVINO_SDK_ROOT)
-            set_tests_properties(openvino_abi_smoke PROPERTIES ENVIRONMENT
+            set_tests_properties(openvino_abi_smoke qwen2_5_eval_smoke PROPERTIES ENVIRONMENT
                 "PATH=${VINOX_OPENVINO_SDK_ROOT}/runtime/bin/intel64/$<CONFIG>\\\;${VINOX_OPENVINO_SDK_ROOT}/runtime/3rdparty/tbb/bin\\\;$ENV{PATH}"
             )
         endif()
