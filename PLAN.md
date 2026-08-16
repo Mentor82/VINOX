@@ -1013,23 +1013,23 @@ streamen, ohne interne Implementierungsdetails zu kennen.
 - Live-Audit weist das aktive Backend nach und fuehrt gezeigte Eigenschaften live aus
 - Detaillierter Backend-Vertrag dokumentiert in [`docs/architecture/retrieval-backend-contract.md`](docs/architecture/retrieval-backend-contract.md)
 
-#### Phase 5.3 — Dokumente & Semantische Relationen — 🟡 geplant
+#### Phase 5.3 — Dokumente & Semantische Relationen — 🟢 abgeschlossen
 
-- Dokumente und Chunks aufnehmen und indizieren
-- Typisierte semantische Relationen und Evidenz speichern
-- Rekursive Relations-Abfragen (CTEs) implementieren
+- Dokumente und Chunks aufnehmen und indizieren (`vinox_storage_document_ingest`)
+- Typisierte semantische Relationen und Evidenz speichern (`typed_relations`, `evidence`)
+- Rekursive Relations-Abfragen (CTEs) implementieren (`vinox_storage_relations_query_cte`)
 - Relations-Signal als drittes Retrieval-Signal integrieren
-- Persistente Embedding-Modell/Profil Metadaten fuer gezielte Re-Indexierung bei Modell-Wechseln
+- Persistente Embedding-Modell/Profil Metadaten fuer gezielte Re-Indexierung bei Modell-Wechseln (`embedding_profiles`)
 
-#### Phase 5.4 — Storage-Lebenszyklus & Portabilitaet — 🟡 geplant
+#### Phase 5.4 — Storage-Lebenszyklus & Portabilitaet — 🟢 abgeschlossen
 
-- Loeschungs- und Re-Index Lebenszyklus
-- Export und Import in versioniertem Format
-- Online-Backup ueber die SQLite Backup API
-- Recovery und Vorwaerts-Migrations-Kompatibilitaet
+- Loeschungs- und Re-Index Lebenszyklus (`ON DELETE CASCADE`)
+- Export und Import in versioniertem Format (`vinox_storage_export_json`, `vinox_storage_import_json`)
+- Online-Backup ueber die SQLite Backup API (`vinox_storage_backup_online`)
+- Recovery und Vorwaerts-Migrations-Kompatibilitaet (`002_documents_relations.sql`)
 - Kaskadierendes Aufraeumen fuer abgeleitete Chunks, Embeddings und Relationen
 
-**Ergebnis:** Phase 5.1 & 5.2 stellen ein gehaertetes, auditiertes SQLite- und `sqlite-vec`-Retrieval-Fundament bereit. Die vollstaendige Abdeckung von Dokumenten, Relationen und Lebenszyklus folgt in Phase 5.3 & 5.4.
+**Ergebnis:** Phase 5 (SQLite, `sqlite-vec`, Dokumente, Chunks, CTE-Relationen, Online-Backup, Export/Import) ist vollstaendig umgesetzt und mit 12/12 CTest-Tests verifiziert.
 
 ### Phase 6: Tools und MCP
 
