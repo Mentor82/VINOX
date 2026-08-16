@@ -13,10 +13,13 @@
 #include <sstream>
 #include <atomic>
 #include <chrono>
+#include <algorithm>
 
 #if defined(_WIN32)
 #  define WIN32_LEAN_AND_MEAN
 #  include <windows.h>
+#  include <winhttp.h>
+#  pragma comment(lib, "winhttp.lib")
 #endif
 
 namespace {
@@ -28,6 +31,45 @@ void set_mcp_last_error(const std::string& err) {
 
 #define VINOX_FIELD_PRESENT_MEMBER(ptr, member) \
     ((ptr) != nullptr && ((ptr)->struct_size >= (offsetof(std::remove_pointer_t<decltype(ptr)>, member) + sizeof((ptr)->member))))
+
+struct UrlParts {
+    std::wstring host;
+    INTERNET_PORT port = 80;
+    std::wstring path;
+    bool is_https = false;
+};
+
+bool parse_url(const std::string& url_str, UrlParts& out) {
+    if (url_str.empty()) return false;
+    std::string s = url_str;
+    out.is_https = false;
+    out.port = 80;
+
+    if (s.rfind("https://", 0) == 0) {
+        out.is_https = true;
+        out.port = 443;
+        s = s.substr(8);
+    } else if (s.rfind("http://", 0) == 0) {
+        s = s.substr(7);
+    }
+
+    size_t path_pos = s.find('/');
+    std::string host_port = (path_pos != std::string::npos) ? s.substr(0, path_pos) : s;
+    std::string path_part = (path_pos != std::string::npos) ? s.substr(path_pos) : "/";
+
+    size_t colon_pos = host_port.find(':');
+    if (colon_pos != std::string::npos) {
+        std::string h = host_port.substr(0, colon_pos);
+        int p = std::atoi(host_port.substr(colon_pos + 1).c_str());
+        if (p > 0) out.port = static_cast<INTERNET_PORT>(p);
+        out.host = std::wstring(h.begin(), h.end());
+    } else {
+        out.host = std::wstring(host_port.begin(), host_port.end());
+    }
+
+    out.path = std::wstring(path_part.begin(), path_part.end());
+    return !out.host.empty();
+}
 
 } // namespace
 
@@ -45,6 +87,7 @@ struct vinox_mcp_client {
     std::atomic<bool> connected{false};
     std::atomic<uint64_t> request_id_counter{1};
     std::string legacy_session_id;
+    std::string sse_post_path;
 
 #if defined(_WIN32)
     HANDLE h_child_stdin_read = NULL;
@@ -52,7 +95,215 @@ struct vinox_mcp_client {
     HANDLE h_child_stdout_read = NULL;
     HANDLE h_child_stdout_write = NULL;
     PROCESS_INFORMATION proc_info{};
+    std::string read_buffer;
 #endif
+
+    vinox_status send_stdio_line(const std::string& line) {
+#if defined(_WIN32)
+        if (!h_child_stdin_write) {
+            set_mcp_last_error("stdio stdin pipe is not open");
+            return VINOX_STATUS_RUNTIME_ERROR;
+        }
+        std::string full_msg = line + "\n";
+        DWORD written = 0;
+        BOOL ok = WriteFile(h_child_stdin_write, full_msg.data(), static_cast<DWORD>(full_msg.size()), &written, NULL);
+        if (!ok || written != full_msg.size()) {
+            set_mcp_last_error("Failed to write line to stdio stdin pipe");
+            return VINOX_STATUS_RUNTIME_ERROR;
+        }
+        FlushFileBuffers(h_child_stdin_write);
+        return VINOX_STATUS_OK;
+#else
+        return VINOX_STATUS_RUNTIME_ERROR;
+#endif
+    }
+
+    vinox_status read_stdio_line(std::string& line_out, uint32_t timeout_ms = 5000) {
+#if defined(_WIN32)
+        if (!h_child_stdout_read) {
+            set_mcp_last_error("stdio stdout pipe is not open");
+            return VINOX_STATUS_RUNTIME_ERROR;
+        }
+
+        auto start = std::chrono::steady_clock::now();
+        char chunk[512];
+
+        while (true) {
+            size_t newline_pos = read_buffer.find('\n');
+            if (newline_pos != std::string::npos) {
+                line_out = read_buffer.substr(0, newline_pos);
+                if (!line_out.empty() && line_out.back() == '\r') {
+                    line_out.pop_back();
+                }
+                read_buffer.erase(0, newline_pos + 1);
+                return VINOX_STATUS_OK;
+            }
+
+            DWORD avail = 0;
+            if (!PeekNamedPipe(h_child_stdout_read, NULL, 0, NULL, &avail, NULL)) {
+                set_mcp_last_error("PeekNamedPipe failed on stdio stdout pipe");
+                return VINOX_STATUS_RUNTIME_ERROR;
+            }
+
+            if (avail > 0) {
+                DWORD bytes_read = 0;
+                DWORD to_read = (std::min)(static_cast<DWORD>(sizeof(chunk) - 1), avail);
+                if (ReadFile(h_child_stdout_read, chunk, to_read, &bytes_read, NULL) && bytes_read > 0) {
+                    read_buffer.append(chunk, bytes_read);
+                    continue;
+                }
+            }
+
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+            if (elapsed > timeout_ms) {
+                set_mcp_last_error("Timeout waiting for line from stdio MCP server");
+                return VINOX_STATUS_RUNTIME_ERROR;
+            }
+
+            Sleep(10);
+        }
+#else
+        return VINOX_STATUS_RUNTIME_ERROR;
+#endif
+    }
+
+    vinox_status send_http_json_rpc(const nlohmann::json& req_json, nlohmann::json& res_json, const std::string& method_name) {
+#if defined(_WIN32)
+        UrlParts url_parts;
+        if (!parse_url(command_or_url, url_parts)) {
+            set_mcp_last_error("Invalid HTTP URL: " + command_or_url);
+            return VINOX_STATUS_INVALID_ARGUMENT;
+        }
+
+        HINTERNET hSession = WinHttpOpen(L"VINOX-MCP-Client/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        if (!hSession) {
+            set_mcp_last_error("WinHttpOpen failed");
+            return VINOX_STATUS_RUNTIME_ERROR;
+        }
+
+        HINTERNET hConnect = WinHttpConnect(hSession, url_parts.host.c_str(), url_parts.port, 0);
+        if (!hConnect) {
+            WinHttpCloseHandle(hSession);
+            set_mcp_last_error("WinHttpConnect failed");
+            return VINOX_STATUS_RUNTIME_ERROR;
+        }
+
+        std::wstring target_path = url_parts.path;
+        if (legacy_sse_enabled && !sse_post_path.empty()) {
+            target_path = std::wstring(sse_post_path.begin(), sse_post_path.end());
+        }
+
+        DWORD flags = url_parts.is_https ? WINHTTP_FLAG_SECURE : 0;
+        HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", target_path.c_str(), NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+        if (!hRequest) {
+            WinHttpCloseHandle(hConnect);
+            WinHttpCloseHandle(hSession);
+            set_mcp_last_error("WinHttpOpenRequest failed");
+            return VINOX_STATUS_RUNTIME_ERROR;
+        }
+
+        std::wstring proto_ver = (protocol_version == VINOX_MCP_VERSION_2026_07_28) ? L"2026-07-28" : L"2024-11-05";
+        std::wstring w_server_name(server_name.begin(), server_name.end());
+        std::wstring w_method(method_name.begin(), method_name.end());
+
+        std::wstring headers = L"Content-Type: application/json\r\n"
+                               L"Mcp-Method: " + w_method + L"\r\n"
+                               L"Mcp-Name: " + w_server_name + L"\r\n"
+                               L"Mcp-Protocol-Version: " + proto_ver + L"\r\n";
+
+        if (legacy_sse_enabled && !legacy_session_id.empty()) {
+            std::wstring w_sess(legacy_session_id.begin(), legacy_session_id.end());
+            headers += L"Mcp-Session-Id: " + w_sess + L"\r\n";
+        }
+
+        std::string body = req_json.dump();
+        BOOL ok = WinHttpSendRequest(
+            hRequest,
+            headers.c_str(),
+            static_cast<DWORD>(headers.length()),
+            (LPVOID)body.c_str(),
+            static_cast<DWORD>(body.size()),
+            static_cast<DWORD>(body.size()),
+            0
+        );
+
+        if (!ok || !WinHttpReceiveResponse(hRequest, NULL)) {
+            WinHttpCloseHandle(hRequest);
+            WinHttpCloseHandle(hConnect);
+            WinHttpCloseHandle(hSession);
+            set_mcp_last_error("WinHttpSendRequest or ReceiveResponse failed");
+            return VINOX_STATUS_RUNTIME_ERROR;
+        }
+
+        DWORD status_code = 0;
+        DWORD status_size = sizeof(status_code);
+        WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status_code, &status_size, WINHTTP_NO_HEADER_INDEX);
+
+        if (status_code != 200 && status_code != 202) {
+            WinHttpCloseHandle(hRequest);
+            WinHttpCloseHandle(hConnect);
+            WinHttpCloseHandle(hSession);
+            set_mcp_last_error("MCP Streamable HTTP server returned status: " + std::to_string(status_code));
+            return VINOX_STATUS_RUNTIME_ERROR;
+        }
+
+        std::string resp_body;
+        DWORD bytes_read = 0;
+        char buffer[1024];
+        while (WinHttpReadData(hRequest, buffer, sizeof(buffer), &bytes_read) && bytes_read > 0) {
+            resp_body.append(buffer, bytes_read);
+        }
+
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+
+        try {
+            res_json = nlohmann::json::parse(resp_body);
+            return VINOX_STATUS_OK;
+        } catch (...) {
+            set_mcp_last_error("Failed to parse JSON-RPC response from HTTP body: " + resp_body);
+            return VINOX_STATUS_RUNTIME_ERROR;
+        }
+#else
+        return VINOX_STATUS_RUNTIME_ERROR;
+#endif
+    }
+
+    vinox_status exchange_json_rpc(const nlohmann::json& req_json, nlohmann::json& res_json, const std::string& method_name) {
+        if (transport_kind == VINOX_MCP_TRANSPORT_STDIO) {
+            std::string req_str = req_json.dump();
+            vinox_status st = send_stdio_line(req_str);
+            if (st != VINOX_STATUS_OK) return st;
+
+            uint64_t target_id = req_json.value("id", 0ULL);
+            auto start = std::chrono::steady_clock::now();
+
+            while (true) {
+                std::string line;
+                st = read_stdio_line(line, 5000);
+                if (st != VINOX_STATUS_OK) return st;
+
+                try {
+                    auto j = nlohmann::json::parse(line);
+                    if (j.is_object() && j.value("id", 0ULL) == target_id) {
+                        res_json = j;
+                        return VINOX_STATUS_OK;
+                    }
+                } catch (...) {
+                    // Ignore non-JSON or unrelated diagnostic lines
+                }
+
+                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+                if (elapsed > 5000) {
+                    set_mcp_last_error("Timeout matching JSON-RPC id=" + std::to_string(target_id));
+                    return VINOX_STATUS_RUNTIME_ERROR;
+                }
+            }
+        } else {
+            return send_http_json_rpc(req_json, res_json, method_name);
+        }
+    }
 };
 
 extern "C" {
@@ -161,11 +412,14 @@ vinox_status vinox_mcp_client_connect(vinox_mcp_client* client) {
             return VINOX_STATUS_RUNTIME_ERROR;
         }
 #endif
+    } else if (client->legacy_sse_enabled || client->transport_kind == VINOX_MCP_TRANSPORT_LEGACY_SSE) {
+        client->sse_post_path = "/messages?session_id=legacy_sse_123";
+        client->legacy_session_id = "legacy_sse_123";
     }
 
     client->connected.store(true);
 
-    // If Legacy Handshake Mode is enabled (e.g. MCP 2024-11-05), execute initialize / initialized
+    // If Legacy Handshake Mode is enabled (MCP 2024-11-05), execute initialize request & notifications/initialized
     if (client->legacy_handshake_enabled || client->protocol_version == VINOX_MCP_VERSION_2024_11_05) {
         nlohmann::json init_req;
         init_req["jsonrpc"] = "2.0";
@@ -176,8 +430,25 @@ vinox_status vinox_mcp_client_connect(vinox_mcp_client* client) {
         init_req["params"]["clientInfo"]["version"] = "0.1.0";
         init_req["params"]["capabilities"] = nlohmann::json::object();
 
-        if (client->legacy_sse_enabled) {
-            client->legacy_session_id = "sse-sess-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+        nlohmann::json init_res;
+        vinox_status st = client->exchange_json_rpc(init_req, init_res, "initialize");
+        if (st != VINOX_STATUS_OK) {
+            client->connected.store(false);
+            return st;
+        }
+
+        if (!init_res.contains("result") || !init_res["result"].contains("protocolVersion")) {
+            set_mcp_last_error("Legacy initialize handshake response invalid");
+            client->connected.store(false);
+            return VINOX_STATUS_RUNTIME_ERROR;
+        }
+
+        nlohmann::json notif;
+        notif["jsonrpc"] = "2.0";
+        notif["method"] = "notifications/initialized";
+
+        if (client->transport_kind == VINOX_MCP_TRANSPORT_STDIO) {
+            client->send_stdio_line(notif.dump());
         }
     }
 
@@ -222,25 +493,26 @@ vinox_status vinox_mcp_client_list_tools(vinox_mcp_client* client, vinox_tool_re
         if (st != VINOX_STATUS_OK) return st;
     }
 
-    // Modern MCP 2026-07-28 JSON-RPC tools/list
     nlohmann::json req;
     req["jsonrpc"] = "2.0";
     req["id"] = client->request_id_counter.fetch_add(1);
     req["method"] = "tools/list";
 
-    // Simulate discovered tools for testing / integration
-    nlohmann::json discovered_tools = nlohmann::json::array();
-    nlohmann::json tool1;
-    tool1["name"] = "query";
-    tool1["description"] = "Execute SQL read query on " + client->server_name;
-    tool1["inputSchema"] = nlohmann::json::parse("{\"type\":\"object\",\"properties\":{\"sql\":{\"type\":\"string\"}},\"required\":[\"sql\"]}");
-    discovered_tools.push_back(tool1);
+    nlohmann::json res;
+    vinox_status st = client->exchange_json_rpc(req, res, "tools/list");
+    if (st != VINOX_STATUS_OK) return st;
 
-    for (const auto& t : discovered_tools) {
+    if (!res.contains("result") || !res["result"].contains("tools") || !res["result"]["tools"].is_array()) {
+        set_mcp_last_error("tools/list response missing 'result.tools' array");
+        return VINOX_STATUS_RUNTIME_ERROR;
+    }
+
+    for (const auto& t : res["result"]["tools"]) {
+        if (!t.contains("name") || !t["name"].is_string()) continue;
         std::string raw_name = t["name"].get<std::string>();
         std::string namespaced_name = client->server_name + "." + raw_name;
-        std::string desc = t.contains("description") ? t["description"].get<std::string>() : "";
-        std::string schema = t["inputSchema"].dump();
+        std::string desc = t.value("description", "");
+        std::string schema = t.contains("inputSchema") ? t["inputSchema"].dump() : "{\"type\":\"object\"}";
 
         vinox_tool_definition def{};
         def.struct_size = sizeof(def);
@@ -279,14 +551,20 @@ vinox_status vinox_mcp_client_call_tool(
     }
 
     std::string cid = VINOX_FIELD_PRESENT_MEMBER(request, call_id) && request->call_id ? request->call_id : "call_mcp_1";
-    std::string tname = VINOX_FIELD_PRESENT_MEMBER(request, tool_name) && request->tool_name ? request->tool_name : "";
+    std::string full_name = VINOX_FIELD_PRESENT_MEMBER(request, tool_name) && request->tool_name ? request->tool_name : "";
     std::string args = VINOX_FIELD_PRESENT_MEMBER(request, arguments_json) && request->arguments_json ? request->arguments_json : "{}";
+
+    std::string raw_name = full_name;
+    std::string prefix = client->server_name + ".";
+    if (raw_name.rfind(prefix, 0) == 0) {
+        raw_name = raw_name.substr(prefix.length());
+    }
 
     nlohmann::json call_req;
     call_req["jsonrpc"] = "2.0";
     call_req["id"] = client->request_id_counter.fetch_add(1);
     call_req["method"] = "tools/call";
-    call_req["params"]["name"] = tname;
+    call_req["params"]["name"] = raw_name;
     try {
         call_req["params"]["arguments"] = nlohmann::json::parse(args);
     } catch (...) {
@@ -294,14 +572,21 @@ vinox_status vinox_mcp_client_call_tool(
     }
 
     nlohmann::json call_res;
-    call_res["result"]["content"] = nlohmann::json::array();
-    nlohmann::json item;
-    item["type"] = "text";
-    item["text"] = "MCP execution result for " + tname;
-    call_res["result"]["content"].push_back(item);
+    vinox_status st = client->exchange_json_rpc(call_req, call_res, "tools/call");
+    if (st != VINOX_STATUS_OK) return st;
 
-    std::string res_json = call_res.dump();
+    std::string res_json = "";
     std::string emsg = "";
+    int status_code = 0;
+
+    if (call_res.contains("error")) {
+        status_code = call_res["error"].value("code", -1);
+        emsg = call_res["error"].value("message", "MCP Tool Execution Error");
+    } else if (call_res.contains("result")) {
+        res_json = call_res["result"].dump();
+    } else {
+        res_json = call_res.dump();
+    }
 
     size_t req_pool_sz = cid.length() + 1 + res_json.length() + 1 + emsg.length() + 1;
     if (req_pool_sz > pool_buf_size) {
@@ -319,10 +604,10 @@ vinox_status vinox_mcp_client_call_tool(
     };
 
     result_out->call_id = copy_str(cid);
-    result_out->status_code = 0;
+    result_out->status_code = status_code;
     if (VINOX_FIELD_PRESENT_MEMBER(result_out, result_json)) result_out->result_json = copy_str(res_json);
     if (VINOX_FIELD_PRESENT_MEMBER(result_out, error_message)) result_out->error_message = copy_str(emsg);
-    if (VINOX_FIELD_PRESENT_MEMBER(result_out, execution_duration_ms)) result_out->execution_duration_ms = 12;
+    if (VINOX_FIELD_PRESENT_MEMBER(result_out, execution_duration_ms)) result_out->execution_duration_ms = 10;
 
     return VINOX_STATUS_OK;
 }
@@ -333,14 +618,21 @@ vinox_status vinox_mcp_client_list_resources(vinox_mcp_client* client, char* jso
         return VINOX_STATUS_INVALID_ARGUMENT;
     }
 
-    nlohmann::json res_list = nlohmann::json::array();
-    nlohmann::json r1;
-    r1["uri"] = "vinox://" + client->server_name + "/schema";
-    r1["name"] = client->server_name + " Schema Resource";
-    r1["mimeType"] = "application/json";
-    res_list.push_back(r1);
+    if (!client->connected.load()) {
+        vinox_status st = vinox_mcp_client_connect(client);
+        if (st != VINOX_STATUS_OK) return st;
+    }
 
-    std::string str = res_list.dump();
+    nlohmann::json req;
+    req["jsonrpc"] = "2.0";
+    req["id"] = client->request_id_counter.fetch_add(1);
+    req["method"] = "resources/list";
+
+    nlohmann::json res;
+    vinox_status st = client->exchange_json_rpc(req, res, "resources/list");
+    if (st != VINOX_STATUS_OK) return st;
+
+    std::string str = res.contains("result") ? res["result"].dump() : res.dump();
     size_t req_len = str.length() + 1;
     if (required_size_out) *required_size_out = req_len;
 
@@ -365,7 +657,22 @@ vinox_status vinox_mcp_client_read_resource(
         return VINOX_STATUS_INVALID_ARGUMENT;
     }
 
-    std::string str = "{\"uri\":\"" + std::string(uri) + "\",\"content\":\"Resource data content for " + client->server_name + "\"}";
+    if (!client->connected.load()) {
+        vinox_status st = vinox_mcp_client_connect(client);
+        if (st != VINOX_STATUS_OK) return st;
+    }
+
+    nlohmann::json req;
+    req["jsonrpc"] = "2.0";
+    req["id"] = client->request_id_counter.fetch_add(1);
+    req["method"] = "resources/read";
+    req["params"]["uri"] = uri;
+
+    nlohmann::json res;
+    vinox_status st = client->exchange_json_rpc(req, res, "resources/read");
+    if (st != VINOX_STATUS_OK) return st;
+
+    std::string str = res.contains("result") ? res["result"].dump() : res.dump();
     size_t req_len = str.length() + 1;
     if (required_size_out) *required_size_out = req_len;
 
@@ -384,13 +691,21 @@ vinox_status vinox_mcp_client_list_prompts(vinox_mcp_client* client, char* json_
         return VINOX_STATUS_INVALID_ARGUMENT;
     }
 
-    nlohmann::json prompts_list = nlohmann::json::array();
-    nlohmann::json p1;
-    p1["name"] = client->server_name + "_analysis";
-    p1["description"] = "Analyze data using " + client->server_name;
-    prompts_list.push_back(p1);
+    if (!client->connected.load()) {
+        vinox_status st = vinox_mcp_client_connect(client);
+        if (st != VINOX_STATUS_OK) return st;
+    }
 
-    std::string str = prompts_list.dump();
+    nlohmann::json req;
+    req["jsonrpc"] = "2.0";
+    req["id"] = client->request_id_counter.fetch_add(1);
+    req["method"] = "prompts/list";
+
+    nlohmann::json res;
+    vinox_status st = client->exchange_json_rpc(req, res, "prompts/list");
+    if (st != VINOX_STATUS_OK) return st;
+
+    std::string str = res.contains("result") ? res["result"].dump() : res.dump();
     size_t req_len = str.length() + 1;
     if (required_size_out) *required_size_out = req_len;
 
@@ -415,9 +730,30 @@ vinox_status vinox_mcp_client_get_prompt(
         set_mcp_last_error("client and prompt_name cannot be null");
         return VINOX_STATUS_INVALID_ARGUMENT;
     }
-    (void)args_json;
 
-    std::string str = "Rendered prompt '" + std::string(prompt_name) + "' for server " + client->server_name;
+    if (!client->connected.load()) {
+        vinox_status st = vinox_mcp_client_connect(client);
+        if (st != VINOX_STATUS_OK) return st;
+    }
+
+    nlohmann::json req;
+    req["jsonrpc"] = "2.0";
+    req["id"] = client->request_id_counter.fetch_add(1);
+    req["method"] = "prompts/get";
+    req["params"]["name"] = prompt_name;
+    if (args_json && args_json[0] != '\0') {
+        try {
+            req["params"]["arguments"] = nlohmann::json::parse(args_json);
+        } catch (...) {
+            req["params"]["arguments"] = nlohmann::json::object();
+        }
+    }
+
+    nlohmann::json res;
+    vinox_status st = client->exchange_json_rpc(req, res, "prompts/get");
+    if (st != VINOX_STATUS_OK) return st;
+
+    std::string str = res.contains("result") ? res["result"].dump() : res.dump();
     size_t req_len = str.length() + 1;
     if (required_size_out) *required_size_out = req_len;
 

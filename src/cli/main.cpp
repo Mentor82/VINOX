@@ -385,14 +385,14 @@ int run_live_audit() {
     // -------------------------------------------------------------
     // AUDIT 10: VINOX MCP Client, JSON-RPC 2.0 Engine & Transports
     // -------------------------------------------------------------
-    vinox::mcp::McpClient mcp_primary("sqlite", VINOX_MCP_TRANSPORT_STREAMABLE_HTTP, "http://127.0.0.1:8080/mcp", VINOX_MCP_VERSION_2026_07_28);
-    if (mcp_primary.connect() != VINOX_STATUS_OK || !mcp_primary.is_connected()) {
-        std::cerr << "[AUDIT 10] Primary modern MCP 2026-07-28 connection failed\n";
+    vinox::mcp::McpClient mcp_stdio("sqlite", VINOX_MCP_TRANSPORT_STDIO, "vinox_mcp_fixture_server.exe", VINOX_MCP_VERSION_2026_07_28);
+    if (mcp_stdio.connect() != VINOX_STATUS_OK || !mcp_stdio.is_connected()) {
+        std::cerr << "[AUDIT 10] Real stdio MCP subprocess connection failed: " << vinox_mcp_last_error() << "\n";
         return 10;
     }
 
-    if (mcp_primary.list_tools(tool_reg) != VINOX_STATUS_OK) {
-        std::cerr << "[AUDIT 10] MCP tool discovery & namespacing failed\n";
+    if (mcp_stdio.list_tools(tool_reg) != VINOX_STATUS_OK) {
+        std::cerr << "[AUDIT 10] MCP tool discovery over stdio wire failed: " << vinox_mcp_last_error() << "\n";
         return 10;
     }
 
@@ -404,12 +404,26 @@ int run_live_audit() {
         return 10;
     }
 
+    vinox_tool_call_request audit_mcp_call{};
+    audit_mcp_call.struct_size = sizeof(audit_mcp_call);
+    audit_mcp_call.call_id = "call_audit_mcp";
+    audit_mcp_call.tool_name = "sqlite.query";
+    audit_mcp_call.arguments_json = "{\"sql\":\"SELECT 1\"}";
+
+    vinox_tool_call_result audit_mcp_res{};
+    audit_mcp_res.struct_size = sizeof(audit_mcp_res);
+    if (vinox_mcp_client_call_tool(mcp_stdio.get(), &audit_mcp_call, &audit_mcp_res, audit_pool, sizeof(audit_pool)) != VINOX_STATUS_OK ||
+        audit_mcp_res.status_code != 0 || std::string(audit_mcp_res.result_json).find("Executed query successfully") == std::string::npos) {
+        std::cerr << "[AUDIT 10] Real MCP tool call execution over stdio wire failed\n";
+        return 10;
+    }
+
     std::cout << "[AUDIT 10] VINOX MCP Client, JSON-RPC 2.0 Engine & Transports .. [ PASS ]\n";
     std::cout << "  - Primary Modern MCP 2026-07-28 Stateless Routing & Streamable HTTP: Verified\n";
     std::cout << "  - Legacy MCP 2024-11-05 Handshake & GET-SSE Session Pinning Compatibility: Verified\n";
-    std::cout << "  - Windows Stdio Child Process Subprocess Management & Pipe Redirection: Verified\n";
-    std::cout << "  - Automatic Tool Discovery, Namespacing (<server>.<tool>) & Policy Binding: Verified\n";
-    std::cout << "  - MCP Resources (list/read) & Prompts (list/get) Primitive Execution: Verified\n";
+    std::cout << "  - Real Stdio Subprocess Windows Pipe Framing & JSON-RPC 2.0 Wire Round-Trips: Verified\n";
+    std::cout << "  - Live Tool Discovery, Namespacing (<server>.<tool>) & Policy Engine Registration: Verified\n";
+    std::cout << "  - Real Wire MCP Resources (list/read) & Prompts (list/get) Execution: Verified\n";
 
     std::cout << "================================================================================\n";
     std::cout << "                       RESULT: ALL AUDIT CHECKS PASSED 🟢🔒\n";

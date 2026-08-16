@@ -46,6 +46,9 @@ add_library(vinox::core ALIAS vinox_core)
 set_target_properties(vinox_core PROPERTIES EXPORT_NAME core)
 
 target_link_libraries(vinox_core PRIVATE nlohmann_json::nlohmann_json spdlog::spdlog)
+if(WIN32)
+    target_link_libraries(vinox_core PRIVATE winhttp)
+endif()
 
 target_compile_definitions(vinox_core
     PRIVATE
@@ -236,8 +239,12 @@ if(BUILD_TESTING)
     target_link_libraries(vinox_tools_smoke PRIVATE vinox::core)
     add_test(NAME tools_smoke COMMAND vinox_tools_smoke)
 
+    add_executable(vinox_mcp_fixture_server tests/mcp_fixture_server.cpp)
+    target_link_libraries(vinox_mcp_fixture_server PRIVATE nlohmann_json::nlohmann_json)
+
     add_executable(vinox_mcp_smoke tests/mcp_smoke.c)
     target_link_libraries(vinox_mcp_smoke PRIVATE vinox::core)
+    add_dependencies(vinox_mcp_smoke vinox_mcp_fixture_server)
     add_test(NAME mcp_smoke COMMAND vinox_mcp_smoke)
 
     add_test(NAME audit_smoke COMMAND vinox_cli --audit)

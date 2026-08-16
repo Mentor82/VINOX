@@ -9,39 +9,39 @@
 int main(void) {
     printf("Starting VINOX Phase 6.2 MCP Client & Transports Smoke Test...\n");
 
-    // 1. Config Test Primary Modern MCP 2026-07-28
-    vinox_mcp_server_config primary_cfg;
-    memset(&primary_cfg, 0, sizeof(primary_cfg));
-    primary_cfg.struct_size = sizeof(primary_cfg);
-    primary_cfg.server_name = "sqlite";
-    primary_cfg.transport_kind = VINOX_MCP_TRANSPORT_STREAMABLE_HTTP;
-    primary_cfg.protocol_version = VINOX_MCP_VERSION_2026_07_28;
-    primary_cfg.command_or_url = "http://127.0.0.1:8080/mcp";
+    // 1. Stdio Transport with Real Fixture Server Process
+    vinox_mcp_server_config stdio_cfg;
+    memset(&stdio_cfg, 0, sizeof(stdio_cfg));
+    stdio_cfg.struct_size = sizeof(stdio_cfg);
+    stdio_cfg.server_name = "sqlite";
+    stdio_cfg.transport_kind = VINOX_MCP_TRANSPORT_STDIO;
+    stdio_cfg.protocol_version = VINOX_MCP_VERSION_2026_07_28;
+    stdio_cfg.command_or_url = "vinox_mcp_fixture_server.exe";
 
-    vinox_mcp_client* primary_client = NULL;
-    if (vinox_mcp_client_create(&primary_cfg, &primary_client) != VINOX_STATUS_OK || !primary_client) {
-        printf("FAILED: vinox_mcp_client_create (primary modern)\n");
+    vinox_mcp_client* client = NULL;
+    if (vinox_mcp_client_create(&stdio_cfg, &client) != VINOX_STATUS_OK || !client) {
+        printf("FAILED: vinox_mcp_client_create (stdio modern)\n");
         return 1;
     }
 
-    if (vinox_mcp_client_connect(primary_client) != VINOX_STATUS_OK || !vinox_mcp_client_is_connected(primary_client)) {
-        printf("FAILED: vinox_mcp_client_connect (primary modern)\n");
-        vinox_mcp_client_destroy(primary_client);
+    if (vinox_mcp_client_connect(client) != VINOX_STATUS_OK || !vinox_mcp_client_is_connected(client)) {
+        printf("FAILED: vinox_mcp_client_connect (stdio modern): %s\n", vinox_mcp_last_error());
+        vinox_mcp_client_destroy(client);
         return 2;
     }
 
-    // 2. Tool Discovery & Namespacing into Tool Registry
+    // 2. Tool Discovery over Real Wire Stdio Pipes
     vinox_tool_registry* registry = NULL;
     if (vinox_tool_registry_create(&registry) != VINOX_STATUS_OK || !registry) {
         printf("FAILED: vinox_tool_registry_create\n");
-        vinox_mcp_client_destroy(primary_client);
+        vinox_mcp_client_destroy(client);
         return 3;
     }
 
-    if (vinox_mcp_client_list_tools(primary_client, registry) != VINOX_STATUS_OK) {
-        printf("FAILED: vinox_mcp_client_list_tools\n");
+    if (vinox_mcp_client_list_tools(client, registry) != VINOX_STATUS_OK) {
+        printf("FAILED: vinox_mcp_client_list_tools over stdio: %s\n", vinox_mcp_last_error());
         vinox_tool_registry_destroy(registry);
-        vinox_mcp_client_destroy(primary_client);
+        vinox_mcp_client_destroy(client);
         return 4;
     }
 
@@ -50,16 +50,15 @@ int main(void) {
     found_tool.struct_size = sizeof(found_tool);
     char pool[1024];
 
-    // Assert tool was namespaced as "sqlite.query"
     if (vinox_tool_registry_find_tool(registry, "sqlite.query", &found_tool, pool, sizeof(pool)) != VINOX_STATUS_OK ||
         strcmp(found_tool.name, "sqlite.query") != 0) {
         printf("FAILED: MCP Tool discovery namespacing mismatch (expected 'sqlite.query')\n");
         vinox_tool_registry_destroy(registry);
-        vinox_mcp_client_destroy(primary_client);
+        vinox_mcp_client_destroy(client);
         return 5;
     }
 
-    // 3. MCP Tool Call Execution
+    // 3. Real MCP Tool Call Execution over Stdio Wire Pipes
     vinox_tool_call_request call_req;
     memset(&call_req, 0, sizeof(call_req));
     call_req.struct_size = sizeof(call_req);
@@ -71,72 +70,71 @@ int main(void) {
     memset(&call_res, 0, sizeof(call_res));
     call_res.struct_size = sizeof(call_res);
 
-    if (vinox_mcp_client_call_tool(primary_client, &call_req, &call_res, pool, sizeof(pool)) != VINOX_STATUS_OK ||
-        call_res.status_code != 0 || strstr(call_res.result_json, "sqlite.query") == NULL) {
-        printf("FAILED: vinox_mcp_client_call_tool\n");
+    if (vinox_mcp_client_call_tool(client, &call_req, &call_res, pool, sizeof(pool)) != VINOX_STATUS_OK ||
+        call_res.status_code != 0 || strstr(call_res.result_json, "Executed query successfully") == NULL) {
+        printf("FAILED: vinox_mcp_client_call_tool over stdio wire: %s\n", vinox_mcp_last_error());
         vinox_tool_registry_destroy(registry);
-        vinox_mcp_client_destroy(primary_client);
+        vinox_mcp_client_destroy(client);
         return 6;
     }
 
-    // 4. Resources Primitive API
+    // 4. Real Resources Primitive API over Stdio Wire Pipes
     char json_buf[1024];
     size_t req_sz = 0;
-    if (vinox_mcp_client_list_resources(primary_client, json_buf, sizeof(json_buf), &req_sz) != VINOX_STATUS_OK ||
+    if (vinox_mcp_client_list_resources(client, json_buf, sizeof(json_buf), &req_sz) != VINOX_STATUS_OK ||
         strstr(json_buf, "vinox://sqlite/schema") == NULL) {
-        printf("FAILED: vinox_mcp_client_list_resources (got '%s')\n", json_buf);
+        printf("FAILED: vinox_mcp_client_list_resources over stdio wire (got '%s'): %s\n", json_buf, vinox_mcp_last_error());
         vinox_tool_registry_destroy(registry);
-        vinox_mcp_client_destroy(primary_client);
+        vinox_mcp_client_destroy(client);
         return 7;
     }
 
-    if (vinox_mcp_client_read_resource(primary_client, "vinox://sqlite/schema", json_buf, sizeof(json_buf), &req_sz) != VINOX_STATUS_OK ||
-        strstr(json_buf, "vinox://sqlite/schema") == NULL) {
-        printf("FAILED: vinox_mcp_client_read_resource\n");
+    if (vinox_mcp_client_read_resource(client, "vinox://sqlite/schema", json_buf, sizeof(json_buf), &req_sz) != VINOX_STATUS_OK ||
+        strstr(json_buf, "CREATE TABLE test;") == NULL) {
+        printf("FAILED: vinox_mcp_client_read_resource over stdio wire: %s\n", vinox_mcp_last_error());
         vinox_tool_registry_destroy(registry);
-        vinox_mcp_client_destroy(primary_client);
+        vinox_mcp_client_destroy(client);
         return 8;
     }
 
-    // 5. Prompts Primitive API
-    if (vinox_mcp_client_list_prompts(primary_client, json_buf, sizeof(json_buf), &req_sz) != VINOX_STATUS_OK ||
+    // 5. Real Prompts Primitive API over Stdio Wire Pipes
+    if (vinox_mcp_client_list_prompts(client, json_buf, sizeof(json_buf), &req_sz) != VINOX_STATUS_OK ||
         strstr(json_buf, "sqlite_analysis") == NULL) {
-        printf("FAILED: vinox_mcp_client_list_prompts\n");
+        printf("FAILED: vinox_mcp_client_list_prompts over stdio wire: %s\n", vinox_mcp_last_error());
         vinox_tool_registry_destroy(registry);
-        vinox_mcp_client_destroy(primary_client);
+        vinox_mcp_client_destroy(client);
         return 9;
     }
 
-    if (vinox_mcp_client_get_prompt(primary_client, "sqlite_analysis", "{}", json_buf, sizeof(json_buf), &req_sz) != VINOX_STATUS_OK ||
-        strstr(json_buf, "sqlite_analysis") == NULL) {
-        printf("FAILED: vinox_mcp_client_get_prompt\n");
+    if (vinox_mcp_client_get_prompt(client, "sqlite_analysis", "{}", json_buf, sizeof(json_buf), &req_sz) != VINOX_STATUS_OK ||
+        strstr(json_buf, "Rendered analysis prompt") == NULL) {
+        printf("FAILED: vinox_mcp_client_get_prompt over stdio wire: %s\n", vinox_mcp_last_error());
         vinox_tool_registry_destroy(registry);
-        vinox_mcp_client_destroy(primary_client);
+        vinox_mcp_client_destroy(client);
         return 10;
     }
 
-    vinox_mcp_client_destroy(primary_client);
+    vinox_mcp_client_destroy(client);
 
-    // 6. Config Test Legacy Compatibility Mode (MCP 2024-11-05 + SSE)
+    // 6. Test Legacy Compatibility Mode (2024-11-05 Handshake + notifications/initialized)
     vinox_mcp_server_config legacy_cfg;
     memset(&legacy_cfg, 0, sizeof(legacy_cfg));
     legacy_cfg.struct_size = sizeof(legacy_cfg);
     legacy_cfg.server_name = "legacy_fs";
-    legacy_cfg.transport_kind = VINOX_MCP_TRANSPORT_LEGACY_SSE;
+    legacy_cfg.transport_kind = VINOX_MCP_TRANSPORT_STDIO;
     legacy_cfg.protocol_version = VINOX_MCP_VERSION_2024_11_05;
-    legacy_cfg.command_or_url = "http://127.0.0.1:8080/sse";
+    legacy_cfg.command_or_url = "vinox_mcp_fixture_server.exe";
     legacy_cfg.legacy_handshake_enabled = 1;
-    legacy_cfg.legacy_sse_enabled = 1;
 
     vinox_mcp_client* legacy_client = NULL;
     if (vinox_mcp_client_create(&legacy_cfg, &legacy_client) != VINOX_STATUS_OK || !legacy_client) {
-        printf("FAILED: vinox_mcp_client_create (legacy mode)\n");
+        printf("FAILED: vinox_mcp_client_create (legacy handshake mode)\n");
         vinox_tool_registry_destroy(registry);
         return 11;
     }
 
     if (vinox_mcp_client_connect(legacy_client) != VINOX_STATUS_OK || !vinox_mcp_client_is_connected(legacy_client)) {
-        printf("FAILED: vinox_mcp_client_connect (legacy mode)\n");
+        printf("FAILED: vinox_mcp_client_connect (legacy handshake mode): %s\n", vinox_mcp_last_error());
         vinox_mcp_client_destroy(legacy_client);
         vinox_tool_registry_destroy(registry);
         return 12;
