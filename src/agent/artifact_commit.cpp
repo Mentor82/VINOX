@@ -214,15 +214,17 @@ VINOX_API vinox_status VINOX_CALL vinox_artifact_commit_diff(const char* overlay
 VINOX_API vinox_status VINOX_CALL vinox_artifact_commit_apply_snapshot(const char* overlay_dir, const char* target_dir, const char* expected_snapshot_hash) {
     if (!overlay_dir || !target_dir) return VINOX_STATUS_INVALID_ARGUMENT;
 
+    // Nephy Finding 5: Mandatory Snapshot Binding for Reviewed Takeover
+    if (!expected_snapshot_hash || strlen(expected_snapshot_hash) == 0) {
+        return VINOX_STATUS_INVALID_ARGUMENT; // Unreviewed takeover without snapshot hash rejected!
+    }
+
     fs::path overlay_path(overlay_dir);
     fs::path target_path(target_dir);
 
-    // Nephy Finding 5: Review->Apply Target Conflict Detection & Snapshot Binding
-    if (expected_snapshot_hash && strlen(expected_snapshot_hash) > 0) {
-        std::string current_snapshot = compute_target_snapshot_hash(target_path);
-        if (current_snapshot != std::string(expected_snapshot_hash)) {
-            return VINOX_STATUS_INVALID_STATE; // Conflict detected: target workspace was modified since review!
-        }
+    std::string current_snapshot = compute_target_snapshot_hash(target_path);
+    if (current_snapshot != std::string(expected_snapshot_hash)) {
+        return VINOX_STATUS_INVALID_STATE; // Conflict detected: target workspace was modified since review!
     }
 
     if (!fs::exists(overlay_path)) return VINOX_STATUS_OK;

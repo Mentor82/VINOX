@@ -9,7 +9,7 @@
 #endif
 
 int main(void) {
-    printf("Starting VINOX Phase 7 Sandbox Isolation & Atomic Takeover Smoke Test...\n");
+    printf("Starting VINOX Phase 7 Sandbox Isolation & Mandatory Reviewed Takeover Smoke Test...\n");
 
     const char* overlay_dir = ".test_overlay";
     const char* target_dir = ".test_target";
@@ -66,15 +66,23 @@ int main(void) {
     }
     printf("  [PASS 04] Truthful Artifact Unified Diff & Target Snapshot Engine: Verified (Snapshot: %.16s...)\n", snapshot_hash);
 
-    /* 5. Negative Test: Review->Apply Target Conflict Detection Rejection */
+    /* 5. Negative Test: Mandatory Snapshot Requirement Rejection */
+    if (vinox_artifact_commit_apply(overlay_dir, target_dir) == VINOX_STATUS_OK) {
+        printf("FAILED: vinox_artifact_commit_apply without snapshot hash MUST fail!\n");
+        vinox_sandbox_host_destroy(host);
+        return 1;
+    }
+    printf("  [PASS 05] Mandatory Snapshot Binding (Unreviewed Takeover Rejection): Verified\n");
+
+    /* 6. Negative Test: Review->Apply Target Conflict Detection Rejection */
     if (vinox_artifact_commit_apply_snapshot(overlay_dir, target_dir, "invalid_snapshot_hash_1234567890") == VINOX_STATUS_OK) {
         printf("FAILED: vinox_artifact_commit_apply_snapshot must fail on target conflict!\n");
         vinox_sandbox_host_destroy(host);
         return 1;
     }
-    printf("  [PASS 05] Review->Apply Target Conflict Detection (INVALID_STATE Rejection): Verified\n");
+    printf("  [PASS 06] Review->Apply Target Conflict Detection (INVALID_STATE Rejection): Verified\n");
 
-    /* 6. Atomic Backup-and-Swap Workspace Takeover Commit with Snapshot Verification */
+    /* 7. Atomic Backup-and-Swap Workspace Takeover Commit with Snapshot Verification */
     if (vinox_artifact_commit_apply_snapshot(overlay_dir, target_dir, snapshot_hash) != VINOX_STATUS_OK) {
         printf("FAILED: vinox_artifact_commit_apply_snapshot failed for matching snapshot\n");
         vinox_sandbox_host_destroy(host);
@@ -89,7 +97,7 @@ int main(void) {
         return 1;
     }
     fclose(f);
-    printf("  [PASS 06] Atomic Backup-and-Swap Takeover & Target Workspace Commit: Verified\n");
+    printf("  [PASS 07] Atomic Backup-and-Swap Takeover & Target Workspace Commit: Verified\n");
 
     /* Stop Sandbox Host */
     vinox_sandbox_host_stop(host);

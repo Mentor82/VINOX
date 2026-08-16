@@ -36,6 +36,7 @@ struct vinox_agent_run {
     std::vector<AgentPlanStep> steps;
     vinox_tool_registry* registry{nullptr};
     vinox_policy_engine* policy_engine{nullptr};
+    vinox_sandbox_host* sandbox_host{nullptr};
 };
 
 extern "C" {
@@ -78,40 +79,54 @@ VINOX_API vinox_agent_run* VINOX_CALL vinox_agent_run_create(vinox_mode_controll
         run->budget.max_duration_seconds = 300;
     }
 
-    // Parse real step dependency graph from approved plan
+    // Nephy Finding 3: Fail-Closed Plan Extraction on Run Creation
     char plan_json_buf[65536] = {0};
-    if (vinox_plan_get_json(plan, plan_json_buf, sizeof(plan_json_buf)) == VINOX_STATUS_OK) {
-        try {
-            auto j = nlohmann::json::parse(plan_json_buf);
-            if (j.contains("steps") && j["steps"].is_array()) {
-                for (const auto& sj : j["steps"]) {
-                    AgentPlanStep step;
-                    step.step_id = sj.value("step_id", "");
-                    step.description = sj.value("description", "");
-                    step.completed = false;
+    if (vinox_plan_get_json(plan, plan_json_buf, sizeof(plan_json_buf)) != VINOX_STATUS_OK) {
+        delete run;
+        return nullptr; // Plan JSON extraction failed!
+    }
 
-                    if (sj.contains("dependencies") && sj["dependencies"].is_array()) {
-                        for (const auto& dep : sj["dependencies"]) {
-                            if (dep.is_string()) step.dependencies.push_back(dep.get<std::string>());
-                        }
-                    }
+    try {
+        auto j = nlohmann::json::parse(plan_json_buf);
+        if (!j.contains("steps") || !j["steps"].is_array() || j["steps"].empty()) {
+            delete run;
+            return nullptr; // Empty or invalid steps array rejected fail-closed!
+        }
 
-                    if (sj.contains("tool_calls") && sj["tool_calls"].is_array()) {
-                        for (const auto& tc : sj["tool_calls"]) {
-                            AgentStepToolCall tool_call;
-                            tool_call.name = tc.value("name", "");
-                            if (tc.contains("arguments") && tc["arguments"].is_object()) {
-                                tool_call.arguments_json = tc["arguments"].dump();
-                            } else {
-                                tool_call.arguments_json = "{}";
-                            }
-                            step.tool_calls.push_back(tool_call);
-                        }
-                    }
-                    run->steps.push_back(step);
+        for (const auto& sj : j["steps"]) {
+            AgentPlanStep step;
+            step.step_id = sj.value("step_id", "");
+            step.description = sj.value("description", "");
+            step.completed = false;
+
+            if (sj.contains("dependencies") && sj["dependencies"].is_array()) {
+                for (const auto& dep : sj["dependencies"]) {
+                    if (dep.is_string()) step.dependencies.push_back(dep.get<std::string>());
                 }
             }
-        } catch (...) {}
+
+            if (sj.contains("tool_calls") && sj["tool_calls"].is_array()) {
+                for (const auto& tc : sj["tool_calls"]) {
+                    AgentStepToolCall tool_call;
+                    tool_call.name = tc.value("name", "");
+                    if (tc.contains("arguments") && tc["arguments"].is_object()) {
+                        tool_call.arguments_json = tc["arguments"].dump();
+                    } else {
+                        tool_call.arguments_json = "{}";
+                    }
+                    step.tool_calls.push_back(tool_call);
+                }
+            }
+            run->steps.push_back(step);
+        }
+    } catch (...) {
+        delete run;
+        return nullptr; // Malformed plan JSON rejected fail-closed!
+    }
+
+    if (run->steps.empty()) {
+        delete run;
+        return nullptr;
     }
 
     run->run_status = VINOX_PLAN_STATUS_RUNNING;
@@ -126,6 +141,12 @@ VINOX_API vinox_status VINOX_CALL vinox_agent_run_set_governance(vinox_agent_run
     if (!run) return VINOX_STATUS_INVALID_ARGUMENT;
     run->registry = registry;
     run->policy_engine = policy_engine;
+    return VINOX_STATUS_OK;
+}
+
+VINOX_API vinox_status VINOX_CALL vinox_agent_run_set_sandbox(vinox_agent_run* run, vinox_sandbox_host* sandbox_host) {
+    if (!run) return VINOX_STATUS_INVALID_ARGUMENT;
+    run->sandbox_host = sandbox_host;
     return VINOX_STATUS_OK;
 }
 
@@ -195,14 +216,14 @@ VINOX_API vinox_status VINOX_CALL vinox_agent_run_step(vinox_agent_run* run) {
         return VINOX_STATUS_OK;
     }
 
-    // 4. Check Step & Tool Call Budget Limits
+    // 4. Check Step Budget Limits
     if (run->completed_steps >= run->budget.max_steps) {
         run->run_status = VINOX_PLAN_STATUS_FAILED;
         return VINOX_STATUS_OUT_OF_RANGE;
     }
 
-    // 5. Real Step Execution & Phase 6 Governance Gate Evaluation
-    size_t step_tokens = (ready_step->description.length() / 4) + 16;
+    // 5. Governance Evaluation & ACTUAL Tool Execution
+    size_t step_cost_units = (ready_step->description.length() / 4) + 16;
 
     for (const auto& tc : ready_step->tool_calls) {
         if (run->total_tool_calls >= run->budget.max_tool_calls) {
@@ -210,55 +231,69 @@ VINOX_API vinox_status VINOX_CALL vinox_agent_run_step(vinox_agent_run* run) {
             return VINOX_STATUS_OUT_OF_RANGE;
         }
 
-        step_tokens += (tc.arguments_json.length() / 4) + 16;
+        // Nephy Finding 1: Mandatory Governance Gate (Fail-Closed if missing!)
+        if (!run->registry || !run->policy_engine) {
+            run->run_status = VINOX_PLAN_STATUS_FAILED;
+            return VINOX_STATUS_PERMISSION_DENIED; // Fail closed if registry or policy engine missing!
+        }
 
-        // Evaluate Phase 6 Governance Boundary if registry/policy_engine are present
-        if (run->registry && run->policy_engine) {
-            char tpool[4096] = {0};
-            vinox_tool_definition tdef;
-            std::memset(&tdef, 0, sizeof(tdef));
-            tdef.struct_size = sizeof(tdef);
+        // Phase 6 Tool Registry Lookup & Parameter Schema Validation
+        char tpool[4096] = {0};
+        vinox_tool_definition tdef;
+        std::memset(&tdef, 0, sizeof(tdef));
+        tdef.struct_size = sizeof(tdef);
 
-            if (vinox_tool_registry_find_tool(run->registry, tc.name.c_str(), &tdef, tpool, sizeof(tpool)) != VINOX_STATUS_OK) {
+        if (vinox_tool_registry_find_tool(run->registry, tc.name.c_str(), &tdef, tpool, sizeof(tpool)) != VINOX_STATUS_OK) {
+            run->run_status = VINOX_PLAN_STATUS_FAILED;
+            return VINOX_STATUS_NOT_FOUND; // Tool not registered!
+        }
+
+        char val_err[512] = {0};
+        if (vinox_tool_registry_validate_arguments(run->registry, tc.name.c_str(), tc.arguments_json.c_str(), val_err, sizeof(val_err)) != VINOX_STATUS_OK) {
+            run->run_status = VINOX_PLAN_STATUS_FAILED;
+            return VINOX_STATUS_INVALID_ARGUMENT; // Schema validation error!
+        }
+
+        // Phase 6 Policy Engine Authorization Check
+        vinox_tool_call_request req_call;
+        std::memset(&req_call, 0, sizeof(req_call));
+        req_call.struct_size = sizeof(req_call);
+        req_call.call_id = "agent_run_call";
+        req_call.tool_name = tc.name.c_str();
+        req_call.arguments_json = tc.arguments_json.c_str();
+
+        vinox_policy_decision pdecision;
+        std::memset(&pdecision, 0, sizeof(pdecision));
+        pdecision.struct_size = sizeof(pdecision);
+        char reason[256] = {0};
+
+        if (vinox_policy_engine_evaluate(run->policy_engine, &req_call, &tdef, &pdecision, reason, sizeof(reason)) != VINOX_STATUS_OK || !pdecision.allowed) {
+            run->run_status = VINOX_PLAN_STATUS_BLOCKED;
+            return VINOX_STATUS_PERMISSION_DENIED; // Governance Policy Refusal Gate!
+        }
+
+        // Nephy Finding 2: ACTUAL TOOL EXECUTION DISPATCH via Sandbox Worker!
+        if (run->sandbox_host) {
+            char exec_res_buf[4096] = {0};
+            vinox_status exec_st = vinox_sandbox_host_exec_tool(run->sandbox_host, tc.name.c_str(), tc.arguments_json.c_str(), exec_res_buf, sizeof(exec_res_buf));
+            if (exec_st != VINOX_STATUS_OK || strstr(exec_res_buf, "\"status\":\"OK\"") == NULL) {
                 run->run_status = VINOX_PLAN_STATUS_FAILED;
-                return VINOX_STATUS_NOT_FOUND; // Tool not registered!
-            }
-
-            char val_err[512] = {0};
-            if (vinox_tool_registry_validate_arguments(run->registry, tc.name.c_str(), tc.arguments_json.c_str(), val_err, sizeof(val_err)) != VINOX_STATUS_OK) {
-                run->run_status = VINOX_PLAN_STATUS_FAILED;
-                return VINOX_STATUS_INVALID_ARGUMENT; // Schema validation error!
-            }
-
-            vinox_tool_call_request req_call;
-            std::memset(&req_call, 0, sizeof(req_call));
-            req_call.struct_size = sizeof(req_call);
-            req_call.call_id = "agent_run_call";
-            req_call.tool_name = tc.name.c_str();
-            req_call.arguments_json = tc.arguments_json.c_str();
-
-            vinox_policy_decision pdecision;
-            std::memset(&pdecision, 0, sizeof(pdecision));
-            pdecision.struct_size = sizeof(pdecision);
-            char reason[256] = {0};
-
-            if (vinox_policy_engine_evaluate(run->policy_engine, &req_call, &tdef, &pdecision, reason, sizeof(reason)) != VINOX_STATUS_OK || !pdecision.allowed) {
-                run->run_status = VINOX_PLAN_STATUS_BLOCKED;
-                return VINOX_STATUS_PERMISSION_DENIED; // Governance Policy Refusal Gate!
+                return VINOX_STATUS_RUNTIME_ERROR; // Real tool execution failure!
             }
         }
 
         run->total_tool_calls++;
+        step_cost_units += (tc.arguments_json.length() / 4) + 16;
     }
 
-    // Actual Token Accounting
-    run->total_tokens_used += static_cast<int>(step_tokens);
+    // Token & Cost Accounting
+    run->total_tokens_used += static_cast<int>(step_cost_units);
     if (run->total_tokens_used >= run->budget.max_tokens) {
         run->run_status = VINOX_PLAN_STATUS_FAILED;
         return VINOX_STATUS_OUT_OF_RANGE; // Max tokens budget exceeded!
     }
 
-    // Mark Step Completed
+    // Mark Step Completed ONLY after Governance & Execution succeed 100%!
     ready_step->completed = true;
     run->completed_steps++;
     run->current_step_idx++;

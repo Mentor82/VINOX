@@ -57,24 +57,32 @@ int main(void) {
         printf("FAILED: Failed to create policy engine\n");
         return 1;
     }
-    vinox_policy_engine_set_rule(policy_engine, "vinox.*", VINOX_SECURITY_CLASS_READ_ONLY, VINOX_APPROVAL_AUTO_ALLOWED);
+    vinox_policy_engine_set_rule(policy_engine, "local_write.*", VINOX_SECURITY_CLASS_LOCAL_WRITE, VINOX_APPROVAL_AUTO_ALLOWED);
 
-    vinox_tool_definition search_tool;
-    memset(&search_tool, 0, sizeof(search_tool));
-    search_tool.struct_size = sizeof(search_tool);
-    search_tool.name = "vinox.search";
-    search_tool.description = "Search VINOX memory";
-    search_tool.parameters_json_schema = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"],\"additionalProperties\":false}";
-    search_tool.security_class = VINOX_SECURITY_CLASS_READ_ONLY;
-    vinox_tool_registry_register_tool(registry, &search_tool);
+    vinox_tool_definition write_tool;
+    memset(&write_tool, 0, sizeof(write_tool));
+    write_tool.struct_size = sizeof(write_tool);
+    write_tool.name = "local_write.write";
+    write_tool.description = "Write file in sandbox";
+    write_tool.parameters_json_schema = "{\"type\":\"object\",\"properties\":{\"filename\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"filename\",\"content\"],\"additionalProperties\":false}";
+    write_tool.security_class = VINOX_SECURITY_CLASS_LOCAL_WRITE;
+    vinox_tool_registry_register_tool(registry, &write_tool);
 
-    /* 3. Real Multi-Step Dependency Graph Plan */
+    /* 3. Setup Sandbox Host */
+    const char* overlay_dir = ".agent_test_overlay";
+    vinox_sandbox_host* sandbox_host = vinox_sandbox_host_create(overlay_dir);
+    if (!sandbox_host || vinox_sandbox_host_start(sandbox_host, "vinox_sandbox_worker.exe") != VINOX_STATUS_OK) {
+        printf("FAILED: vinox_sandbox_host_start failed\n");
+        return 1;
+    }
+
+    /* 4. Real Multi-Step Dependency Graph Plan */
     const char* multi_step_plan_json =
         "{"
         "  \"goal\": \"Multi-step dependency resolution test\","
         "  \"steps\": ["
-        "    {\"step_id\": \"step_1\", \"description\": \"Inspect memory\", \"tool_calls\": [{\"name\": \"vinox.search\", \"arguments\": {\"query\": \"VINOX\"}}]},"
-        "    {\"step_id\": \"step_2\", \"description\": \"Process search results\", \"dependencies\": [\"step_1\"]}"
+        "    {\"step_id\": \"step_1\", \"description\": \"Write artifact in sandbox\", \"tool_calls\": [{\"name\": \"local_write.write\", \"arguments\": {\"filename\": \"agent_out.txt\", \"content\": \"Agent Sandbox Success!\"}}]},"
+        "    {\"step_id\": \"step_2\", \"description\": \"Finalize step\", \"dependencies\": [\"step_1\"]}"
         "  ]"
         "}";
 
@@ -88,7 +96,7 @@ int main(void) {
     vinox_plan_compute_hash(plan, plan_hash, sizeof(plan_hash));
     vinox_plan_approve(plan, plan_hash);
 
-    /* 4. Real Agent Step Execution with Governance Gate & Dependency Resolution */
+    /* 5. Fail-Closed Test: Step Execution FAILS if Governance is Missing */
     vinox_agent_budget budget;
     memset(&budget, 0, sizeof(budget));
     budget.struct_size = sizeof(budget);
@@ -97,14 +105,29 @@ int main(void) {
     budget.max_tool_calls = 10;
     budget.max_duration_seconds = 60;
 
+    vinox_agent_run* ungov_run = vinox_agent_run_create(controller, plan, &budget);
+    if (!ungov_run) {
+        printf("FAILED: vinox_agent_run_create returned NULL\n");
+        return 1;
+    }
+
+    if (vinox_agent_run_step(ungov_run) != VINOX_STATUS_PERMISSION_DENIED) {
+        printf("FAILED: Step with tool call MUST fail closed if governance is missing!\n");
+        return 1;
+    }
+    vinox_agent_run_destroy(ungov_run);
+    printf("  [PASS 02] Missing Governance Fail-Closed Gate (PERMISSION_DENIED): Verified\n");
+
+    /* 6. Real Agent Step Execution with Mandatory Governance & ACTUAL Sandbox Tool Execution */
     vinox_agent_run* run = vinox_agent_run_create(controller, plan, &budget);
     if (!run) {
         printf("FAILED: vinox_agent_run_create returned NULL\n");
         return 1;
     }
     vinox_agent_run_set_governance(run, registry, policy_engine);
+    vinox_agent_run_set_sandbox(run, sandbox_host);
 
-    /* Step 1 Execution (vinox.search evaluated via Phase 6 Registry/Policy) */
+    /* Step 1 Execution (local_write.write evaluated via Governance & ACTUAL Sandbox Execution) */
     if (vinox_agent_run_step(run) != VINOX_STATUS_OK) {
         printf("FAILED: Real agent step 1 execution failed!\n");
         return 1;
@@ -125,11 +148,28 @@ int main(void) {
         printf("FAILED: Step 2 completed count mismatch\n");
         return 1;
     }
-    printf("  [PASS 02] Real Multi-Step Dependency Execution & Phase 6 Governance Gate: Verified\n");
+    printf("  [PASS 03] Real Multi-Step Execution, Mandatory Governance & Actual Sandbox Dispatch: Verified\n");
+
+    /* 7. Plan Extraction Fail-Closed on Run Creation */
+    const char* empty_steps_plan_json = "{\"goal\":\"Invalid\",\"steps\":[]}";
+    vinox_plan* empty_plan = vinox_plan_create(empty_steps_plan_json);
+    if (empty_plan) {
+        vinox_plan_compute_hash(empty_plan, plan_hash, sizeof(plan_hash));
+        vinox_plan_approve(empty_plan, plan_hash);
+        vinox_agent_run* empty_run = vinox_agent_run_create(controller, empty_plan, &budget);
+        if (empty_run != NULL) {
+            printf("FAILED: vinox_agent_run_create must fail closed on empty plan steps!\n");
+            return 1;
+        }
+        vinox_plan_destroy(empty_plan);
+    }
+    printf("  [PASS 04] Empty Plan Extraction Fail-Closed Rejection: Verified\n");
 
     /* Cleanup */
     vinox_agent_run_destroy(run);
     vinox_plan_destroy(plan);
+    vinox_sandbox_host_stop(sandbox_host);
+    vinox_sandbox_host_destroy(sandbox_host);
     vinox_policy_engine_destroy(policy_engine);
     vinox_tool_registry_destroy(registry);
     vinox_mode_controller_destroy(controller);
