@@ -68,6 +68,9 @@ void run_http_server(int port) {
         std::istringstream line_stream(req_line);
         line_stream >> method >> path >> proto;
 
+        size_t qpos = path.find('?');
+        if (qpos != std::string::npos) path = path.substr(0, qpos);
+
         std::string proto_ver_hdr, mcp_method_hdr, mcp_name_hdr;
         std::string header_line;
 

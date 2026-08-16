@@ -253,6 +253,9 @@ if(BUILD_TESTING)
     add_dependencies(vinox_mcp_smoke vinox_mcp_fixture_server vinox_mcp_http_fixture_server)
     add_test(NAME mcp_smoke COMMAND vinox_mcp_smoke)
 
+    add_executable(vinox_docker_mcp_live_test tests/docker_mcp_live_test.cpp)
+    target_link_libraries(vinox_docker_mcp_live_test PRIVATE vinox::core nlohmann_json::nlohmann_json)
+
     add_test(NAME audit_smoke COMMAND vinox_cli --audit)
     if(WIN32 AND VINOX_OPENVINO_SDK_ROOT)
         set_tests_properties(audit_smoke PROPERTIES ENVIRONMENT

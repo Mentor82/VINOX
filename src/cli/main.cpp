@@ -442,6 +442,8 @@ int run_live_audit() {
             audit_http_call.tool_name = "http_sqlite.query";
             audit_http_call.arguments_json = "{\"sql\":\"SELECT 1\"}";
 
+            memset(&audit_mcp_res, 0, sizeof(audit_mcp_res));
+            audit_mcp_res.struct_size = sizeof(audit_mcp_res);
             vinox_mcp_client_call_tool(mcp_http.get(), &audit_http_call, &audit_mcp_res, audit_pool, sizeof(audit_pool));
         }
 

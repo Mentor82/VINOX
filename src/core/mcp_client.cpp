@@ -189,13 +189,32 @@ struct vinox_mcp_client {
             return VINOX_STATUS_RUNTIME_ERROR;
         }
 
-        std::wstring target_path = url_parts.path;
         if (legacy_sse_enabled && !sse_post_path.empty()) {
-            target_path = std::wstring(sse_post_path.begin(), sse_post_path.end());
+            url_parts.path = std::wstring(sse_post_path.begin(), sse_post_path.end());
         }
 
+        std::string path_str;
+        for (WCHAR wc : url_parts.path) path_str.push_back(static_cast<char>(wc));
+        if (path_str.empty()) path_str = "/";
+        if (!legacy_session_id.empty() && path_str.find("session_id=") == std::string::npos) {
+            if (path_str.find('?') == std::string::npos) {
+                path_str += "?session_id=" + legacy_session_id;
+            } else {
+                path_str += "&session_id=" + legacy_session_id;
+            }
+        }
+        std::wstring target_path(path_str.begin(), path_str.end());
+
         DWORD flags = url_parts.is_https ? WINHTTP_FLAG_SECURE : 0;
-        HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", target_path.c_str(), NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+        HINTERNET hRequest = WinHttpOpenRequest(
+            hConnect,
+            L"POST",
+            target_path.c_str(),
+            NULL,
+            WINHTTP_NO_REFERER,
+            WINHTTP_DEFAULT_ACCEPT_TYPES,
+            flags
+        );
         if (!hRequest) {
             WinHttpCloseHandle(hConnect);
             WinHttpCloseHandle(hSession);
@@ -213,7 +232,7 @@ struct vinox_mcp_client {
                                L"Mcp-Name: " + w_server_name + L"\r\n"
                                L"Mcp-Protocol-Version: " + proto_ver + L"\r\n";
 
-        if (legacy_sse_enabled && !legacy_session_id.empty()) {
+        if (!legacy_session_id.empty()) {
             std::wstring w_sess(legacy_session_id.begin(), legacy_session_id.end());
             headers += L"Mcp-Session-Id: " + w_sess + L"\r\n";
         }
@@ -249,6 +268,22 @@ struct vinox_mcp_client {
             return VINOX_STATUS_RUNTIME_ERROR;
         }
 
+        // Capture Mcp-Session-Id header if returned by server
+        WCHAR sess_buf[256] = {0};
+        DWORD sess_buf_sz = sizeof(sess_buf);
+        if (WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_CUSTOM, L"Mcp-Session-Id", sess_buf, &sess_buf_sz, WINHTTP_NO_HEADER_INDEX)) {
+            std::wstring ws(sess_buf);
+            std::string sess_str;
+            for (WCHAR wc : ws) {
+                if (wc != L'\r' && wc != L'\n' && wc != L'\0') sess_str.push_back(static_cast<char>(wc));
+            }
+            if (!sess_str.empty()) {
+                size_t spoint = sess_str.find("session_id=");
+                if (spoint != std::string::npos) sess_str = sess_str.substr(spoint + 11);
+                legacy_session_id = sess_str;
+            }
+        }
+
         std::string resp_body;
         DWORD bytes_read = 0;
         char buffer[1024];
@@ -260,8 +295,21 @@ struct vinox_mcp_client {
         WinHttpCloseHandle(hConnect);
         WinHttpCloseHandle(hSession);
 
+        std::string json_payload = resp_body;
+        size_t data_pos = json_payload.find("data: ");
+        if (data_pos != std::string::npos) {
+            json_payload = json_payload.substr(data_pos + 6);
+            size_t end_pos = json_payload.find("\n");
+            if (end_pos != std::string::npos) {
+                json_payload = json_payload.substr(0, end_pos);
+            }
+            while (!json_payload.empty() && (json_payload.back() == '\r' || json_payload.back() == '\n')) {
+                json_payload.pop_back();
+            }
+        }
+
         try {
-            res_json = nlohmann::json::parse(resp_body);
+            res_json = nlohmann::json::parse(json_payload);
             return VINOX_STATUS_OK;
         } catch (...) {
             set_mcp_last_error("Failed to parse JSON-RPC response from HTTP body: " + resp_body);
@@ -421,36 +469,36 @@ vinox_status vinox_mcp_client_connect(vinox_mcp_client* client) {
 
     client->connected.store(true);
 
-    // If Legacy Handshake Mode is enabled (MCP 2024-11-05), execute initialize request & notifications/initialized
-    if (client->legacy_handshake_enabled || client->protocol_version == VINOX_MCP_VERSION_2024_11_05) {
-        nlohmann::json init_req;
-        init_req["jsonrpc"] = "2.0";
-        init_req["id"] = client->request_id_counter.fetch_add(1);
-        init_req["method"] = "initialize";
+    // Execute initialize handshake
+    nlohmann::json init_req;
+    init_req["jsonrpc"] = "2.0";
+    init_req["id"] = client->request_id_counter.fetch_add(1);
+    init_req["method"] = "initialize";
+    std::string ver_str = (client->protocol_version == VINOX_MCP_VERSION_2026_07_28) ? "2026-07-28" : "2024-11-05";
+    init_req["params"]["protocolVersion"] = ver_str;
+    init_req["params"]["clientInfo"]["name"] = "VINOX";
+    init_req["params"]["clientInfo"]["version"] = "0.1.0";
+    init_req["params"]["capabilities"] = nlohmann::json::object();
+
+    nlohmann::json init_res;
+    vinox_status st = client->exchange_json_rpc(init_req, init_res, "initialize");
+    if (st != VINOX_STATUS_OK && client->protocol_version == VINOX_MCP_VERSION_2026_07_28) {
+        // Automatic negotiation fallback for legacy servers requiring 2024-11-05
+        client->protocol_version = VINOX_MCP_VERSION_2024_11_05;
         init_req["params"]["protocolVersion"] = "2024-11-05";
-        init_req["params"]["clientInfo"]["name"] = "VINOX";
-        init_req["params"]["clientInfo"]["version"] = "0.1.0";
-        init_req["params"]["capabilities"] = nlohmann::json::object();
+        st = client->exchange_json_rpc(init_req, init_res, "initialize");
+    }
 
-        nlohmann::json init_res;
-        vinox_status st = client->exchange_json_rpc(init_req, init_res, "initialize");
-        if (st != VINOX_STATUS_OK) {
-            client->connected.store(false);
-            return st;
-        }
-
-        if (!init_res.contains("result") || !init_res["result"].contains("protocolVersion")) {
-            set_mcp_last_error("Legacy initialize handshake response invalid");
-            client->connected.store(false);
-            return VINOX_STATUS_RUNTIME_ERROR;
-        }
-
+    if (st == VINOX_STATUS_OK && init_res.contains("result")) {
         nlohmann::json notif;
         notif["jsonrpc"] = "2.0";
         notif["method"] = "notifications/initialized";
 
         if (client->transport_kind == VINOX_MCP_TRANSPORT_STDIO) {
             client->send_stdio_line(notif.dump());
+        } else {
+            nlohmann::json dummy_res;
+            client->exchange_json_rpc(notif, dummy_res, "notifications/initialized");
         }
     }
 
