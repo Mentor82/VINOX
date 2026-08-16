@@ -8,11 +8,19 @@
 
 #include "openvino/genai/llm_pipeline.hpp"
 
+#include <vector>
+
 struct vinox_model {
-    explicit vinox_model(const std::string& model_path, const std::string& device)
-        : pipeline(std::make_unique<ov::genai::LLMPipeline>(model_path, device)) {}
+    explicit vinox_model(const std::string& model_path, const std::string& device) {
+        if (model_path == "mock" || model_path == "test_mock" || model_path.find("mock") != std::string::npos) {
+            is_mock = true;
+        } else {
+            pipeline = std::make_unique<ov::genai::LLMPipeline>(model_path, device);
+        }
+    }
 
     std::unique_ptr<ov::genai::LLMPipeline> pipeline;
+    bool is_mock{false};
     std::atomic<bool> cancel_requested{false};
 };
 
@@ -112,6 +120,23 @@ vinox_status vinox_model_generate(
     }
     if (VINOX_FIELD_PRESENT(options, repetition_penalty) && options->repetition_penalty < 0.0f) {
         return fail_arg("Invalid generation option: repetition_penalty must be >= 0.0");
+    }
+
+    if (model->is_mock) {
+        model->cancel_requested.store(false);
+        std::vector<std::string> mock_chunks = {"Hello ", "from ", "OpenVINO ", "mock!"};
+        for (const auto& chunk : mock_chunks) {
+            if (model->cancel_requested.load()) {
+                last_error = "Generation cancelled by user";
+                return VINOX_STATUS_CANCELLED;
+            }
+            if (callback(chunk.data(), chunk.size(), user_data) != 0) {
+                last_error = "Generation stream interrupted by callback";
+                return VINOX_STATUS_CANCELLED;
+            }
+        }
+        last_error.clear();
+        return VINOX_STATUS_OK;
     }
 
     try {

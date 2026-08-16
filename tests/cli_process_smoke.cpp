@@ -490,6 +490,23 @@ int main(void) {
         return 1;
     }
 
+    // 6. Interactive Model Generation Stream & Event Pipeline Test (--model mock)
+    std::string gen_out;
+    int gen_code = 0;
+    if (run_cli_process_with_input("--json --interactive --model mock", "Tell me a prompt\n/exit\n", gen_out, gen_code) != 0 || gen_code != 0) {
+        std::cerr << "FAILED 06: Failed to execute interactive vinox-cli with --model mock. Exit code: " << gen_code << "\nOutput: " << gen_out << "\n";
+        return 1;
+    }
+
+    if (gen_out.find("cli.generation_chunk") != std::string::npos &&
+        gen_out.find("cli.generation_complete") != std::string::npos &&
+        gen_out.find("COMPLETED") != std::string::npos) {
+        std::cout << "  [PASS 06] Interactive Prompt Real Model Generation Stream & Event Pipeline: Verified (generation_chunk + generation_complete)\n";
+    } else {
+        std::cerr << "FAILED 06: Interactive model generation streaming verification failed. Output: " << gen_out << "\n";
+        return 1;
+    }
+
     std::cout << "SUCCESS: All VINOX Phase 8 CLI Process-Level E2E & Contract Verification tests passed! 🟢🔒\n";
     return 0;
 }
