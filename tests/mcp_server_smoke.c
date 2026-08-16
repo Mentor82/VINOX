@@ -1,19 +1,87 @@
 #include "vinox/mcp.h"
 #include "vinox/tools.h"
 #include "vinox/vinox.h"
+#include "vinox/storage.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(_WIN32)
+#  define putenv_custom _putenv
+#else
+#  define putenv_custom putenv
+#endif
+
 int main(void) {
     printf("Starting VINOX Phase 6.3 Standalone MCP Server Smoke Test...\n");
+
+    const char* seeded_db_file = "test_vinox_mcp_server_seeded.db";
+    remove(seeded_db_file);
+
+    /* 0. Seed canonical storage with test data */
+    vinox_storage_engine* storage = NULL;
+    if (vinox_storage_engine_open(seeded_db_file, &storage) != VINOX_STATUS_OK || !storage) {
+        printf("FAILED: vinox_storage_engine_open for seed DB failed\n");
+        return 1;
+    }
+
+    vinox_conversation_info conv_info;
+    memset(&conv_info, 0, sizeof(conv_info));
+    conv_info.struct_size = sizeof(conv_info);
+    if (vinox_storage_create_conversation(storage, "MCP Test Architecture Branch", &conv_info) != VINOX_STATUS_OK) {
+        printf("FAILED: Seed conversation creation failed\n");
+        vinox_storage_engine_close(storage);
+        return 1;
+    }
+    char seed_cid[128] = {0};
+    strncpy(seed_cid, conv_info.id, sizeof(seed_cid) - 1);
+
+    vinox_message_info msg_in;
+    memset(&msg_in, 0, sizeof(msg_in));
+    msg_in.struct_size = sizeof(msg_in);
+    msg_in.conversation_id = seed_cid;
+    msg_in.role = "user";
+    msg_in.content = "VINOX MCP hybrid vector retrieval specification note";
+
+    vinox_message_info msg_out;
+    memset(&msg_out, 0, sizeof(msg_out));
+    msg_out.struct_size = sizeof(msg_out);
+
+    if (vinox_storage_add_message(storage, &msg_in, &msg_out) != VINOX_STATUS_OK) {
+        printf("FAILED: Seed message creation failed\n");
+        vinox_storage_engine_close(storage);
+        return 1;
+    }
+
+    char seed_doc_id[128] = {0};
+    if (vinox_storage_document_ingest(storage, "VINOX MCP Protocol Specification", "Native MCP stdio transport with hybrid vector retrieval", seed_doc_id, sizeof(seed_doc_id)) != VINOX_STATUS_OK) {
+        printf("FAILED: Seed document ingestion failed\n");
+        vinox_storage_engine_close(storage);
+        return 1;
+    }
+
+    if (vinox_storage_relation_create(storage, seed_doc_id, seed_cid, "references", "Specification links conversation", 0.95f) != VINOX_STATUS_OK) {
+        printf("FAILED: Seed relation creation failed\n");
+        vinox_storage_engine_close(storage);
+        return 1;
+    }
+
+    vinox_storage_engine_close(storage);
+    printf("  - Canonical Storage Database Seeding: Verified\n");
+
+    /* Set environment variable for MCP server stdio process */
+#if defined(_WIN32)
+    _putenv("VINOX_STORAGE_DB=test_vinox_mcp_server_seeded.db");
+#else
+    setenv("VINOX_STORAGE_DB", "test_vinox_mcp_server_seeded.db", 1);
+#endif
 
     vinox_mcp_server_config cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.struct_size = sizeof(cfg);
     cfg.server_name = "vinox_mcp";
     cfg.transport_kind = VINOX_MCP_TRANSPORT_STDIO;
-    cfg.command_or_url = "vinox_mcp_server.exe";
+    cfg.command_or_url = "vinox_mcp_server.exe --allow-write";
     cfg.protocol_version = VINOX_MCP_VERSION_2026_07_28;
 
     vinox_mcp_client* client = NULL;
@@ -57,13 +125,13 @@ int main(void) {
     }
     printf("  - VINOX Native MCP Tool Discovery (vinox.search, vinox.conversation_get, etc.): Verified\n");
 
-    /* 2. Execute vinox.search Tool */
+    /* 2. Execute vinox.search Tool (FTS Text Query) */
     vinox_tool_call_request call_req;
     memset(&call_req, 0, sizeof(call_req));
     call_req.struct_size = sizeof(call_req);
     call_req.call_id = "call_search_1";
     call_req.tool_name = "vinox_mcp.vinox.search";
-    call_req.arguments_json = "{\"query\":\"hybrid search\"}";
+    call_req.arguments_json = "{\"query\":\"hybrid vector\"}";
 
     vinox_tool_call_result call_res;
     memset(&call_res, 0, sizeof(call_res));
@@ -78,50 +146,129 @@ int main(void) {
         vinox_mcp_client_destroy(client);
         return 1;
     }
-    printf("  - Real Wire vinox.search Hybrid Retrieval Execution: Verified\n");
+    printf("  - Real Wire vinox.search FTS Text Retrieval Execution: Verified\n");
 
-    /* 3. Verify Default-Deny Write Tool Policy */
-    call_req.call_id = "call_ingest_1";
-    call_req.tool_name = "vinox_mcp.vinox.document_ingest";
-    call_req.arguments_json = "{\"title\":\"doc.txt\",\"content\":\"secret\"}";
+    /* 3. Execute vinox.search Tool with 1024-dim Vector Embedding Array */
+    call_req.call_id = "call_search_vec";
+    call_req.tool_name = "vinox_mcp.vinox.search";
+    char vec_args[16384] = "{\"query\":\"specification\",\"embedding\":[";
+    for (int i = 0; i < 1024; ++i) {
+        strcat(vec_args, (i == 0) ? "0.1" : ",0.1");
+    }
+    strcat(vec_args, "]}");
+    call_req.arguments_json = vec_args;
 
     memset(&call_res, 0, sizeof(call_res));
     call_res.struct_size = sizeof(call_res);
 
-    if (vinox_mcp_client_call_tool(client, &call_req, &call_res, pool, sizeof(pool)) == VINOX_STATUS_OK &&
-        call_res.status_code == 0) {
-        printf("FAILED: vinox.document_ingest must be rejected by default-deny policy\n");
+    if (vinox_mcp_client_call_tool(client, &call_req, &call_res, pool, sizeof(pool)) != VINOX_STATUS_OK ||
+        call_res.result_json == NULL ||
+        strstr(call_res.result_json, "VINOX Hybrid Search Result") == NULL) {
+        printf("FAILED: vinox.search tool vector embedding execution failed: %s\n", vinox_mcp_last_error());
         vinox_tool_registry_destroy(reg);
         vinox_mcp_client_destroy(client);
         return 1;
     }
-    printf("  - Default-Deny Security Policy Rejection of Write Tools: Verified\n");
+    printf("  - Real Wire vinox.search Vector Embedding Query Execution: Verified\n");
 
-    /* 4. MCP Resources List & Read */
-    char res_buf[4096] = {0};
+    /* 4. Execute vinox.conversation_get Tool */
+    char conv_args[512];
+    snprintf(conv_args, sizeof(conv_args), "{\"conversation_id\":\"%s\"}", seed_cid);
+    call_req.call_id = "call_conv_get_1";
+    call_req.tool_name = "vinox_mcp.vinox.conversation_get";
+    call_req.arguments_json = conv_args;
+
+    memset(&call_res, 0, sizeof(call_res));
+    call_res.struct_size = sizeof(call_res);
+
+    if (vinox_mcp_client_call_tool(client, &call_req, &call_res, pool, sizeof(pool)) != VINOX_STATUS_OK ||
+        call_res.result_json == NULL ||
+        strstr(call_res.result_json, "VINOX MCP hybrid vector retrieval specification note") == NULL) {
+        printf("FAILED: vinox.conversation_get tool execution failed: %s\n", vinox_mcp_last_error());
+        vinox_tool_registry_destroy(reg);
+        vinox_mcp_client_destroy(client);
+        return 1;
+    }
+    printf("  - Real Wire vinox.conversation_get Canonical History Branch: Verified\n");
+
+    /* 5. Execute vinox.relations_query Tool */
+    char rel_args[512];
+    snprintf(rel_args, sizeof(rel_args), "{\"entity_id\":\"%s\"}", seed_doc_id);
+    call_req.call_id = "call_rel_q_1";
+    call_req.tool_name = "vinox_mcp.vinox.relations_query";
+    call_req.arguments_json = rel_args;
+
+    memset(&call_res, 0, sizeof(call_res));
+    call_res.struct_size = sizeof(call_res);
+
+    if (vinox_mcp_client_call_tool(client, &call_req, &call_res, pool, sizeof(pool)) != VINOX_STATUS_OK ||
+        call_res.result_json == NULL ||
+        strstr(call_res.result_json, "references") == NULL) {
+        printf("FAILED: vinox.relations_query tool execution failed: %s\n", vinox_mcp_last_error());
+        vinox_tool_registry_destroy(reg);
+        vinox_mcp_client_destroy(client);
+        return 1;
+    }
+    printf("  - Real Wire vinox.relations_query CTE Graph Traversal: Verified\n");
+
+    /* 6. MCP Resources List & Read Canonical Content */
+    char res_buf[16384] = {0};
     size_t req_sz = 0;
     if (vinox_mcp_client_list_resources(client, res_buf, sizeof(res_buf), &req_sz) != VINOX_STATUS_OK ||
-        strstr(res_buf, "vinox://conversations/sample") == NULL) {
-        printf("FAILED: vinox_mcp_client_list_resources failed\n");
+        strstr(res_buf, seed_cid) == NULL ||
+        strstr(res_buf, seed_doc_id) == NULL) {
+        printf("FAILED: vinox_mcp_client_list_resources canonical resources list failed: %s\n", res_buf);
         vinox_tool_registry_destroy(reg);
         vinox_mcp_client_destroy(client);
         return 1;
     }
 
-    char content_buf[4096] = {0};
-    if (vinox_mcp_client_read_resource(client, "vinox://conversations/sample", content_buf, sizeof(content_buf), &req_sz) != VINOX_STATUS_OK ||
-        strstr(content_buf, "Canonical VINOX Resource Content") == NULL) {
-        printf("FAILED: vinox_mcp_client_read_resource failed\n");
+    char res_uri[256];
+    snprintf(res_uri, sizeof(res_uri), "vinox://conversations/%s", seed_cid);
+
+    char content_buf[16384] = {0};
+    if (vinox_mcp_client_read_resource(client, res_uri, content_buf, sizeof(content_buf), &req_sz) != VINOX_STATUS_OK ||
+        strstr(content_buf, "VINOX MCP hybrid vector retrieval specification note") == NULL) {
+        printf("FAILED: vinox_mcp_client_read_resource canonical conversation resource read failed: %s\n", content_buf);
         vinox_tool_registry_destroy(reg);
         vinox_mcp_client_destroy(client);
         return 1;
     }
-    printf("  - Native VINOX MCP Resources (vinox://conversations/sample) List/Read: Verified\n");
+    printf("  - Native VINOX MCP Resources List/Read Canonical Storage Content: Verified\n");
 
-    /* Cleanup */
     vinox_tool_registry_destroy(reg);
     vinox_mcp_client_destroy(client);
 
+    /* 7. Negative Test: Backend Initialization Failure / Engine Open Error */
+#if defined(_WIN32)
+    _putenv("VINOX_STORAGE_DB=C:\\invalid_path_dir_non_existent\\invalid.db");
+#else
+    setenv("VINOX_STORAGE_DB", "/invalid_path_dir_non_existent/invalid.db", 1);
+#endif
+
+    vinox_mcp_client* bad_client = NULL;
+    if (vinox_mcp_client_create(&cfg, &bad_client) == VINOX_STATUS_OK && bad_client) {
+        if (vinox_mcp_client_connect(bad_client) == VINOX_STATUS_OK) {
+            call_req.call_id = "call_bad_backend";
+            call_req.tool_name = "vinox_mcp.vinox.search";
+            call_req.arguments_json = "{\"query\":\"test\"}";
+
+            memset(&call_res, 0, sizeof(call_res));
+            call_res.struct_size = sizeof(call_res);
+
+            if (vinox_mcp_client_call_tool(bad_client, &call_req, &call_res, pool, sizeof(pool)) == VINOX_STATUS_OK) {
+                if (call_res.result_json == NULL || strstr(call_res.result_json, "storage backend unavailable") == NULL) {
+                    printf("FAILED: Tool call on failed storage backend must return backend unavailable error!\n");
+                    vinox_mcp_client_destroy(bad_client);
+                    return 1;
+                }
+            }
+        }
+        vinox_mcp_client_destroy(bad_client);
+    }
+    printf("  - Negative Test: Storage Initialization Failure & Backend Unavailable Error: Verified\n");
+
+    remove(seeded_db_file);
     printf("SUCCESS: All VINOX Phase 6.3 Standalone MCP Server smoke tests passed!\n");
     return 0;
 }

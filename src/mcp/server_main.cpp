@@ -34,9 +34,19 @@ int main(int argc, char* argv[]) {
     std::string db_path = db_env ? db_env : ":memory:";
 
     vinox_storage_engine* storage = nullptr;
-    if (vinox_storage_engine_open(db_path.c_str(), &storage) != VINOX_STATUS_OK) {
+    std::string storage_err_msg;
+    if (vinox_storage_engine_open(db_path.c_str(), &storage) != VINOX_STATUS_OK || !storage) {
         storage = nullptr;
+        storage_err_msg = vinox_storage_last_error();
+        if (storage_err_msg.empty()) storage_err_msg = "Failed to open SQLite database engine at " + db_path;
     }
+
+    auto make_backend_error = [&](nlohmann::json& res) {
+        res["result"]["isError"] = true;
+        res["result"]["content"] = nlohmann::json::array({
+            {{"type", "text"}, {"text", "VINOX storage backend unavailable: " + storage_err_msg}}
+        });
+    };
 
     std::string line;
     while (std::getline(std::cin, line)) {
@@ -67,8 +77,8 @@ int main(int argc, char* argv[]) {
 
                 nlohmann::json t_search;
                 t_search["name"] = "vinox.search";
-                t_search["description"] = "VINOX Hybrid Retrieval (BM25 + Cosine Vector)";
-                t_search["inputSchema"] = nlohmann::json::parse("{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"],\"additionalProperties\":false}");
+                t_search["description"] = "VINOX Hybrid Retrieval (BM25 FTS5 Text Search + Optional 1024-dim Cosine Vector Search)";
+                t_search["inputSchema"] = nlohmann::json::parse("{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"embedding\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},\"description\":\"Optional 1024-dim dense float embedding vector\"}},\"required\":[\"query\"],\"additionalProperties\":false}");
                 tools_arr.push_back(t_search);
 
                 nlohmann::json t_conv;
@@ -97,19 +107,31 @@ int main(int argc, char* argv[]) {
 
                 res["result"]["tools"] = tools_arr;
             } else if (method == "tools/call") {
-                std::string name = req["params"].value("name", "");
-                auto args = req["params"].value("arguments", nlohmann::json::object());
+                if (!storage) {
+                    make_backend_error(res);
+                } else {
+                    std::string name = req["params"].value("name", "");
+                    auto args = req["params"].value("arguments", nlohmann::json::object());
 
-                if (name == "vinox.search") {
-                    std::string q = args.value("query", "");
-                    if (storage) {
+                    if (name == "vinox.search") {
+                        std::string q = args.value("query", "");
+                        std::vector<float> query_vec;
+                        if (args.contains("embedding") && args["embedding"].is_array()) {
+                            for (const auto& item : args["embedding"]) {
+                                query_vec.push_back(item.get<float>());
+                            }
+                        }
+                        const float* emb_ptr = query_vec.empty() ? nullptr : query_vec.data();
+                        size_t emb_dim = query_vec.size();
+                        float alpha = query_vec.empty() ? 0.0f : 0.5f;
+
                         vinox_search_result matches[10];
                         for (size_t i = 0; i < 10; ++i) {
                             std::memset(&matches[i], 0, sizeof(matches[i]));
                             matches[i].struct_size = sizeof(vinox_search_result);
                         }
                         size_t match_count = 0;
-                        vinox_status st = vinox_storage_search_hybrid(storage, nullptr, 0, q.c_str(), 0.5f, 10, matches, &match_count);
+                        vinox_status st = vinox_storage_search_hybrid(storage, emb_ptr, emb_dim, q.c_str(), alpha, 10, matches, &match_count);
                         if (st == VINOX_STATUS_OK) {
                             nlohmann::json matches_arr = nlohmann::json::array();
                             for (size_t i = 0; i < match_count; ++i) {
@@ -124,96 +146,155 @@ int main(int argc, char* argv[]) {
                                 {{"type", "text"}, {"text", "VINOX Hybrid Search Result for '" + q + "': " + matches_arr.dump()}}
                             });
                         } else {
-                            res["error"]["code"] = -32603;
-                            res["error"]["message"] = std::string("Hybrid search failed: ") + vinox_storage_last_error();
+                            res["result"]["isError"] = true;
+                            res["result"]["content"] = nlohmann::json::array({
+                                {{"type", "text"}, {"text", "Hybrid search failed: " + std::string(vinox_storage_last_error())}}
+                            });
                         }
-                    } else {
-                        res["result"]["content"] = nlohmann::json::array({
-                            {{"type", "text"}, {"text", "VINOX Hybrid Search Result for '" + q + "': [Score: 0.92, Document: doc-101]"}}
-                        });
-                    }
-                } else if (name == "vinox.conversation_get") {
-                    std::string cid = args.value("conversation_id", "");
-                    res["result"]["content"] = nlohmann::json::array({
-                        {{"type", "text"}, {"text", "Conversation History for " + cid + ": Message 1: Hello, Message 2: Hi!"}}
-                    });
-                } else if (name == "vinox.document_ingest") {
-                    if (!allow_write) {
-                        res["error"]["code"] = -32600;
-                        res["error"]["message"] = "Permission denied: Write tool vinox.document_ingest is disabled by default policy";
-                    } else {
-                        std::string title = args.value("title", "");
-                        std::string content = args.value("content", "");
-                        if (storage) {
+                    } else if (name == "vinox.conversation_get") {
+                        std::string cid = args.value("conversation_id", "");
+                        static char json_buf[524288] = {0};
+                        size_t req_sz = 0;
+                        if (vinox_storage_export_json(storage, json_buf, sizeof(json_buf), &req_sz) == VINOX_STATUS_OK) {
+                            auto root = nlohmann::json::parse(json_buf);
+                            nlohmann::json msgs = nlohmann::json::array();
+                            if (root.contains("messages") && root["messages"].is_array()) {
+                                for (const auto& m : root["messages"]) {
+                                    if (m.value("conversation_id", "") == cid) {
+                                        msgs.push_back(m);
+                                    }
+                                }
+                            }
+                            res["result"]["content"] = nlohmann::json::array({
+                                {{"type", "text"}, {"text", "Conversation History for " + cid + ": " + msgs.dump()}}
+                            });
+                        } else {
+                            res["result"]["isError"] = true;
+                            res["result"]["content"] = nlohmann::json::array({
+                                {{"type", "text"}, {"text", "Failed to retrieve conversation history: " + std::string(vinox_storage_last_error())}}
+                            });
+                        }
+                    } else if (name == "vinox.document_ingest") {
+                        if (!allow_write) {
+                            res["error"]["code"] = -32600;
+                            res["error"]["message"] = "Permission denied: Write tool vinox.document_ingest is disabled by default policy";
+                        } else {
+                            std::string title = args.value("title", "");
+                            std::string content = args.value("content", "");
                             char doc_id_out[128] = {0};
                             if (vinox_storage_document_ingest(storage, title.c_str(), content.c_str(), doc_id_out, sizeof(doc_id_out)) == VINOX_STATUS_OK) {
                                 res["result"]["content"] = nlohmann::json::array({
                                     {{"type", "text"}, {"text", "Document ingested successfully into VINOX storage with ID: " + std::string(doc_id_out)}}
                                 });
                             } else {
-                                res["error"]["code"] = -32603;
-                                res["error"]["message"] = std::string("Document ingest failed: ") + vinox_storage_last_error();
+                                res["result"]["isError"] = true;
+                                res["result"]["content"] = nlohmann::json::array({
+                                    {{"type", "text"}, {"text", "Document ingest failed: " + std::string(vinox_storage_last_error())}}
+                                });
                             }
-                        } else {
-                            res["result"]["content"] = nlohmann::json::array({
-                                {{"type", "text"}, {"text", "Document ingested successfully into VINOX storage"}}
-                            });
                         }
-                    }
-                } else if (name == "vinox.relations_query") {
-                    std::string eid = args.value("entity_id", "");
-                    if (storage) {
+                    } else if (name == "vinox.relations_query") {
+                        std::string eid = args.value("entity_id", "");
                         char json_buf[4096] = {0};
                         if (vinox_storage_relations_query_cte(storage, eid.c_str(), json_buf, sizeof(json_buf)) == VINOX_STATUS_OK) {
                             res["result"]["content"] = nlohmann::json::array({
                                 {{"type", "text"}, {"text", std::string(json_buf)}}
                             });
                         } else {
-                            res["error"]["code"] = -32603;
-                            res["error"]["message"] = std::string("Relations query failed: ") + vinox_storage_last_error();
+                            res["result"]["isError"] = true;
+                            res["result"]["content"] = nlohmann::json::array({
+                                {{"type", "text"}, {"text", "Relations query failed: " + std::string(vinox_storage_last_error())}}
+                            });
                         }
-                    } else {
-                        res["result"]["content"] = nlohmann::json::array({
-                            {{"type", "text"}, {"text", "Entity " + eid + " -> derived_from -> doc-101"}}
-                        });
-                    }
-                } else if (name == "vinox.relation_create") {
-                    if (!allow_write) {
-                        res["error"]["code"] = -32600;
-                        res["error"]["message"] = "Permission denied: Write tool vinox.relation_create is disabled by default policy";
-                    } else {
-                        std::string source = args.value("source", "");
-                        std::string target = args.value("target", "");
-                        std::string rel_type = args.value("type", "");
-                        if (storage) {
+                    } else if (name == "vinox.relation_create") {
+                        if (!allow_write) {
+                            res["error"]["code"] = -32600;
+                            res["error"]["message"] = "Permission denied: Write tool vinox.relation_create is disabled by default policy";
+                        } else {
+                            std::string source = args.value("source", "");
+                            std::string target = args.value("target", "");
+                            std::string rel_type = args.value("type", "");
                             if (vinox_storage_relation_create(storage, source.c_str(), target.c_str(), rel_type.c_str(), "MCP tool invocation", 1.0f) == VINOX_STATUS_OK) {
                                 res["result"]["content"] = nlohmann::json::array({
                                     {{"type", "text"}, {"text", "Relation created successfully between " + source + " and " + target}}
                                 });
                             } else {
-                                res["error"]["code"] = -32603;
-                                res["error"]["message"] = std::string("Relation creation failed: ") + vinox_storage_last_error();
+                                res["result"]["isError"] = true;
+                                res["result"]["content"] = nlohmann::json::array({
+                                    {{"type", "text"}, {"text", "Relation creation failed: " + std::string(vinox_storage_last_error())}}
+                                });
                             }
-                        } else {
-                            res["result"]["content"] = nlohmann::json::array({
-                                {{"type", "text"}, {"text", "Relation created successfully"}}
-                            });
                         }
+                    } else {
+                        res["error"]["code"] = -32601;
+                        res["error"]["message"] = "Tool not found";
                     }
-                } else {
-                    res["error"]["code"] = -32601;
-                    res["error"]["message"] = "Tool not found";
                 }
             } else if (method == "resources/list") {
-                res["result"]["resources"] = nlohmann::json::array({
-                    {{"uri", "vinox://conversations/sample"}, {"name", "Sample Conversation"}},
-                    {{"uri", "vinox://documents/sample"}, {"name", "Sample Document"}}
-                });
+                if (!storage) {
+                    res["error"]["code"] = -32603;
+                    res["error"]["message"] = "VINOX storage backend unavailable: " + storage_err_msg;
+                } else {
+                    static char json_buf[524288] = {0};
+                    size_t req_sz = 0;
+                    nlohmann::json res_arr = nlohmann::json::array();
+                    if (vinox_storage_export_json(storage, json_buf, sizeof(json_buf), &req_sz) == VINOX_STATUS_OK) {
+                        auto root = nlohmann::json::parse(json_buf);
+                        if (root.contains("conversations") && root["conversations"].is_array()) {
+                            for (const auto& c : root["conversations"]) {
+                                std::string cid = c.value("id", "");
+                                std::string ctitle = c.value("title", "Conversation " + cid);
+                                res_arr.push_back({{"uri", "vinox://conversations/" + cid}, {"name", ctitle}});
+                            }
+                        }
+                        if (root.contains("documents") && root["documents"].is_array()) {
+                            for (const auto& d : root["documents"]) {
+                                std::string did = d.value("id", "");
+                                std::string dtitle = d.value("title", "Document " + did);
+                                res_arr.push_back({{"uri", "vinox://documents/" + did}, {"name", dtitle}});
+                            }
+                        }
+                    }
+                    res["result"]["resources"] = res_arr;
+                }
             } else if (method == "resources/read") {
-                std::string uri = req["params"].value("uri", "");
-                res["result"]["contents"] = nlohmann::json::array({
-                    {{"uri", uri}, {"text", "Canonical VINOX Resource Content for " + uri}}
-                });
+                if (!storage) {
+                    res["error"]["code"] = -32603;
+                    res["error"]["message"] = "VINOX storage backend unavailable: " + storage_err_msg;
+                } else {
+                    std::string uri = req["params"].value("uri", "");
+                    static char json_buf[524288] = {0};
+                    size_t req_sz = 0;
+                    std::string content_text = "Resource not found for URI: " + uri;
+                    if (vinox_storage_export_json(storage, json_buf, sizeof(json_buf), &req_sz) == VINOX_STATUS_OK) {
+                        auto root = nlohmann::json::parse(json_buf);
+                        if (uri.rfind("vinox://conversations/", 0) == 0) {
+                            std::string cid = uri.substr(strlen("vinox://conversations/"));
+                            nlohmann::json conv_msgs = nlohmann::json::array();
+                            if (root.contains("messages") && root["messages"].is_array()) {
+                                for (const auto& m : root["messages"]) {
+                                    if (m.value("conversation_id", "") == cid) {
+                                        conv_msgs.push_back(m);
+                                    }
+                                }
+                            }
+                            content_text = "Conversation Resource " + cid + ": " + conv_msgs.dump();
+                        } else if (uri.rfind("vinox://documents/", 0) == 0) {
+                            std::string did = uri.substr(strlen("vinox://documents/"));
+                            if (root.contains("documents") && root["documents"].is_array()) {
+                                for (const auto& d : root["documents"]) {
+                                    if (d.value("id", "") == did) {
+                                        content_text = "Document Resource " + did + ": " + d.dump();
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    res["result"]["contents"] = nlohmann::json::array({
+                        {{"uri", uri}, {"text", content_text}}
+                    });
+                }
             } else if (method == "prompts/list") {
                 res["result"]["prompts"] = nlohmann::json::array({
                     {{"name", "vinox.summarize_conversation"}, {"description", "Summarize conversation branch"}}

@@ -319,7 +319,7 @@ if(BUILD_TESTING)
     target_link_libraries(vinox_docker_mcp_live_test PRIVATE vinox::core nlohmann_json::nlohmann_json)
 
     add_executable(vinox_mcp_server_smoke tests/mcp_server_smoke.c)
-    target_link_libraries(vinox_mcp_server_smoke PRIVATE vinox::core)
+    target_link_libraries(vinox_mcp_server_smoke PRIVATE vinox::core vinox::storage)
     add_dependencies(vinox_mcp_server_smoke vinox_mcp_server)
     add_test(NAME mcp_server_smoke COMMAND vinox_mcp_server_smoke)
 
