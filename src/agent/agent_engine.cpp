@@ -7,6 +7,7 @@
 #include <vector>
 #include <set>
 #include <chrono>
+#include <cstring>
 #include <iostream>
 
 struct AgentStepToolCall {
@@ -77,9 +78,41 @@ VINOX_API vinox_agent_run* VINOX_CALL vinox_agent_run_create(vinox_mode_controll
         run->budget.max_duration_seconds = 300;
     }
 
-    // Parse step graph & dependencies from approved plan
-    char hash_buf[65] = {0};
-    vinox_plan_compute_hash(plan, hash_buf, sizeof(hash_buf));
+    // Parse real step dependency graph from approved plan
+    char plan_json_buf[65536] = {0};
+    if (vinox_plan_get_json(plan, plan_json_buf, sizeof(plan_json_buf)) == VINOX_STATUS_OK) {
+        try {
+            auto j = nlohmann::json::parse(plan_json_buf);
+            if (j.contains("steps") && j["steps"].is_array()) {
+                for (const auto& sj : j["steps"]) {
+                    AgentPlanStep step;
+                    step.step_id = sj.value("step_id", "");
+                    step.description = sj.value("description", "");
+                    step.completed = false;
+
+                    if (sj.contains("dependencies") && sj["dependencies"].is_array()) {
+                        for (const auto& dep : sj["dependencies"]) {
+                            if (dep.is_string()) step.dependencies.push_back(dep.get<std::string>());
+                        }
+                    }
+
+                    if (sj.contains("tool_calls") && sj["tool_calls"].is_array()) {
+                        for (const auto& tc : sj["tool_calls"]) {
+                            AgentStepToolCall tool_call;
+                            tool_call.name = tc.value("name", "");
+                            if (tc.contains("arguments") && tc["arguments"].is_object()) {
+                                tool_call.arguments_json = tc["arguments"].dump();
+                            } else {
+                                tool_call.arguments_json = "{}";
+                            }
+                            step.tool_calls.push_back(tool_call);
+                        }
+                    }
+                    run->steps.push_back(step);
+                }
+            }
+        } catch (...) {}
+    }
 
     run->run_status = VINOX_PLAN_STATUS_RUNNING;
     return run;
@@ -87,6 +120,13 @@ VINOX_API vinox_agent_run* VINOX_CALL vinox_agent_run_create(vinox_mode_controll
 
 VINOX_API void VINOX_CALL vinox_agent_run_destroy(vinox_agent_run* run) {
     if (run) delete run;
+}
+
+VINOX_API vinox_status VINOX_CALL vinox_agent_run_set_governance(vinox_agent_run* run, vinox_tool_registry* registry, vinox_policy_engine* policy_engine) {
+    if (!run) return VINOX_STATUS_INVALID_ARGUMENT;
+    run->registry = registry;
+    run->policy_engine = policy_engine;
+    return VINOX_STATUS_OK;
 }
 
 VINOX_API vinox_status VINOX_CALL vinox_agent_run_step(vinox_agent_run* run) {
@@ -107,25 +147,132 @@ VINOX_API vinox_status VINOX_CALL vinox_agent_run_step(vinox_agent_run* run) {
         return VINOX_STATUS_OUT_OF_RANGE; // Duration deadline exceeded!
     }
 
-    // 3. Check Token Accounting Budget Limit
+    // 3. Find next unexecuted step whose dependencies are ALL completed
+    AgentPlanStep* ready_step = nullptr;
+    bool all_completed = true;
+    bool blocked_by_dependencies = false;
+
+    for (auto& s : run->steps) {
+        if (!s.completed) {
+            all_completed = false;
+
+            // Check if all dependencies are completed
+            bool deps_ok = true;
+            for (const auto& dep_id : s.dependencies) {
+                bool dep_found_and_completed = false;
+                for (const auto& other : run->steps) {
+                    if (other.step_id == dep_id && other.completed) {
+                        dep_found_and_completed = true;
+                        break;
+                    }
+                }
+                if (!dep_found_and_completed) {
+                    deps_ok = false;
+                    break;
+                }
+            }
+
+            if (deps_ok) {
+                ready_step = &s;
+                break;
+            } else {
+                blocked_by_dependencies = true;
+            }
+        }
+    }
+
+    if (all_completed || run->steps.empty()) {
+        run->run_status = VINOX_PLAN_STATUS_COMPLETED;
+        return VINOX_STATUS_OK;
+    }
+
+    if (!ready_step) {
+        if (blocked_by_dependencies) {
+            run->run_status = VINOX_PLAN_STATUS_BLOCKED;
+            return VINOX_STATUS_INVALID_STATE; // Blocked by unsatisfied dependencies!
+        }
+        run->run_status = VINOX_PLAN_STATUS_COMPLETED;
+        return VINOX_STATUS_OK;
+    }
+
+    // 4. Check Step & Tool Call Budget Limits
+    if (run->completed_steps >= run->budget.max_steps) {
+        run->run_status = VINOX_PLAN_STATUS_FAILED;
+        return VINOX_STATUS_OUT_OF_RANGE;
+    }
+
+    // 5. Real Step Execution & Phase 6 Governance Gate Evaluation
+    size_t step_tokens = (ready_step->description.length() / 4) + 16;
+
+    for (const auto& tc : ready_step->tool_calls) {
+        if (run->total_tool_calls >= run->budget.max_tool_calls) {
+            run->run_status = VINOX_PLAN_STATUS_FAILED;
+            return VINOX_STATUS_OUT_OF_RANGE;
+        }
+
+        step_tokens += (tc.arguments_json.length() / 4) + 16;
+
+        // Evaluate Phase 6 Governance Boundary if registry/policy_engine are present
+        if (run->registry && run->policy_engine) {
+            char tpool[4096] = {0};
+            vinox_tool_definition tdef;
+            std::memset(&tdef, 0, sizeof(tdef));
+            tdef.struct_size = sizeof(tdef);
+
+            if (vinox_tool_registry_find_tool(run->registry, tc.name.c_str(), &tdef, tpool, sizeof(tpool)) != VINOX_STATUS_OK) {
+                run->run_status = VINOX_PLAN_STATUS_FAILED;
+                return VINOX_STATUS_NOT_FOUND; // Tool not registered!
+            }
+
+            char val_err[512] = {0};
+            if (vinox_tool_registry_validate_arguments(run->registry, tc.name.c_str(), tc.arguments_json.c_str(), val_err, sizeof(val_err)) != VINOX_STATUS_OK) {
+                run->run_status = VINOX_PLAN_STATUS_FAILED;
+                return VINOX_STATUS_INVALID_ARGUMENT; // Schema validation error!
+            }
+
+            vinox_tool_call_request req_call;
+            std::memset(&req_call, 0, sizeof(req_call));
+            req_call.struct_size = sizeof(req_call);
+            req_call.call_id = "agent_run_call";
+            req_call.tool_name = tc.name.c_str();
+            req_call.arguments_json = tc.arguments_json.c_str();
+
+            vinox_policy_decision pdecision;
+            std::memset(&pdecision, 0, sizeof(pdecision));
+            pdecision.struct_size = sizeof(pdecision);
+            char reason[256] = {0};
+
+            if (vinox_policy_engine_evaluate(run->policy_engine, &req_call, &tdef, &pdecision, reason, sizeof(reason)) != VINOX_STATUS_OK || !pdecision.allowed) {
+                run->run_status = VINOX_PLAN_STATUS_BLOCKED;
+                return VINOX_STATUS_PERMISSION_DENIED; // Governance Policy Refusal Gate!
+            }
+        }
+
+        run->total_tool_calls++;
+    }
+
+    // Actual Token Accounting
+    run->total_tokens_used += static_cast<int>(step_tokens);
     if (run->total_tokens_used >= run->budget.max_tokens) {
         run->run_status = VINOX_PLAN_STATUS_FAILED;
         return VINOX_STATUS_OUT_OF_RANGE; // Max tokens budget exceeded!
     }
 
-    // 4. Check Step & Tool Call Budget Limits
-    if (run->completed_steps >= run->budget.max_steps || run->total_tool_calls >= run->budget.max_tool_calls) {
-        run->run_status = VINOX_PLAN_STATUS_FAILED;
-        return VINOX_STATUS_OUT_OF_RANGE;
-    }
-
-    // Execute step logic & token accounting
+    // Mark Step Completed
+    ready_step->completed = true;
     run->completed_steps++;
-    run->total_tool_calls++;
-    run->total_tokens_used += 128; // Step token usage accounting
     run->current_step_idx++;
 
-    if (run->completed_steps >= run->budget.max_steps) {
+    // Check if all steps in plan completed
+    bool all_done = true;
+    for (const auto& s : run->steps) {
+        if (!s.completed) {
+            all_done = false;
+            break;
+        }
+    }
+
+    if (all_done) {
         run->run_status = VINOX_PLAN_STATUS_COMPLETED;
     }
 

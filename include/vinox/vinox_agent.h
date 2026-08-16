@@ -2,6 +2,7 @@
 #define VINOX_AGENT_H
 
 #include "vinox.h"
+#include "vinox/tools.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -51,10 +52,12 @@ VINOX_API vinox_status VINOX_CALL vinox_plan_validate(const vinox_plan* plan);
 VINOX_API vinox_status VINOX_CALL vinox_plan_compute_hash(const vinox_plan* plan, char* hash_buf, size_t hash_buf_sz);
 VINOX_API vinox_plan_status VINOX_CALL vinox_plan_get_status(const vinox_plan* plan);
 VINOX_API vinox_status VINOX_CALL vinox_plan_approve(vinox_plan* plan, const char* expected_hash);
+VINOX_API vinox_status VINOX_CALL vinox_plan_get_json(const vinox_plan* plan, char* out_buf, size_t out_buf_sz);
 
 /* Agent Engine & Run */
 VINOX_API vinox_agent_run* VINOX_CALL vinox_agent_run_create(vinox_mode_controller* controller, vinox_plan* plan, const vinox_agent_budget* budget);
 VINOX_API void VINOX_CALL vinox_agent_run_destroy(vinox_agent_run* run);
+VINOX_API vinox_status VINOX_CALL vinox_agent_run_set_governance(vinox_agent_run* run, vinox_tool_registry* registry, vinox_policy_engine* policy_engine);
 VINOX_API vinox_status VINOX_CALL vinox_agent_run_step(vinox_agent_run* run);
 VINOX_API vinox_status VINOX_CALL vinox_agent_run_pause(vinox_agent_run* run);
 VINOX_API vinox_status VINOX_CALL vinox_agent_run_resume(vinox_agent_run* run);
@@ -72,6 +75,7 @@ VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_stop(vinox_sandbox_host* ho
 /* Artifact Takeover Commit */
 VINOX_API vinox_status VINOX_CALL vinox_artifact_commit_diff(const char* overlay_dir, const char* target_dir, char* diff_buf, size_t diff_buf_sz);
 VINOX_API vinox_status VINOX_CALL vinox_artifact_commit_apply(const char* overlay_dir, const char* target_dir);
+VINOX_API vinox_status VINOX_CALL vinox_artifact_commit_apply_snapshot(const char* overlay_dir, const char* target_dir, const char* expected_snapshot_hash);
 
 #ifdef __cplusplus
 }

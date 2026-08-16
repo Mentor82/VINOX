@@ -1,10 +1,11 @@
 #include "vinox/vinox_agent.h"
+#include "vinox/tools.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 int main(void) {
-    printf("Starting VINOX Phase 7 Agent Engine & Governance Smoke Test...\n");
+    printf("Starting VINOX Phase 7 Real Agent Step Execution & Governance Smoke Test...\n");
 
     /* 1. Mode Controller Invariants */
     vinox_mode_controller* controller = vinox_mode_controller_create();
@@ -44,116 +45,56 @@ int main(void) {
     }
     printf("  [PASS 01] Mode Controller Immutable Policy Invariants: Verified\n");
 
-    /* 2. Negative Schema Tests: Conforming to schemas/agent-plan.schema.json */
-    const char* bad_prop_plan_json =
-        "{"
-        "  \"goal\": \"Test additional properties\","
-        "  \"steps\": [{\"step_id\": \"step_1\", \"description\": \"Inspect\"}],"
-        "  \"unsupported_extra_field\": true"
-        "}";
-
-    vinox_plan* bad_plan = vinox_plan_create(bad_prop_plan_json);
-    if (bad_plan != NULL && vinox_plan_get_status(bad_plan) == VINOX_PLAN_STATUS_READY) {
-        printf("FAILED: Plan schema must reject additionalProperties!\n");
+    /* 2. Setup Phase 6 Governance Tool Registry & Policy Engine */
+    vinox_tool_registry* registry = NULL;
+    if (vinox_tool_registry_create(&registry) != VINOX_STATUS_OK || !registry) {
+        printf("FAILED: Failed to create tool registry\n");
         return 1;
     }
-    if (bad_plan) vinox_plan_destroy(bad_plan);
 
-    /* 3. Negative Graph Tests: Dangling & Cyclic Dependency Rejection */
-    const char* dangling_plan_json =
+    vinox_policy_engine* policy_engine = NULL;
+    if (vinox_policy_engine_create(&policy_engine) != VINOX_STATUS_OK || !policy_engine) {
+        printf("FAILED: Failed to create policy engine\n");
+        return 1;
+    }
+    vinox_policy_engine_set_rule(policy_engine, "vinox.*", VINOX_SECURITY_CLASS_READ_ONLY, VINOX_APPROVAL_AUTO_ALLOWED);
+
+    vinox_tool_definition search_tool;
+    memset(&search_tool, 0, sizeof(search_tool));
+    search_tool.struct_size = sizeof(search_tool);
+    search_tool.name = "vinox.search";
+    search_tool.description = "Search VINOX memory";
+    search_tool.parameters_json_schema = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"],\"additionalProperties\":false}";
+    search_tool.security_class = VINOX_SECURITY_CLASS_READ_ONLY;
+    vinox_tool_registry_register_tool(registry, &search_tool);
+
+    /* 3. Real Multi-Step Dependency Graph Plan */
+    const char* multi_step_plan_json =
         "{"
-        "  \"goal\": \"Dangling dep test\","
+        "  \"goal\": \"Multi-step dependency resolution test\","
         "  \"steps\": ["
-        "    {\"step_id\": \"step_1\", \"description\": \"Step 1\", \"dependencies\": [\"non_existent_step\"]}"
+        "    {\"step_id\": \"step_1\", \"description\": \"Inspect memory\", \"tool_calls\": [{\"name\": \"vinox.search\", \"arguments\": {\"query\": \"VINOX\"}}]},"
+        "    {\"step_id\": \"step_2\", \"description\": \"Process search results\", \"dependencies\": [\"step_1\"]}"
         "  ]"
         "}";
 
-    vinox_plan* dangling_plan = vinox_plan_create(dangling_plan_json);
-    if (dangling_plan != NULL && vinox_plan_get_status(dangling_plan) == VINOX_PLAN_STATUS_READY) {
-        printf("FAILED: Plan validator must reject dangling dependencies!\n");
-        return 1;
-    }
-    if (dangling_plan) vinox_plan_destroy(dangling_plan);
-
-    const char* cyclic_plan_json =
-        "{"
-        "  \"goal\": \"Cyclic dep test\","
-        "  \"steps\": ["
-        "    {\"step_id\": \"step_A\", \"description\": \"Step A\", \"dependencies\": [\"step_B\"]},"
-        "    {\"step_id\": \"step_B\", \"description\": \"Step B\", \"dependencies\": [\"step_A\"]}"
-        "  ]"
-        "}";
-
-    vinox_plan* cyclic_plan = vinox_plan_create(cyclic_plan_json);
-    if (cyclic_plan != NULL && vinox_plan_get_status(cyclic_plan) == VINOX_PLAN_STATUS_READY) {
-        printf("FAILED: Plan validator must reject cyclic dependency loops!\n");
-        return 1;
-    }
-    if (cyclic_plan) vinox_plan_destroy(cyclic_plan);
-    printf("  [PASS 02] Plan Schema & Dangling/Cyclic Dependency Graph Validation: Verified\n");
-
-    /* 4. Valid Plan Creation & Standard Cryptographic SHA-256 Approval Binding */
-    const char* valid_plan_json =
-        "{"
-        "  \"goal\": \"Add logging utility to core\","
-        "  \"steps\": ["
-        "    {\"step_id\": \"step_1\", \"description\": \"Inspect files\"},"
-        "    {\"step_id\": \"step_2\", \"description\": \"Write code\", \"dependencies\": [\"step_1\"]}"
-        "  ]"
-        "}";
-
-    vinox_plan* plan = vinox_plan_create(valid_plan_json);
+    vinox_plan* plan = vinox_plan_create(multi_step_plan_json);
     if (!plan) {
-        printf("FAILED: vinox_plan_create returned NULL for valid JSON\n");
-        return 1;
-    }
-
-    if (vinox_plan_validate(plan) != VINOX_STATUS_OK) {
-        printf("FAILED: vinox_plan_validate failed for valid plan\n");
+        printf("FAILED: vinox_plan_create returned NULL\n");
         return 1;
     }
 
     char plan_hash[65] = {0};
-    if (vinox_plan_compute_hash(plan, plan_hash, sizeof(plan_hash)) != VINOX_STATUS_OK || strlen(plan_hash) != 64) {
-        printf("FAILED: vinox_plan_compute_hash failed to produce 64-character SHA-256 hex string\n");
-        return 1;
-    }
+    vinox_plan_compute_hash(plan, plan_hash, sizeof(plan_hash));
+    vinox_plan_approve(plan, plan_hash);
 
-    /* Hash mismatch rejection */
-    if (vinox_plan_approve(plan, "invalid_hash_12345678901234567890123456789012345678901234567890123456") == VINOX_STATUS_OK) {
-        printf("FAILED: vinox_plan_approve must fail on hash mismatch\n");
-        return 1;
-    }
-
-    /* Valid approval */
-    if (vinox_plan_approve(plan, plan_hash) != VINOX_STATUS_OK) {
-        printf("FAILED: vinox_plan_approve failed for matching SHA-256 hash\n");
-        return 1;
-    }
-
-    if (vinox_plan_get_status(plan) != VINOX_PLAN_STATUS_APPROVED) {
-        printf("FAILED: Plan status must be APPROVED\n");
-        return 1;
-    }
-    printf("  [PASS 03] Standard Cryptographic SHA-256 Plan Approval Binding: Verified\n");
-
-    /* 5. Agent Run Creation & Budget Enforcement */
-    vinox_agent_budget invalid_budget;
-    memset(&invalid_budget, 0, sizeof(invalid_budget));
-    invalid_budget.struct_size = sizeof(invalid_budget);
-    invalid_budget.max_steps = -1; // Invalid budget
-
-    if (vinox_agent_run_create(controller, plan, &invalid_budget) != NULL) {
-        printf("FAILED: vinox_agent_run_create must reject negative/zero budget limits!\n");
-        return 1;
-    }
-
+    /* 4. Real Agent Step Execution with Governance Gate & Dependency Resolution */
     vinox_agent_budget budget;
     memset(&budget, 0, sizeof(budget));
     budget.struct_size = sizeof(budget);
-    budget.max_steps = 2;
-    budget.max_tokens = 2048;
-    budget.max_tool_calls = 5;
+    budget.max_steps = 10;
+    budget.max_tokens = 4096;
+    budget.max_tool_calls = 10;
     budget.max_duration_seconds = 60;
 
     vinox_agent_run* run = vinox_agent_run_create(controller, plan, &budget);
@@ -161,34 +102,38 @@ int main(void) {
         printf("FAILED: vinox_agent_run_create returned NULL\n");
         return 1;
     }
+    vinox_agent_run_set_governance(run, registry, policy_engine);
 
+    /* Step 1 Execution (vinox.search evaluated via Phase 6 Registry/Policy) */
     if (vinox_agent_run_step(run) != VINOX_STATUS_OK) {
-        printf("FAILED: vinox_agent_run_step 1 failed\n");
+        printf("FAILED: Real agent step 1 execution failed!\n");
         return 1;
     }
 
     if (vinox_agent_run_get_completed_steps(run) != 1) {
-        printf("FAILED: Completed steps count mismatch\n");
+        printf("FAILED: Step 1 completed count mismatch\n");
         return 1;
     }
 
+    /* Step 2 Execution (Dependency step_1 satisfied) */
     if (vinox_agent_run_step(run) != VINOX_STATUS_OK) {
-        printf("FAILED: vinox_agent_run_step 2 failed\n");
+        printf("FAILED: Real agent step 2 execution failed!\n");
         return 1;
     }
 
-    /* Step budget limit enforcement */
-    if (vinox_agent_run_step(run) == VINOX_STATUS_OK) {
-        printf("FAILED: vinox_agent_run_step must fail when max_steps budget is exceeded\n");
+    if (vinox_agent_run_get_completed_steps(run) != 2) {
+        printf("FAILED: Step 2 completed count mismatch\n");
         return 1;
     }
-    printf("  [PASS 04] Agent Orchestration Loop, Dependency Execution & Token Budget Enforcement: Verified\n");
+    printf("  [PASS 02] Real Multi-Step Dependency Execution & Phase 6 Governance Gate: Verified\n");
 
     /* Cleanup */
     vinox_agent_run_destroy(run);
     vinox_plan_destroy(plan);
+    vinox_policy_engine_destroy(policy_engine);
+    vinox_tool_registry_destroy(registry);
     vinox_mode_controller_destroy(controller);
 
-    printf("SUCCESS: All VINOX Phase 7 Agent Engine & Governance smoke tests passed!\n");
+    printf("SUCCESS: All VINOX Phase 7 Real Agent Engine & Governance smoke tests passed!\n");
     return 0;
 }

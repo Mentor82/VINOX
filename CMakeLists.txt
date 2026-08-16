@@ -226,7 +226,7 @@ add_library(vinox_agent SHARED
 add_library(vinox::agent ALIAS vinox_agent)
 set_target_properties(vinox_agent PROPERTIES EXPORT_NAME agent)
 
-target_link_libraries(vinox_agent PRIVATE vinox::core nlohmann_json::nlohmann_json)
+target_link_libraries(vinox_agent PUBLIC vinox::core PRIVATE nlohmann_json::nlohmann_json)
 target_compile_definitions(vinox_agent PRIVATE VINOX_BUILD_SHARED)
 target_include_directories(vinox_agent
     PUBLIC

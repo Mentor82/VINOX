@@ -202,10 +202,21 @@ VINOX_API vinox_status VINOX_CALL vinox_sandbox_host_exec_tool(vinox_sandbox_hos
             // Deadline check (5000ms limit)
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_wait).count();
             if (elapsed > 5000) {
-                std::string err_msg = "{\"status\":\"ERROR\",\"error\":\"Host pipe read execution deadline timeout (5000 ms)\"}";
+                // Terminate runaway worker process to prevent background mutating execution
+                TerminateProcess(host->hProcess, 1);
+                CloseHandle(host->hProcess);
+                CloseHandle(host->hThread);
+                host->hProcess = NULL;
+                host->hThread = NULL;
+
+                std::string err_msg = "{\"status\":\"ERROR\",\"error\":\"INDETERMINATE_OUTCOME_MUTATION_CANCELLED: Host pipe read execution deadline timeout (5000 ms). Subprocess terminated.\"}";
                 if (err_msg.length() >= out_buf_sz) return VINOX_STATUS_OUT_OF_RANGE;
                 strncpy_s(out_buf, out_buf_sz, err_msg.c_str(), _TRUNCATE);
-                return VINOX_STATUS_RUNTIME_ERROR;
+
+                // Restart fresh worker process for subsequent calls
+                vinox_sandbox_host_start(host, "vinox_sandbox_worker.exe");
+
+                return VINOX_STATUS_CANCELLED;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }

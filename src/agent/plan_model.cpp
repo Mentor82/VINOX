@@ -295,4 +295,17 @@ VINOX_API vinox_status VINOX_CALL vinox_plan_approve(vinox_plan* plan, const cha
     return VINOX_STATUS_OK;
 }
 
+VINOX_API vinox_status VINOX_CALL vinox_plan_get_json(const vinox_plan* plan, char* out_buf, size_t out_buf_sz) {
+    if (!plan || !out_buf || out_buf_sz < 1) return VINOX_STATUS_INVALID_ARGUMENT;
+    std::string s = plan->raw_json.dump();
+    if (s.length() >= out_buf_sz) return VINOX_STATUS_OUT_OF_RANGE;
+#if defined(_WIN32)
+    strncpy_s(out_buf, out_buf_sz, s.c_str(), _TRUNCATE);
+#else
+    strncpy(out_buf, s.c_str(), out_buf_sz - 1);
+    out_buf[out_buf_sz - 1] = '\0';
+#endif
+    return VINOX_STATUS_OK;
+}
+
 } // extern "C"
