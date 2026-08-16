@@ -607,6 +607,53 @@ int main(void) {
         sqlite3_finalize(count_stmt);
     }
 
+    // -------------------------------------------------------------
+    // TEST 14: Phase 5.3 Vector Store Atomic State Fail-Closed Verification
+    // -------------------------------------------------------------
+    float bad_512_emb[512];
+    for (int i = 0; i < 512; ++i) bad_512_emb[i] = 0.1f;
+    const char* atomic_test_chunk = "atomicity_test_chunk_id";
+    if (vinox_storage_store_chunk_embedding(engine, atomic_test_chunk, bad_512_emb, 512) == VINOX_STATUS_OK) {
+        printf("FAILED: Store chunk embedding with dimension mismatch should fail!\n");
+        vinox_storage_engine_close(fresh_engine);
+        remove(fresh_db_file);
+        sqlite3_close(raw_db);
+        vinox_storage_engine_close(engine);
+        remove(db_file);
+        return 46;
+    }
+    // Verify that NO partial record was written to chunk_embeddings
+    sqlite3_stmt* check_chunk_stmt = NULL;
+    if (sqlite3_prepare_v2(raw_db, "SELECT COUNT(*) FROM chunk_embeddings WHERE chunk_id='atomicity_test_chunk_id';", -1, &check_chunk_stmt, NULL) == SQLITE_OK) {
+        if (sqlite3_step(check_chunk_stmt) == SQLITE_ROW) {
+            int cnt = sqlite3_column_int(check_chunk_stmt, 0);
+            if (cnt != 0) {
+                printf("FAILED: Store chunk embedding leaves partial relational record on error!\n");
+                sqlite3_finalize(check_chunk_stmt);
+                vinox_storage_engine_close(fresh_engine);
+                remove(fresh_db_file);
+                sqlite3_close(raw_db);
+                vinox_storage_engine_close(engine);
+                remove(db_file);
+                return 47;
+            }
+        }
+        sqlite3_finalize(check_chunk_stmt);
+    }
+
+    // -------------------------------------------------------------
+    // TEST 15: Phase 5.4 Import Fail-Closed Row-Error Rollback Verification
+    // -------------------------------------------------------------
+    if (vinox_storage_import_json(engine, "{\"version\": 1, \"messages\": [\"invalid_schema_item\"]}") == VINOX_STATUS_OK) {
+        printf("FAILED: Malformed JSON import should fail closed!\n");
+        vinox_storage_engine_close(fresh_engine);
+        remove(fresh_db_file);
+        sqlite3_close(raw_db);
+        vinox_storage_engine_close(engine);
+        remove(db_file);
+        return 48;
+    }
+
     vinox_storage_engine_close(fresh_engine);
     remove(fresh_db_file);
     sqlite3_close(raw_db);
