@@ -118,7 +118,23 @@ int main(void) {
     vinox_agent_run_destroy(ungov_run);
     printf("  [PASS 02] Missing Governance Fail-Closed Gate (PERMISSION_DENIED): Verified\n");
 
-    /* 6. Real Agent Step Execution with Mandatory Governance & ACTUAL Sandbox Tool Execution */
+    /* 6. Fail-Closed Test: Step Execution FAILS if Sandbox Executor is Missing */
+    vinox_agent_run* unexec_run = vinox_agent_run_create(controller, plan, &budget);
+    if (!unexec_run) {
+        printf("FAILED: vinox_agent_run_create returned NULL\n");
+        return 1;
+    }
+    vinox_agent_run_set_governance(unexec_run, registry, policy_engine);
+    // Intentionally omit vinox_agent_run_set_sandbox!
+
+    if (vinox_agent_run_step(unexec_run) != VINOX_STATUS_INVALID_STATE) {
+        printf("FAILED: Tool step MUST fail closed if no sandbox executor is bound!\n");
+        return 1;
+    }
+    vinox_agent_run_destroy(unexec_run);
+    printf("  [PASS 03] Missing Sandbox Executor Fail-Closed Gate (INVALID_STATE): Verified\n");
+
+    /* 7. Real Agent Step Execution with Mandatory Governance & ACTUAL Sandbox Tool Execution */
     vinox_agent_run* run = vinox_agent_run_create(controller, plan, &budget);
     if (!run) {
         printf("FAILED: vinox_agent_run_create returned NULL\n");
@@ -148,9 +164,9 @@ int main(void) {
         printf("FAILED: Step 2 completed count mismatch\n");
         return 1;
     }
-    printf("  [PASS 03] Real Multi-Step Execution, Mandatory Governance & Actual Sandbox Dispatch: Verified\n");
+    printf("  [PASS 04] Real Multi-Step Execution, Mandatory Governance & Actual Sandbox Dispatch: Verified\n");
 
-    /* 7. Plan Extraction Fail-Closed on Run Creation */
+    /* 8. Plan Extraction Fail-Closed on Run Creation */
     const char* empty_steps_plan_json = "{\"goal\":\"Invalid\",\"steps\":[]}";
     vinox_plan* empty_plan = vinox_plan_create(empty_steps_plan_json);
     if (empty_plan) {
@@ -163,7 +179,7 @@ int main(void) {
         }
         vinox_plan_destroy(empty_plan);
     }
-    printf("  [PASS 04] Empty Plan Extraction Fail-Closed Rejection: Verified\n");
+    printf("  [PASS 05] Empty Plan Extraction Fail-Closed Rejection: Verified\n");
 
     /* Cleanup */
     vinox_agent_run_destroy(run);

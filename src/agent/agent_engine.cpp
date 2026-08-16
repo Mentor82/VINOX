@@ -222,19 +222,27 @@ VINOX_API vinox_status VINOX_CALL vinox_agent_run_step(vinox_agent_run* run) {
         return VINOX_STATUS_OUT_OF_RANGE;
     }
 
-    // 5. Governance Evaluation & ACTUAL Tool Execution
-    size_t step_cost_units = (ready_step->description.length() / 4) + 16;
+    // 5. Mandatory Governance & Mandatory Sandbox Executor Gates
+    size_t step_token_budget_units = (ready_step->description.length() / 4) + 16;
+
+    if (!ready_step->tool_calls.empty()) {
+        // Nephy Finding 1: Mandatory Governance Gate (Fail-Closed if missing!)
+        if (!run->registry || !run->policy_engine) {
+            run->run_status = VINOX_PLAN_STATUS_FAILED;
+            return VINOX_STATUS_PERMISSION_DENIED;
+        }
+
+        // Nephy Follow-up Review Fix: Mandatory Sandbox Executor Gate (Fail-Closed if missing!)
+        if (!run->sandbox_host) {
+            run->run_status = VINOX_PLAN_STATUS_FAILED;
+            return VINOX_STATUS_INVALID_STATE; // Tool step execution impossible without bound sandbox executor!
+        }
+    }
 
     for (const auto& tc : ready_step->tool_calls) {
         if (run->total_tool_calls >= run->budget.max_tool_calls) {
             run->run_status = VINOX_PLAN_STATUS_FAILED;
             return VINOX_STATUS_OUT_OF_RANGE;
-        }
-
-        // Nephy Finding 1: Mandatory Governance Gate (Fail-Closed if missing!)
-        if (!run->registry || !run->policy_engine) {
-            run->run_status = VINOX_PLAN_STATUS_FAILED;
-            return VINOX_STATUS_PERMISSION_DENIED; // Fail closed if registry or policy engine missing!
         }
 
         // Phase 6 Tool Registry Lookup & Parameter Schema Validation
@@ -272,28 +280,26 @@ VINOX_API vinox_status VINOX_CALL vinox_agent_run_step(vinox_agent_run* run) {
             return VINOX_STATUS_PERMISSION_DENIED; // Governance Policy Refusal Gate!
         }
 
-        // Nephy Finding 2: ACTUAL TOOL EXECUTION DISPATCH via Sandbox Worker!
-        if (run->sandbox_host) {
-            char exec_res_buf[4096] = {0};
-            vinox_status exec_st = vinox_sandbox_host_exec_tool(run->sandbox_host, tc.name.c_str(), tc.arguments_json.c_str(), exec_res_buf, sizeof(exec_res_buf));
-            if (exec_st != VINOX_STATUS_OK || strstr(exec_res_buf, "\"status\":\"OK\"") == NULL) {
-                run->run_status = VINOX_PLAN_STATUS_FAILED;
-                return VINOX_STATUS_RUNTIME_ERROR; // Real tool execution failure!
-            }
+        // ACTUAL TOOL EXECUTION DISPATCH via Sandbox Worker!
+        char exec_res_buf[4096] = {0};
+        vinox_status exec_st = vinox_sandbox_host_exec_tool(run->sandbox_host, tc.name.c_str(), tc.arguments_json.c_str(), exec_res_buf, sizeof(exec_res_buf));
+        if (exec_st != VINOX_STATUS_OK || strstr(exec_res_buf, "\"status\":\"OK\"") == NULL) {
+            run->run_status = VINOX_PLAN_STATUS_FAILED;
+            return VINOX_STATUS_RUNTIME_ERROR; // Real tool execution failure!
         }
 
         run->total_tool_calls++;
-        step_cost_units += (tc.arguments_json.length() / 4) + 16;
+        step_token_budget_units += (tc.arguments_json.length() / 4) + 16;
     }
 
     // Token & Cost Accounting
-    run->total_tokens_used += static_cast<int>(step_cost_units);
+    run->total_tokens_used += static_cast<int>(step_token_budget_units);
     if (run->total_tokens_used >= run->budget.max_tokens) {
         run->run_status = VINOX_PLAN_STATUS_FAILED;
         return VINOX_STATUS_OUT_OF_RANGE; // Max tokens budget exceeded!
     }
 
-    // Mark Step Completed ONLY after Governance & Execution succeed 100%!
+    // Mark Step Completed ONLY after Governance & ACTUAL Sandbox Execution succeed 100%!
     ready_step->completed = true;
     run->completed_steps++;
     run->current_step_idx++;
