@@ -143,26 +143,42 @@ int main() {
     }
 
     // Pinned negative regression case (flagged during the #20/#21 review,
-    // 2026-08-17): Llama3.3-8B-Instruct-Thinking-ov currently drops the
-    // user's question entirely from the rendered prompt, and misidentifies
+    // 2026-08-17): Llama3.3-8B-Instruct-Thinking-ov originally dropped the
+    // user's question entirely from the rendered prompt, and misidentified
     // the generic Llama role-header token `<|start_header_id|>` (present in
     // every message, not tool-specific) as a native tool boundary marker.
-    // This assertion intentionally pins the CURRENT BROKEN behavior so that
-    // replacing PackageTemplateExecutor with a real ITemplateRuntime (#21)
-    // trips this check -- at which point it must be rewritten to assert the
-    // correct behavior (user text present, no false tool-marker detection).
+    //
+    // 2026-08-18 update, after #21 (real ITemplateRuntime/minja rendering)
+    // landed: the dropped-user-text half is fixed -- rendering is now a
+    // faithful execution of the package's own template, so this half is
+    // re-pinned as a forward regression guard (must stay present).
+    // The bogus tool-marker half is a *separate* bug in #20's own delimiter-
+    // extraction heuristic (vinox_model_protocol_compile's
+    // extract_rendered_delimiter_pair grabs the first "<...>...</...>"-shaped
+    // pair in the tools probe render, and Llama3.3's role header happens to
+    // match that shape on every turn, tools or not) -- rendering correctness
+    // doesn't touch it, so it is re-pinned as still-broken pending Issue #20
+    // characterization work (tracked as a follow-up, not #21's scope).
     {
-        std::printf("[REGRESSION PIN] Llama3.3-8B-Instruct-Thinking-ov known-broken render ... ");
+        std::printf("[REGRESSION PIN] Llama3.3-8B-Instruct-Thinking-ov user text (fixed by #21) ... ");
         ProbeOutcome outcome = run_probe(root + "Llama3.3-8B-Instruct-Thinking-ov\\chat_template.jinja");
         if (outcome.compile_status != VINOX_STATUS_OK || outcome.encode_status != VINOX_STATUS_OK) {
             std::printf("[ SKIP ] (compile/encode did not succeed the way it did during triage)\n");
         } else {
             bool has_user_text = outcome.rendered_prompt.find("What is 2+2?") != std::string::npos;
-            bool bogus_tool_marker = std::strcmp(outcome.contract.tool_begin_marker, "<|start_header_id|>") == 0;
-            if (!has_user_text && bogus_tool_marker) {
-                std::printf("[ PASS ] (still broken as triaged: user text dropped, bogus tool marker) - fix pending #21\n");
+            if (has_user_text) {
+                std::printf("[ PASS ] (user text now present -- do not regress)\n");
             } else {
-                std::printf("[ CHANGED ] behavior differs from triage baseline -- update this pin to assert correctness\n");
+                std::printf("[ REGRESSED ] user text missing again -- #21 rendering has regressed\n");
+                return 1;
+            }
+
+            std::printf("[REGRESSION PIN] Llama3.3-8B-Instruct-Thinking-ov bogus tool marker (still open, #20 scope) ... ");
+            bool bogus_tool_marker = std::strcmp(outcome.contract.tool_begin_marker, "<|start_header_id|>") == 0;
+            if (bogus_tool_marker) {
+                std::printf("[ PASS ] (still misdetected as triaged -- fix pending #20 delimiter-extraction rework)\n");
+            } else {
+                std::printf("[ CHANGED ] tool-marker detection differs from triage baseline -- update this pin\n");
                 return 1;
             }
         }

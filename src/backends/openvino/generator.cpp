@@ -11,7 +11,7 @@
 #include <vector>
 #include <nlohmann/json.hpp>
 
-
+#include "minja_template_runtime.hpp"
 
 struct vinox_model {
     explicit vinox_model(const std::string& model_path, const std::string& device) {
@@ -209,7 +209,9 @@ public:
         const std::string& user,
         const std::string& tools,
         const std::string& prefill,
-        std::string& out_rendered
+        std::string& out_rendered,
+        const std::string& bos_token = "",
+        const std::string& eos_token = ""
     ) {
         std::string tpl = (profile->chat_template && profile->chat_template[0] != '\0') 
             ? profile->chat_template 
@@ -224,251 +226,44 @@ public:
         bool is_jinja = (tpl.find("{%") != std::string::npos || tpl.find("{{") != std::string::npos);
 
         if (is_jinja) {
-            // Authentic Jinja Interpreter — 100% Package-Driven, Zero C++ Default Inventions
-            out_rendered.clear();
-
-            struct MessageItem {
-                std::string role;
-                std::string content;
-            };
-
-            std::vector<MessageItem> msg_list;
+            // Issue #21: the package's own Jinja source is executed by a real
+            // template engine (MinjaTemplateRuntime) rather than pattern-matched
+            // against a handful of hardcoded phrases. The template's own
+            // add_generation_prompt logic is trusted to produce the correct
+            // generation prefix (e.g. a prefilled "<think>\n"), so unlike the
+            // old placeholder path below, no external `prefill` string is
+            // appended on top of a real template's own output.
+            vinox::model::TemplateRenderRequest treq;
+            treq.template_source = tpl;
             if (!sys.empty()) {
-                msg_list.push_back({"system", sys});
+                treq.messages.push_back(vinox::model::TemplateMessage{"system", sys, "", ""});
             }
-            msg_list.push_back({"user", user});
+            treq.messages.push_back(vinox::model::TemplateMessage{"user", user, "", ""});
+            treq.tools_json = tools;
+            treq.add_generation_prompt = true;
+            treq.bos_token = bos_token;
+            treq.eos_token = eos_token;
 
-            std::string default_sys_msg = "";
-            size_t set_pos = tpl.find("set system_message =");
-            if (set_pos != std::string::npos) {
-                size_t q_start = tpl.find("'", set_pos);
-                if (q_start != std::string::npos) {
-                    size_t q_end = tpl.find("'", q_start + 1);
-                    if (q_end != std::string::npos) {
-                        default_sys_msg = tpl.substr(q_start + 1, q_end - (q_start + 1));
-                    }
-                }
-            }
+            static const vinox::model::MinjaTemplateRuntime runtime;
+            vinox::model::TemplateRenderResult render_result = runtime.render(treq);
 
-            auto evaluate_jinja_expr = [&](const std::string& raw_expr, const MessageItem& current_msg) -> std::string {
-                std::string expr = raw_expr;
-                std::string result;
-                
-                size_t p = 0;
-                while (p < expr.length()) {
-                    if (expr[p] == '\'' || expr[p] == '"') {
-                        char q = expr[p++];
-                        size_t start_lit = p;
-                        while (p < expr.length() && expr[p] != q) {
-                            if (expr[p] == '\\' && p + 1 < expr.length()) p += 2;
-                            else p++;
-                        }
-                        std::string lit = expr.substr(start_lit, p - start_lit);
-                        if (p < expr.length()) p++;
-                        
-                        size_t esc_pos = 0;
-                        while ((esc_pos = lit.find("\\n", esc_pos)) != std::string::npos) {
-                            lit.replace(esc_pos, 2, "\n");
-                            esc_pos += 1;
-                        }
-                        result += lit;
-                    } else if (std::isalpha(static_cast<unsigned char>(expr[p])) || expr[p] == '_') {
-                        size_t start_ident = p;
-                        while (p < expr.length() && (std::isalnum(static_cast<unsigned char>(expr[p])) || expr[p] == '_' || expr[p] == '[' || expr[p] == ']' || expr[p] == '.' || expr[p] == '\'')) p++;
-                        std::string ident = expr.substr(start_ident, p - start_ident);
-                        
-                        if (ident.find("messages[0]['content']") != std::string::npos || ident.find("messages[0].content") != std::string::npos) {
-                            result += sys.empty() ? default_sys_msg : sys;
-                        } else if (ident.find("system_message") != std::string::npos) {
-                            result += sys.empty() ? default_sys_msg : sys;
-                        } else if (ident.find("content") != std::string::npos || ident.find("message['content']") != std::string::npos) {
-                            result += current_msg.content;
-                        } else if (ident.find("role") != std::string::npos || ident.find("message['role']") != std::string::npos) {
-                            result += current_msg.role;
-                        } else if (ident.find("tools") != std::string::npos) {
-                            result += tools;
-                        }
-                    } else {
-                        p++;
-                    }
-                }
-                return result;
-            };
-
-            size_t max_output_size = VINOX_PROTOCOL_MAX_TPL_LEN;
-            size_t loop_safety = 0;
-            size_t pos = 0;
-
-            while (pos < tpl.length()) {
-                if (++loop_safety > 4096) {
-                    last_error = "Package Jinja execution loop safety bound exceeded";
+            switch (render_result.status) {
+                case vinox::model::TemplateRenderStatus::Ok:
+                    out_rendered = std::move(render_result.rendered_text);
+                    return VINOX_STATUS_OK;
+                case vinox::model::TemplateRenderStatus::Unsupported:
+                    last_error = render_result.error_detail.empty()
+                        ? "Package chat template uses unsupported Jinja constructs"
+                        : render_result.error_detail;
+                    return VINOX_STATUS_MODEL_PROTOCOL_UNSUPPORTED;
+                case vinox::model::TemplateRenderStatus::ResourceExceeded:
+                case vinox::model::TemplateRenderStatus::Invalid:
+                default:
+                    last_error = render_result.error_detail.empty()
+                        ? "Package chat template failed to render"
+                        : render_result.error_detail;
                     return VINOX_STATUS_MODEL_PROTOCOL_INVALID;
-                }
-
-                // Match Jinja Statement Block {% ... %}
-                if (tpl.find("{%", pos) == pos) {
-                    size_t block_end = tpl.find("%}", pos);
-                    if (block_end == std::string::npos) {
-                        last_error = "Malformed Jinja control block in package template";
-                        return VINOX_STATUS_MODEL_PROTOCOL_INVALID;
-                    }
-                    std::string stmt = tpl.substr(pos + 2, block_end - (pos + 2));
-                    pos = block_end + 2;
-
-                    if (stmt.find("for message in messages") != std::string::npos || stmt.find("for msg in messages") != std::string::npos) {
-                        size_t endfor_pos = tpl.find("{% endfor %}", pos);
-                        if (endfor_pos == std::string::npos) endfor_pos = tpl.find("{%- endfor %}", pos);
-                        if (endfor_pos == std::string::npos) {
-                            last_error = "Unclosed Jinja message loop in package template";
-                            return VINOX_STATUS_MODEL_PROTOCOL_INVALID;
-                        }
-
-                        std::string loop_body = tpl.substr(pos, endfor_pos - pos);
-                        size_t loop_end_end = tpl.find("%}", endfor_pos);
-                        pos = (loop_end_end != std::string::npos) ? loop_end_end + 2 : endfor_pos + 12;
-
-                        for (const auto& item : msg_list) {
-                            size_t body_pos = 0;
-                            while (body_pos < loop_body.length()) {
-                                // Evaluate Jinja conditional statement block {% ... %} inside loop
-                                if (loop_body.find("{%", body_pos) == body_pos) {
-                                    size_t stmt_end = loop_body.find("%}", body_pos);
-                                    if (stmt_end != std::string::npos) {
-                                        std::string stmt = loop_body.substr(body_pos + 2, stmt_end - (body_pos + 2));
-                                        size_t stmt_close = loop_body.find("{%", stmt_end + 2);
-                                        size_t stmt_close_end = (stmt_close != std::string::npos) ? loop_body.find("%}", stmt_close + 2) : std::string::npos;
-                                        
-                                        if (stmt.find("role") != std::string::npos && stmt_close != std::string::npos && stmt_close_end != std::string::npos) {
-                                            bool matches = (stmt.find("'" + item.role + "'") != std::string::npos || 
-                                                            stmt.find("\"" + item.role + "\"") != std::string::npos ||
-                                                            stmt.find("message.role == \"" + item.role + "\"") != std::string::npos);
-                                            std::string inner_body = loop_body.substr(stmt_end + 2, stmt_close - (stmt_end + 2));
-                                            if (matches) {
-                                                size_t ib_pos = 0;
-                                                while (ib_pos < inner_body.length()) {
-                                                    if (inner_body.find("{{", ib_pos) == ib_pos) {
-                                                        size_t expr_end = inner_body.find("}}", ib_pos);
-                                                        if (expr_end != std::string::npos) {
-                                                            std::string expr = inner_body.substr(ib_pos + 2, expr_end - (ib_pos + 2));
-                                                            out_rendered += evaluate_jinja_expr(expr, item);
-                                                            ib_pos = expr_end + 2;
-                                                            continue;
-                                                        }
-                                                    }
-                                                    out_rendered += inner_body[ib_pos++];
-                                                }
-                                            }
-                                            body_pos = stmt_close_end + 2;
-                                            continue;
-                                        }
-                                        body_pos = stmt_end + 2;
-                                        continue;
-                                    }
-                                }
-
-                                if (loop_body.find("{{", body_pos) == body_pos) {
-                                    size_t expr_end = loop_body.find("}}", body_pos);
-                                    if (expr_end != std::string::npos) {
-                                        std::string expr = loop_body.substr(body_pos + 2, expr_end - (body_pos + 2));
-                                        out_rendered += evaluate_jinja_expr(expr, item);
-                                        body_pos = expr_end + 2;
-                                        continue;
-                                    }
-                                }
-                                out_rendered += loop_body[body_pos++];
-                            }
-                        }
-                    } else if (stmt.find("if tools") != std::string::npos || stmt.find("if defined('tools')") != std::string::npos || stmt.find("if tools is defined") != std::string::npos) {
-                        size_t endif_pos = tpl.find("{% endif %}", pos);
-                        if (endif_pos == std::string::npos) endif_pos = tpl.find("{%- endif %}", pos);
-                        if (endif_pos == std::string::npos) {
-                            last_error = "Unclosed Jinja tools if-block in package template";
-                            return VINOX_STATUS_MODEL_PROTOCOL_INVALID;
-                        }
-
-                        std::string if_body = tpl.substr(pos, endif_pos - pos);
-                        size_t endif_end = tpl.find("%}", endif_pos);
-                        pos = (endif_end != std::string::npos) ? endif_end + 2 : endif_pos + 11;
-
-                        if (!tools.empty()) {
-                            size_t ib_pos = 0;
-                            while (ib_pos < if_body.length()) {
-                                if (if_body.find("{%", ib_pos) == ib_pos) {
-                                    size_t inner_stmt_end = if_body.find("%}", ib_pos);
-                                    if (inner_stmt_end != std::string::npos) {
-                                        ib_pos = inner_stmt_end + 2;
-                                        continue;
-                                    }
-                                }
-                                if (if_body.find("{{", ib_pos) == ib_pos) {
-                                    size_t expr_end = if_body.find("}}", ib_pos);
-                                    if (expr_end != std::string::npos) {
-                                        std::string expr = if_body.substr(ib_pos + 2, expr_end - (ib_pos + 2));
-                                        MessageItem sys_item{"system", sys};
-                                        out_rendered += evaluate_jinja_expr(expr, sys_item);
-                                        ib_pos = expr_end + 2;
-                                        continue;
-                                    }
-                                }
-                                out_rendered += if_body[ib_pos++];
-                            }
-                        }
-                    } else if (stmt.find("add_generation_prompt") != std::string::npos) {
-                        size_t endif_pos = tpl.find("{% endif %}", pos);
-                        if (endif_pos == std::string::npos) endif_pos = tpl.find("{%- endif %}", pos);
-                        if (endif_pos != std::string::npos) {
-                            std::string gen_body = tpl.substr(pos, endif_pos - pos);
-                            size_t endif_end = tpl.find("%}", endif_pos);
-                            pos = (endif_end != std::string::npos) ? endif_end + 2 : endif_pos + 11;
-
-                            size_t ib_pos = 0;
-                            while (ib_pos < gen_body.length()) {
-                                if (gen_body.find("{%", ib_pos) == ib_pos) {
-                                    size_t inner_stmt_end = gen_body.find("%}", ib_pos);
-                                    if (inner_stmt_end != std::string::npos) {
-                                        ib_pos = inner_stmt_end + 2;
-                                        continue;
-                                    }
-                                }
-                                if (gen_body.find("{{", ib_pos) == ib_pos) {
-                                    size_t expr_end = gen_body.find("}}", ib_pos);
-                                    if (expr_end != std::string::npos) {
-                                        ib_pos = expr_end + 2;
-                                        continue;
-                                    }
-                                }
-                                out_rendered += gen_body[ib_pos++];
-                            }
-                        }
-                    }
-                    continue;
-                }
-
-                // Match Jinja Expression Block {{ ... }} outside loop
-                if (tpl.find("{{", pos) == pos) {
-                    size_t expr_end = tpl.find("}}", pos);
-                    if (expr_end != std::string::npos) {
-                        std::string expr = tpl.substr(pos + 2, expr_end - (pos + 2));
-                        pos = expr_end + 2;
-                        MessageItem sys_item{"system", sys};
-                        out_rendered += evaluate_jinja_expr(expr, sys_item);
-                        continue;
-                    }
-                }
-
-                // Preserve Literal Characters 1:1 outside tags
-                out_rendered += tpl[pos++];
-                if (out_rendered.length() >= max_output_size) {
-                    last_error = "Package Jinja output exceeded maximum memory bounds";
-                    return VINOX_STATUS_MODEL_PROTOCOL_INVALID;
-                }
             }
-
-            if (!prefill.empty() && prefill != "Assistant:") {
-                out_rendered += prefill;
-            }
-
-            return VINOX_STATUS_OK;
         }
 
         // Placeholder Template Engine ({system}, {user}, {tools}, {prefill})
@@ -596,6 +391,24 @@ vinox_status vinox_model_protocol_compile(
 
     std::string tok_cfg = tokenizer_config_json ? tokenizer_config_json : "";
 
+    // Extract EOS Token from Tokenizer Config or Fallback to Protocol Standard.
+    // Computed up front (rather than after probing) so the probes below render
+    // with the same eos_token a real encode_prompt call would see -- templates
+    // that reference {{ eos_token }} must be probed faithfully.
+    std::string eos = "<|im_end|>";
+    if (!tok_cfg.empty()) {
+        try {
+            auto j_cfg = nlohmann::json::parse(tok_cfg);
+            if (j_cfg.contains("eos_token")) {
+                if (j_cfg["eos_token"].is_string()) {
+                    eos = j_cfg["eos_token"].get<std::string>();
+                } else if (j_cfg["eos_token"].is_object() && j_cfg["eos_token"].contains("content")) {
+                    eos = j_cfg["eos_token"]["content"].get<std::string>();
+                }
+            }
+        } catch (...) {}
+    }
+
     // Pure Data-Driven Synthetic Behavioral Probing Suite
     // Evaluates rendered output framing diffs strictly without template source scanning or hardcoded tag lists.
     vinox_model_profile probe_profile{};
@@ -607,14 +420,14 @@ vinox_status vinox_model_protocol_compile(
     std::string probe_think;
     std::string probe_tools;
 
-    vinox_status st_std = PackageTemplateExecutor::execute_render(&probe_profile, "SYS_PROBE_ALPHA", "USER_PROBE_BETA", "", "Assistant:", probe_std);
+    vinox_status st_std = PackageTemplateExecutor::execute_render(&probe_profile, "SYS_PROBE_ALPHA", "USER_PROBE_BETA", "", "Assistant:", probe_std, "", eos);
     if (st_std != VINOX_STATUS_OK) {
         last_error = "Synthetic probe render failed for model template";
         return st_std;
     }
 
-    PackageTemplateExecutor::execute_render(&probe_profile, "SYS_PROBE_ALPHA /think", "USER_PROBE_BETA", "", "Assistant:", probe_think);
-    PackageTemplateExecutor::execute_render(&probe_profile, "SYS_PROBE_ALPHA", "USER_PROBE_BETA", "{\"name\": \"calculator\"}", "Assistant:", probe_tools);
+    PackageTemplateExecutor::execute_render(&probe_profile, "SYS_PROBE_ALPHA /think", "USER_PROBE_BETA", "", "Assistant:", probe_think, "", eos);
+    PackageTemplateExecutor::execute_render(&probe_profile, "SYS_PROBE_ALPHA", "USER_PROBE_BETA", "{\"name\": \"calculator\"}", "Assistant:", probe_tools, "", eos);
 
     std::string r_start = "";
     std::string r_end = "";
@@ -778,20 +591,6 @@ vinox_status vinox_model_protocol_compile(
     std::strncpy(contract->tool_call_marker, t_call.c_str(), sizeof(contract->tool_call_marker) - 1);
     std::strncpy(contract->tool_end_marker, t_end.c_str(), sizeof(contract->tool_end_marker) - 1);
 
-    // Extract EOS Token from Tokenizer Config or Fallback to Protocol Standard
-    std::string eos = "<|im_end|>";
-    if (!tok_cfg.empty()) {
-        try {
-            auto j_cfg = nlohmann::json::parse(tok_cfg);
-            if (j_cfg.contains("eos_token")) {
-                if (j_cfg["eos_token"].is_string()) {
-                    eos = j_cfg["eos_token"].get<std::string>();
-                } else if (j_cfg["eos_token"].is_object() && j_cfg["eos_token"].contains("content")) {
-                    eos = j_cfg["eos_token"]["content"].get<std::string>();
-                }
-            }
-        } catch (...) {}
-    }
     std::strncpy(contract->eos_token, eos.c_str(), sizeof(contract->eos_token) - 1);
 
     char hbuf[65] = {0};
@@ -829,7 +628,27 @@ vinox_status vinox_model_protocol_encode_prompt(
     prof.chat_template = contract->chat_template;
     prof.generation_prefill = contract->assistant_prefix;
 
-    return vinox_model_profile_format_prompt(&prof, system_prompt, user_prompt, tools_json_schema, out_buf, out_buf_size, out_written);
+    std::string sys = system_prompt ? system_prompt : "";
+    std::string tools = tools_json_schema ? tools_json_schema : "";
+    std::string prefill = contract->assistant_prefix ? contract->assistant_prefix : "";
+
+    std::string formatted;
+    // Threads the contract's compiled eos_token through so a real Jinja
+    // template referencing {{ eos_token }} renders faithfully, not with an
+    // empty placeholder (Issue #21).
+    vinox_status render_st = PackageTemplateExecutor::execute_render(
+        &prof, sys, std::string(user_prompt), tools, prefill, formatted, "", contract->eos_token);
+    if (render_st != VINOX_STATUS_OK) {
+        return render_st;
+    }
+
+    if (formatted.length() >= out_buf_size) {
+        return fail_arg("out_buf size is too small for formatted prompt");
+    }
+
+    std::memcpy(out_buf, formatted.c_str(), formatted.length() + 1);
+    if (out_written) *out_written = formatted.length();
+    return VINOX_STATUS_OK;
 }
 
 vinox_status vinox_model_protocol_decode_tool_call(

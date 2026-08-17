@@ -393,7 +393,7 @@ if(BUILD_TESTING)
         add_test(NAME qwen2_5_eval_smoke COMMAND vinox_qwen2_5_eval_smoke)
 
         if(WIN32 AND VINOX_OPENVINO_SDK_ROOT)
-            set_tests_properties(openvino_abi_smoke reasoning_channel_smoke model_protocol_compiler_smoke qwen2_5_eval_smoke cli_process_smoke template_protocol_evidence_probe PROPERTIES ENVIRONMENT
+            set_tests_properties(openvino_abi_smoke reasoning_channel_smoke model_protocol_compiler_smoke qwen2_5_eval_smoke cli_process_smoke template_protocol_evidence_probe realtime_evidence_harness PROPERTIES ENVIRONMENT
                 "PATH=C:/ai/openvino_genai_2026.2.1/openvino_genai_windows_2026.2.1.0_x86_64/runtime/bin/intel64/Release\\\;C:/ai/openvino_genai_2026.2.1/openvino_genai_windows_2026.2.1.0_x86_64/runtime/3rdparty/tbb/bin\\\;${VINOX_OPENVINO_SDK_ROOT}/runtime/bin/intel64/$<CONFIG>\\\;${VINOX_OPENVINO_SDK_ROOT}/runtime/3rdparty/tbb/bin\\\;$ENV{PATH}"
             )
         endif()
