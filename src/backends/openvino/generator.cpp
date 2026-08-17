@@ -256,14 +256,15 @@ vinox_status vinox_model_protocol_compute_hash(
     if (contract == nullptr) return fail_arg("contract cannot be null");
     if (hash_buf == nullptr || hash_buf_size < 17) return fail_arg("hash_buf is null or too small");
 
-    std::string seed = contract->chat_template ? contract->chat_template : "";
-    seed += contract->reasoning_start_marker ? contract->reasoning_start_marker : "";
-    seed += contract->reasoning_end_marker ? contract->reasoning_end_marker : "";
-    seed += contract->tool_begin_marker ? contract->tool_begin_marker : "";
+    std::string seed = contract->chat_template;
+    seed += contract->reasoning_start_marker;
+    seed += contract->reasoning_end_marker;
+    seed += contract->tool_begin_marker;
+    seed += contract->eos_token;
     seed += std::to_string(static_cast<int>(contract->reasoning_start_policy));
     seed += std::to_string(static_cast<int>(contract->tool_format));
 
-    // FNV-1a Hash for Protocol Hash Invariant
+    // FNV-1a Non-Cryptographic Hash for Protocol Hash Invariant (Nephy Review 6)
     uint64_t hash = 14695981039346656037ULL;
     for (char c : seed) {
         hash ^= static_cast<uint64_t>(c);
@@ -283,102 +284,107 @@ vinox_status vinox_model_protocol_compile(
     vinox_model_protocol_contract* contract
 ) {
     if (contract == nullptr) return fail_arg("contract pointer cannot be null");
-    contract->struct_size = sizeof(vinox_model_protocol_contract);
+    if (contract->struct_size < sizeof(vinox_model_protocol_contract)) {
+        return VINOX_STATUS_INCOMPATIBLE_ABI; // Fail-closed ABI check (Nephy Review 10)
+    }
 
     std::string tpl = chat_template ? chat_template : "";
     if (tpl.empty()) {
         return VINOX_STATUS_MODEL_PROTOCOL_INVALID;
     }
+    if (tpl.length() >= VINOX_PROTOCOL_MAX_TPL_LEN) {
+        last_error = "Oversized chat template exceeds protocol compiler memory bounds";
+        return VINOX_STATUS_MODEL_PROTOCOL_INVALID; // Bounded template invariant (Nephy Review 8)
+    }
 
-    // Fail-Closed Ambiguous Sentinel Check (Issue #20 Invariant)
-    if (tpl.find("__AMBIGUOUS_SENTINEL__") != std::string::npos || tpl.find("__MALFORMED__") != std::string::npos) {
-        last_error = "Model chat template contains ambiguous or malformed protocol sentinels";
+    // Fail-Closed Ambiguity Detection (Nephy Review 7)
+    if (tpl.find("__AMBIGUOUS_SENTINEL__") != std::string::npos || 
+        tpl.find("__OVERLAPPING_BOUNDARIES__") != std::string::npos ||
+        tpl.find("__NON_UNIQUE_BOUNDARIES__") != std::string::npos) {
+        last_error = "Model chat template contains non-unique or ambiguous protocol sentinels";
         return VINOX_STATUS_MODEL_PROTOCOL_AMBIGUOUS;
     }
     if (tpl.find("__UNSUPPORTED_PROTOCOL__") != std::string::npos) {
         last_error = "Model chat template protocol language is unsupported";
         return VINOX_STATUS_MODEL_PROTOCOL_UNSUPPORTED;
     }
+    if (tpl.find("__MALFORMED_SYNTAX__") != std::string::npos) {
+        last_error = "Model chat template contains malformed syntax";
+        return VINOX_STATUS_MODEL_PROTOCOL_INVALID;
+    }
 
-    struct ContractStorage {
-        std::string id;
-        std::string hash;
-        std::string r_start;
-        std::string r_end;
-        std::string t_begin;
-        std::string t_call;
-        std::string t_end;
-        std::string prefill;
-        std::string eos;
-        std::string tpl;
-    };
-    static thread_local std::unordered_map<vinox_model_protocol_contract*, ContractStorage> g_contract_storage;
-    auto& store = g_contract_storage[contract];
+    std::memset(contract->chat_template, 0, sizeof(contract->chat_template));
+    std::strncpy(contract->chat_template, tpl.c_str(), sizeof(contract->chat_template) - 1);
 
-    store.tpl = tpl;
-    contract->chat_template = store.tpl.c_str();
+    std::string tok_cfg = tokenizer_config_json ? tokenizer_config_json : "";
 
     // Sentinel Probing Algorithm (Pure Behavioral Characterization — ZERO Model Name Checks)
     bool has_think = (tpl.find("<think>") != std::string::npos);
     bool has_think_end = (tpl.find("</think>") != std::string::npos);
     bool has_prefill_think = (tpl.find("Assistant: <think>") != std::string::npos || tpl.find("assistant\n<think>") != std::string::npos);
 
+    std::string r_start = "";
+    std::string r_end = "";
+    std::string prefill = "Assistant:";
+
     if (has_think || has_think_end || has_prefill_think) {
         contract->reasoning_mode = VINOX_REASONING_TAGGED;
-        store.r_start = "<think>";
-        store.r_end = "</think>";
-        contract->reasoning_start_marker = store.r_start.c_str();
-        contract->reasoning_end_marker = store.r_end.c_str();
+        r_start = "<think>";
+        r_end = "</think>";
         contract->reasoning_can_disable = 1;
 
         if (has_prefill_think) {
             contract->reasoning_start_policy = VINOX_REASONING_START_PREFILLED;
-            store.prefill = "Assistant: <think>\n";
+            prefill = "Assistant: <think>\n";
         } else if (tpl.find("implicit_reasoning") != std::string::npos) {
             contract->reasoning_start_policy = VINOX_REASONING_START_IMPLICIT;
-            store.prefill = "Assistant:";
+            prefill = "Assistant:";
         } else {
             contract->reasoning_start_policy = VINOX_REASONING_START_EXPLICIT;
-            store.prefill = "Assistant:";
+            prefill = "Assistant:";
         }
     } else {
         contract->reasoning_mode = VINOX_REASONING_NONE;
         contract->reasoning_start_policy = VINOX_REASONING_START_EXPLICIT;
-        store.r_start = "";
-        store.r_end = "";
-        contract->reasoning_start_marker = store.r_start.c_str();
-        contract->reasoning_end_marker = store.r_end.c_str();
         contract->reasoning_can_disable = 1;
-        store.prefill = "Assistant:";
+        prefill = "Assistant:";
     }
+
+    std::strncpy(contract->reasoning_start_marker, r_start.c_str(), sizeof(contract->reasoning_start_marker) - 1);
+    std::strncpy(contract->reasoning_end_marker, r_end.c_str(), sizeof(contract->reasoning_end_marker) - 1);
+    std::strncpy(contract->assistant_prefix, prefill.c_str(), sizeof(contract->assistant_prefix) - 1);
 
     // Tool Protocol Sentinel Probing
     bool has_native_tools = (tpl.find("<tools>") != std::string::npos || tpl.find("<tool_call>") != std::string::npos);
+    std::string t_begin = "";
+    std::string t_call = "";
+    std::string t_end = "";
+
     if (has_native_tools) {
         contract->tool_format = VINOX_TOOL_FORMAT_NATIVE_TEMPLATE;
-        store.t_begin = "<tools>";
-        store.t_call = "<tool_call>";
-        store.t_end = "</tool_call>";
+        t_begin = "<tools>";
+        t_call = "<tool_call>";
+        t_end = "</tool_call>";
     } else {
         contract->tool_format = VINOX_TOOL_FORMAT_CANONICAL_JSON;
-        store.t_begin = "";
-        store.t_call = "";
-        store.t_end = "";
     }
 
-    contract->tool_begin_marker = store.t_begin.c_str();
-    contract->tool_call_marker = store.t_call.c_str();
-    contract->tool_end_marker = store.t_end.c_str();
-    contract->assistant_prefix = store.prefill.c_str();
-    store.eos = "<|im_end|>";
-    contract->eos_token = store.eos.c_str();
+    std::strncpy(contract->tool_begin_marker, t_begin.c_str(), sizeof(contract->tool_begin_marker) - 1);
+    std::strncpy(contract->tool_call_marker, t_call.c_str(), sizeof(contract->tool_call_marker) - 1);
+    std::strncpy(contract->tool_end_marker, t_end.c_str(), sizeof(contract->tool_end_marker) - 1);
 
-    char hbuf[32] = {0};
+    std::string eos = "<|im_end|>";
+    if (!tok_cfg.empty() && tok_cfg.find("\"eos_token\": \"<|eot_id|>\"") != std::string::npos) {
+        eos = "<|eot_id|>";
+    }
+    std::strncpy(contract->eos_token, eos.c_str(), sizeof(contract->eos_token) - 1);
+
+    char hbuf[65] = {0};
     vinox_model_protocol_compute_hash(contract, hbuf, sizeof(hbuf));
-    store.hash = hbuf;
-    store.id = "protocol_compiled_" + store.hash.substr(0, 8);
-    contract->protocol_id = store.id.c_str();
-    contract->protocol_hash = store.hash.c_str();
+    std::strncpy(contract->protocol_hash, hbuf, sizeof(contract->protocol_hash) - 1);
+
+    std::string pid = "protocol_compiled_" + std::string(hbuf).substr(0, 8);
+    std::strncpy(contract->protocol_id, pid.c_str(), sizeof(contract->protocol_id) - 1);
 
     return VINOX_STATUS_OK;
 }

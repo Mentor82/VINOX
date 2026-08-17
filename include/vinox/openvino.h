@@ -79,22 +79,25 @@ VINOX_API vinox_status vinox_model_profile_format_prompt(
     size_t* out_written
 );
 
+#define VINOX_PROTOCOL_MAX_STR_LEN 256
+#define VINOX_PROTOCOL_MAX_TPL_LEN 2048
+
 typedef struct vinox_model_protocol_contract {
     uint32_t struct_size;
-    const char* protocol_id;
-    const char* protocol_hash;
+    char protocol_id[64];
+    char protocol_hash[65];
     vinox_reasoning_mode reasoning_mode;
     vinox_reasoning_start_policy reasoning_start_policy;
-    const char* reasoning_start_marker;
-    const char* reasoning_end_marker;
+    char reasoning_start_marker[VINOX_PROTOCOL_MAX_STR_LEN];
+    char reasoning_end_marker[VINOX_PROTOCOL_MAX_STR_LEN];
     int reasoning_can_disable;
     vinox_tool_format_mode tool_format;
-    const char* tool_begin_marker;
-    const char* tool_call_marker;
-    const char* tool_end_marker;
-    const char* assistant_prefix;
-    const char* eos_token;
-    const char* chat_template;
+    char tool_begin_marker[VINOX_PROTOCOL_MAX_STR_LEN];
+    char tool_call_marker[VINOX_PROTOCOL_MAX_STR_LEN];
+    char tool_end_marker[VINOX_PROTOCOL_MAX_STR_LEN];
+    char assistant_prefix[VINOX_PROTOCOL_MAX_STR_LEN];
+    char eos_token[VINOX_PROTOCOL_MAX_STR_LEN];
+    char chat_template[VINOX_PROTOCOL_MAX_TPL_LEN];
 } vinox_model_protocol_contract;
 
 VINOX_API vinox_status vinox_model_protocol_compile(
