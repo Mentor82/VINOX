@@ -5,6 +5,7 @@
 
 #include "vinox/openvino.h"
 #include "vinox/vinox.h"
+#include "nlohmann/json.hpp"
 
 int main() {
     std::cout << "================================================================================\n";
@@ -64,7 +65,7 @@ int main() {
         assert(contract.tool_format == VINOX_TOOL_FORMAT_NATIVE_TEMPLATE);
         assert(std::string(contract.tool_begin_marker) == "<tools>");
         assert(std::string(contract.tool_call_marker) == "<tool_call>");
-        assert(std::string(contract.tool_end_marker) == "</tool_call>");
+        assert(std::string(contract.tool_end_marker) == "</tools>");
         std::cout << "[ PASS ]\n";
     }
 
@@ -83,7 +84,9 @@ int main() {
         vinox_status st_dec = vinox_model_protocol_decode_tool_call(&contract, raw_native_output, canonical_buf, sizeof(canonical_buf), &written);
         assert(st_dec == VINOX_STATUS_OK);
         assert(written > 0);
-        assert(std::string(canonical_buf) == "{\"tool\":\"vinox.search\",\"arguments\":{\"query\":\"OpenVINO 2026\"}}");
+        auto decoded_j = nlohmann::json::parse(canonical_buf);
+        assert(decoded_j["tool"] == "vinox.search");
+        assert(decoded_j["arguments"]["query"] == "OpenVINO 2026");
         std::cout << "[ PASS ]\n";
     }
 

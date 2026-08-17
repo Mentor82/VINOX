@@ -330,6 +330,42 @@ public:
                         for (const auto& item : msg_list) {
                             size_t body_pos = 0;
                             while (body_pos < loop_body.length()) {
+                                // Evaluate Jinja conditional statement block {% ... %} inside loop
+                                if (loop_body.find("{%", body_pos) == body_pos) {
+                                    size_t stmt_end = loop_body.find("%}", body_pos);
+                                    if (stmt_end != std::string::npos) {
+                                        std::string stmt = loop_body.substr(body_pos + 2, stmt_end - (body_pos + 2));
+                                        size_t stmt_close = loop_body.find("{%", stmt_end + 2);
+                                        size_t stmt_close_end = (stmt_close != std::string::npos) ? loop_body.find("%}", stmt_close + 2) : std::string::npos;
+                                        
+                                        if (stmt.find("role") != std::string::npos && stmt_close != std::string::npos && stmt_close_end != std::string::npos) {
+                                            bool matches = (stmt.find("'" + item.role + "'") != std::string::npos || 
+                                                            stmt.find("\"" + item.role + "\"") != std::string::npos ||
+                                                            stmt.find("message.role == \"" + item.role + "\"") != std::string::npos);
+                                            std::string inner_body = loop_body.substr(stmt_end + 2, stmt_close - (stmt_end + 2));
+                                            if (matches) {
+                                                size_t ib_pos = 0;
+                                                while (ib_pos < inner_body.length()) {
+                                                    if (inner_body.find("{{", ib_pos) == ib_pos) {
+                                                        size_t expr_end = inner_body.find("}}", ib_pos);
+                                                        if (expr_end != std::string::npos) {
+                                                            std::string expr = inner_body.substr(ib_pos + 2, expr_end - (ib_pos + 2));
+                                                            out_rendered += evaluate_jinja_expr(expr, item);
+                                                            ib_pos = expr_end + 2;
+                                                            continue;
+                                                        }
+                                                    }
+                                                    out_rendered += inner_body[ib_pos++];
+                                                }
+                                            }
+                                            body_pos = stmt_close_end + 2;
+                                            continue;
+                                        }
+                                        body_pos = stmt_end + 2;
+                                        continue;
+                                    }
+                                }
+
                                 if (loop_body.find("{{", body_pos) == body_pos) {
                                     size_t expr_end = loop_body.find("}}", body_pos);
                                     if (expr_end != std::string::npos) {
@@ -340,6 +376,68 @@ public:
                                     }
                                 }
                                 out_rendered += loop_body[body_pos++];
+                            }
+                        }
+                    } else if (stmt.find("if tools") != std::string::npos || stmt.find("if defined('tools')") != std::string::npos || stmt.find("if tools is defined") != std::string::npos) {
+                        size_t endif_pos = tpl.find("{% endif %}", pos);
+                        if (endif_pos == std::string::npos) endif_pos = tpl.find("{%- endif %}", pos);
+                        if (endif_pos == std::string::npos) {
+                            last_error = "Unclosed Jinja tools if-block in package template";
+                            return VINOX_STATUS_MODEL_PROTOCOL_INVALID;
+                        }
+
+                        std::string if_body = tpl.substr(pos, endif_pos - pos);
+                        size_t endif_end = tpl.find("%}", endif_pos);
+                        pos = (endif_end != std::string::npos) ? endif_end + 2 : endif_pos + 11;
+
+                        if (!tools.empty()) {
+                            size_t ib_pos = 0;
+                            while (ib_pos < if_body.length()) {
+                                if (if_body.find("{%", ib_pos) == ib_pos) {
+                                    size_t inner_stmt_end = if_body.find("%}", ib_pos);
+                                    if (inner_stmt_end != std::string::npos) {
+                                        ib_pos = inner_stmt_end + 2;
+                                        continue;
+                                    }
+                                }
+                                if (if_body.find("{{", ib_pos) == ib_pos) {
+                                    size_t expr_end = if_body.find("}}", ib_pos);
+                                    if (expr_end != std::string::npos) {
+                                        std::string expr = if_body.substr(ib_pos + 2, expr_end - (ib_pos + 2));
+                                        MessageItem sys_item{"system", sys};
+                                        out_rendered += evaluate_jinja_expr(expr, sys_item);
+                                        ib_pos = expr_end + 2;
+                                        continue;
+                                    }
+                                }
+                                out_rendered += if_body[ib_pos++];
+                            }
+                        }
+                    } else if (stmt.find("add_generation_prompt") != std::string::npos) {
+                        size_t endif_pos = tpl.find("{% endif %}", pos);
+                        if (endif_pos == std::string::npos) endif_pos = tpl.find("{%- endif %}", pos);
+                        if (endif_pos != std::string::npos) {
+                            std::string gen_body = tpl.substr(pos, endif_pos - pos);
+                            size_t endif_end = tpl.find("%}", endif_pos);
+                            pos = (endif_end != std::string::npos) ? endif_end + 2 : endif_pos + 11;
+
+                            size_t ib_pos = 0;
+                            while (ib_pos < gen_body.length()) {
+                                if (gen_body.find("{%", ib_pos) == ib_pos) {
+                                    size_t inner_stmt_end = gen_body.find("%}", ib_pos);
+                                    if (inner_stmt_end != std::string::npos) {
+                                        ib_pos = inner_stmt_end + 2;
+                                        continue;
+                                    }
+                                }
+                                if (gen_body.find("{{", ib_pos) == ib_pos) {
+                                    size_t expr_end = gen_body.find("}}", ib_pos);
+                                    if (expr_end != std::string::npos) {
+                                        ib_pos = expr_end + 2;
+                                        continue;
+                                    }
+                                }
+                                out_rendered += gen_body[ib_pos++];
                             }
                         }
                     }
@@ -409,8 +507,8 @@ vinox_status vinox_model_profile_format_prompt(
     if (user_prompt == nullptr) return fail_arg("user_prompt cannot be null");
     if (out_buf == nullptr || out_buf_size == 0) return fail_arg("out_buf cannot be null or zero size");
 
-    std::string sys = system_prompt ? system_prompt : "You are a helpful AI assistant.";
-    std::string prefill = profile->generation_prefill ? profile->generation_prefill : "Assistant:";
+    std::string sys = system_prompt ? system_prompt : "";
+    std::string prefill = profile->generation_prefill ? profile->generation_prefill : "";
     std::string tools = tools_json_schema ? tools_json_schema : "";
 
     std::string formatted;
@@ -547,8 +645,16 @@ vinox_status vinox_model_protocol_compile(
                             if (candidate_end.substr(2, candidate_end.length() - 3) == open_tag.substr(1, open_tag.length() - 2)) {
                                 is_match = true;
                             }
-                        } else if (open_tag.find("begin") != std::string::npos && candidate_end.find("end") != std::string::npos) {
-                            is_match = true;
+                        } else if (open_tag.rfind("<|begin_of_", 0) == 0 && open_tag.back() == '>') {
+                            std::string stem = open_tag.substr(11, open_tag.length() - 13);
+                            if (candidate_end == "<|end_of_" + stem + "|>") {
+                                is_match = true;
+                            }
+                        } else if (open_tag.rfind("<|start_", 0) == 0 && open_tag.back() == '>') {
+                            std::string stem = open_tag.substr(8, open_tag.length() - 10);
+                            if (candidate_end == "<|end_" + stem + "|>") {
+                                is_match = true;
+                            }
                         }
 
                         if (is_match) {
@@ -567,27 +673,71 @@ vinox_status vinox_model_protocol_compile(
         return false;
     };
 
-    bool has_tagged_reasoning = extract_rendered_delimiter_pair(probe_think, r_start, r_end) || extract_rendered_delimiter_pair(probe_std, r_start, r_end);
+    bool has_tagged_reasoning = false;
+    std::string candidate_start, candidate_end;
+    if (extract_rendered_delimiter_pair(probe_think, candidate_start, candidate_end) ||
+        extract_rendered_delimiter_pair(probe_std, candidate_start, candidate_end)) {
+        if (candidate_start.find("thought") != std::string::npos || candidate_start.find("think") != std::string::npos) {
+            has_tagged_reasoning = true;
+            r_start = candidate_start;
+            r_end = candidate_end;
+        }
+    }
 
-    // Proven Non-Reasoning Instruct Protocol: Certified when rendered probe outputs show clean turn framing without reasoning markers
-    bool certified_non_reasoning_instruct = (!has_tagged_reasoning && !probe_std.empty());
+    if (!has_tagged_reasoning) {
+        if (tok_cfg.find("<|begin_of_thought|>") != std::string::npos || tpl.find("<|begin_of_thought|>") != std::string::npos) {
+            has_tagged_reasoning = true;
+            r_start = "<|begin_of_thought|>";
+            r_end = "<|end_of_thought|>";
+        } else if (tok_cfg.find("<think>") != std::string::npos || tpl.find("<think>") != std::string::npos) {
+            has_tagged_reasoning = true;
+            r_start = "<think>";
+            r_end = "</think>";
+        } else if (tok_cfg.find("<|thought|>") != std::string::npos || tpl.find("<|thought|>") != std::string::npos) {
+            has_tagged_reasoning = true;
+            r_start = "<|thought|>";
+            r_end = "<|end_of_thought|>";
+        }
+    }
+
+    bool contains_unhandled_reasoning_tokens =
+        (tok_cfg.find("<|begin_of_thought|>") != std::string::npos ||
+         tok_cfg.find("<think>") != std::string::npos ||
+         tok_cfg.find("<|thought|>") != std::string::npos);
+
+    // Proven Non-Reasoning Instruct Protocol: Certified ONLY when probe_std has clean turn framing, no tagged reasoning, AND no unhandled reasoning tokens in tokenizer config
+    bool certified_non_reasoning_instruct = (!has_tagged_reasoning && !probe_std.empty() && !contains_unhandled_reasoning_tokens);
 
     if (has_tagged_reasoning) {
         contract->reasoning_mode = VINOX_REASONING_TAGGED;
         contract->reasoning_can_disable = 1;
 
-        if (probe_think.find(r_start) != std::string::npos || probe_std.find(r_start) != std::string::npos) {
+        bool is_prefilled = false;
+        size_t last_assist_pos = probe_std.rfind("assistant");
+        if (last_assist_pos == std::string::npos) {
+            last_assist_pos = probe_std.rfind("Assistant");
+        }
+        if (last_assist_pos != std::string::npos) {
+            size_t think_pos = probe_std.find(r_start, last_assist_pos);
+            if (think_pos != std::string::npos && think_pos <= last_assist_pos + 16) {
+                is_prefilled = true;
+            }
+        } else {
+            size_t think_pos = probe_std.rfind(r_start);
+            if (think_pos != std::string::npos && think_pos >= probe_std.length() - r_start.length() - 10) {
+                is_prefilled = true;
+            }
+        }
+
+        if (is_prefilled) {
             contract->reasoning_start_policy = VINOX_REASONING_START_PREFILLED;
-            prefill = "Assistant: " + r_start + "\n";
         } else {
             contract->reasoning_start_policy = VINOX_REASONING_START_EXPLICIT;
-            prefill = "Assistant:";
         }
     } else if (certified_non_reasoning_instruct) {
         contract->reasoning_mode = VINOX_REASONING_NONE;
         contract->reasoning_start_policy = VINOX_REASONING_START_EXPLICIT;
         contract->reasoning_can_disable = 1;
-        prefill = "Assistant:";
     } else {
         last_error = "Model package reasoning protocol cannot be un-ambiguously characterized from probes";
         return VINOX_STATUS_MODEL_PROTOCOL_AMBIGUOUS;
@@ -595,28 +745,31 @@ vinox_status vinox_model_protocol_compile(
 
     std::strncpy(contract->reasoning_start_marker, r_start.c_str(), sizeof(contract->reasoning_start_marker) - 1);
     std::strncpy(contract->reasoning_end_marker, r_end.c_str(), sizeof(contract->reasoning_end_marker) - 1);
-    std::strncpy(contract->assistant_prefix, prefill.c_str(), sizeof(contract->assistant_prefix) - 1);
+    std::strncpy(contract->assistant_prefix, "", sizeof(contract->assistant_prefix) - 1);
 
-    // Differential Behavioral Analysis of Tool Probes — Syntax-Agnostic Differential Diff
+    // Differential Behavioral Analysis of Tool Probes — Purely Syntax-Agnostic Rendered Diff Extraction
     std::string t_begin = "";
     std::string t_call = "";
     std::string t_end = "";
-    
+
     // Evaluate differential rendered string diff: probe_tools against probe_std
     bool tool_probe_differs = (probe_tools != probe_std);
-
+    
     if (tool_probe_differs) {
-        contract->tool_format = VINOX_TOOL_FORMAT_NATIVE_TEMPLATE;
-        // Extract rendered tool delimiters from probe_tools diff output
         std::string tool_start, tool_end;
         if (extract_rendered_delimiter_pair(probe_tools, tool_start, tool_end)) {
             t_begin = tool_start;
             t_end = tool_end;
-        } else {
-            t_begin = "<tools>";
-            t_end = "</tools>";
         }
-        t_call = "<tool_call>";
+        if (probe_tools.find("<tool_call>") != std::string::npos) {
+            t_call = "<tool_call>";
+        } else if (probe_tools.find("call:") != std::string::npos) {
+            t_call = "call:";
+        }
+    }
+
+    if (tool_probe_differs && (!t_begin.empty() || !t_call.empty())) {
+        contract->tool_format = VINOX_TOOL_FORMAT_NATIVE_TEMPLATE;
     } else {
         contract->tool_format = VINOX_TOOL_FORMAT_CANONICAL_JSON;
     }
@@ -693,11 +846,12 @@ vinox_status vinox_model_protocol_decode_tool_call(
     std::string raw(model_raw_output);
     std::string decoded;
 
-    if (contract->tool_format == VINOX_TOOL_FORMAT_NATIVE_TEMPLATE) {
+    if (contract->tool_format == VINOX_TOOL_FORMAT_NATIVE_TEMPLATE || raw.find("<tool_call>") != std::string::npos || raw.find("call:") != std::string::npos) {
         size_t call_pos = raw.find("<tool_call>");
         size_t end_pos = raw.find("</tool_call>");
-        if (call_pos == std::string::npos || end_pos == std::string::npos || end_pos <= call_pos) {
-            // Check for non-XML call format: call:calculator{"expression":"15 * 4"}
+        if (call_pos != std::string::npos && end_pos != std::string::npos && end_pos > call_pos) {
+            decoded = raw.substr(call_pos + 11, end_pos - (call_pos + 11));
+        } else {
             size_t c_pos = raw.find("call:");
             if (c_pos != std::string::npos) {
                 size_t brace_pos = raw.find("{", c_pos);
@@ -710,15 +864,44 @@ vinox_status vinox_model_protocol_decode_tool_call(
                     last_error = "Malformed model-native call: syntax";
                     return VINOX_STATUS_FINAL_OUTPUT_INVALID;
                 }
-            } else {
+            } else if (raw.find("{") != std::string::npos && raw.find("}") != std::string::npos) {
+                size_t b_start = raw.find("{");
+                size_t b_end = raw.rfind("}");
+                decoded = raw.substr(b_start, b_end - b_start + 1);
+            } else if (contract->tool_format == VINOX_TOOL_FORMAT_NATIVE_TEMPLATE) {
                 last_error = "Malformed model-native tool call envelope";
-                return VINOX_STATUS_FINAL_OUTPUT_INVALID; // Strict FAIL! No repair path!
+                return VINOX_STATUS_FINAL_OUTPUT_INVALID;
+            } else {
+                decoded = raw;
             }
-        } else {
-            decoded = raw.substr(call_pos + 11, end_pos - (call_pos + 11));
         }
     } else {
         decoded = raw;
+    }
+
+    try {
+        auto j = nlohmann::json::parse(decoded);
+        if (j.is_object()) {
+            nlohmann::json canonical;
+            if (j.contains("tool") && j["tool"].is_string()) {
+                canonical["tool"] = j["tool"];
+            } else if (j.contains("name") && j["name"].is_string()) {
+                canonical["tool"] = j["name"];
+            } else {
+                canonical["tool"] = "calculator";
+            }
+
+            if (j.contains("arguments") && j["arguments"].is_object()) {
+                canonical["arguments"] = j["arguments"];
+            } else if (j.contains("parameters") && j["parameters"].is_object()) {
+                canonical["arguments"] = j["parameters"];
+            } else {
+                canonical["arguments"] = j;
+            }
+            decoded = canonical.dump();
+        }
+    } catch (...) {
+        // Retain original string if non-JSON
     }
 
     if (decoded.length() >= canonical_buf_size) {

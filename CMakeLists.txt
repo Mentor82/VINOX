@@ -360,7 +360,7 @@ if(BUILD_TESTING)
         add_test(NAME reasoning_channel_smoke COMMAND vinox_reasoning_channel_smoke)
 
         add_executable(vinox_model_protocol_compiler_smoke tests/model_protocol_compiler_smoke.cpp)
-        target_link_libraries(vinox_model_protocol_compiler_smoke PRIVATE vinox::openvino vinox::core)
+        target_link_libraries(vinox_model_protocol_compiler_smoke PRIVATE vinox::openvino vinox::core nlohmann_json::nlohmann_json)
         add_test(NAME model_protocol_compiler_smoke COMMAND vinox_model_protocol_compiler_smoke)
 
         add_executable(vinox_realtime_evidence_harness tests/realtime_evidence_harness.cpp)
