@@ -155,10 +155,10 @@ int main() {
     char qw_rendered[16384] = {0};
     size_t qw_written = 0;
     const char* sample_tool_schema = "{\"type\": \"function\", \"function\": {\"name\": \"calculator\", \"description\": \"Evaluate mathematical expression\", \"parameters\": {\"type\": \"object\", \"properties\": {\"expression\": {\"type\": \"string\"}}, \"required\": [\"expression\"]}}}";
-    const char* qwen_sys_prompt = "You are a helpful assistant.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"calculator\", \"description\": \"Evaluate mathematical expression\", \"parameters\": {\"type\": \"object\", \"properties\": {\"expression\": {\"type\": \"string\"}}, \"required\": [\"expression\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": \"<function-name>\", \"arguments\": <args-json-object>}\n</tool_call>";
 
+    // Encode prompt using package-compiled contract — ZERO hardcoded tool protocol tags in harness!
     vinox_status qw_enc_st = vinox_model_protocol_encode_prompt(&qw_contract,
-        qwen_sys_prompt,
+        "You are a helpful assistant.",
         "Calculate 15 * 4 using the calculator tool.",
         sample_tool_schema, qw_rendered, sizeof(qw_rendered), &qw_written);
     assert(qw_enc_st == VINOX_STATUS_OK);

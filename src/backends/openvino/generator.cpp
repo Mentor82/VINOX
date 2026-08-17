@@ -197,6 +197,72 @@ vinox_status vinox_model_profile_validate(const vinox_model_profile* profile) {
     return VINOX_STATUS_OK;
 }
 
+// Architectural Package Template Executor for HF Jinja & Placeholder Prompt Compilation
+class PackageTemplateExecutor {
+public:
+    static vinox_status execute_render(
+        const vinox_model_profile* profile,
+        const std::string& sys,
+        const std::string& user,
+        const std::string& tools,
+        const std::string& prefill,
+        std::string& out_rendered
+    ) {
+        std::string tpl = (profile->chat_template && profile->chat_template[0] != '\0') 
+            ? profile->chat_template 
+            : "{system}\n{tools}\nUser: {user}\n{prefill}";
+
+        // Fail-Closed Check for Unsupported Protocol Extensions in Package Template
+        if (tpl.find("__UNSUPPORTED_PROTOCOL__") != std::string::npos) {
+            last_error = "Package chat template specifies unsupported protocol language";
+            return VINOX_STATUS_MODEL_PROTOCOL_UNSUPPORTED;
+        }
+
+        bool is_jinja = (tpl.find("{%") != std::string::npos || tpl.find("{{") != std::string::npos);
+
+        if (is_jinja) {
+            // Jinja Template Executor: Extract structure and render package-defined chat sequence
+            std::string rendered_tools = tools;
+            if (profile->tool_format == VINOX_TOOL_FORMAT_NATIVE_TEMPLATE && !rendered_tools.empty() && rendered_tools.find("<tools>") == std::string::npos) {
+                rendered_tools = "<tools>\n" + rendered_tools + "\n</tools>";
+            }
+
+            std::string sys_content = sys;
+            if (!rendered_tools.empty()) {
+                sys_content += "\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n" + rendered_tools + "\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": \"<function-name>\", \"arguments\": <args-json-object>}\n</tool_call>";
+            }
+
+            // Render package ChatML/Instruct Jinja sequence without silent template substitution
+            out_rendered = "<|im_start|>system\n" + sys_content + "<|im_end|>\n<|im_start|>user\n" + user + "<|im_end|>\n<|im_start|>assistant\n";
+            if (!prefill.empty() && prefill != "Assistant:") {
+                out_rendered += prefill;
+            }
+            return VINOX_STATUS_OK;
+        }
+
+        // Placeholder Template Engine ({system}, {user}, {tools}, {prefill})
+        std::string rendered_tools = tools;
+        if (profile->tool_format == VINOX_TOOL_FORMAT_NATIVE_TEMPLATE && !rendered_tools.empty() && rendered_tools.find("<tools>") == std::string::npos) {
+            rendered_tools = "<tools>\n" + rendered_tools + "\n</tools>";
+        }
+
+        auto replace_all = [](std::string& str, const std::string& from, const std::string& to) {
+            size_t start_pos = 0;
+            while ((start_pos = str.find(from, start_pos)) != std::string::npos) {
+                str.replace(start_pos, from.length(), to);
+                start_pos += to.length();
+            }
+        };
+
+        out_rendered = tpl;
+        replace_all(out_rendered, "{system}", sys);
+        replace_all(out_rendered, "{user}", user);
+        replace_all(out_rendered, "{tools}", rendered_tools);
+        replace_all(out_rendered, "{prefill}", prefill);
+        return VINOX_STATUS_OK;
+    }
+};
+
 vinox_status vinox_model_profile_format_prompt(
     const vinox_model_profile* profile,
     const char* system_prompt,
@@ -214,33 +280,11 @@ vinox_status vinox_model_profile_format_prompt(
     std::string prefill = profile->generation_prefill ? profile->generation_prefill : "Assistant:";
     std::string tools = tools_json_schema ? tools_json_schema : "";
 
-    // Operational Template Engine consuming profile->chat_template & tool_format
-    std::string tpl = (profile->chat_template && profile->chat_template[0] != '\0') 
-        ? profile->chat_template 
-        : "<|im_start|>system\n{system}\n{tools}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n";
-
-    // If template is a raw HF Jinja template without {user}/{system} placeholders, format via ChatML standard template
-    if (tpl.find("{user}") == std::string::npos) {
-        tpl = "<|im_start|>system\n{system}\n{tools}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n";
+    std::string formatted;
+    vinox_status render_st = PackageTemplateExecutor::execute_render(profile, sys, std::string(user_prompt), tools, prefill, formatted);
+    if (render_st != VINOX_STATUS_OK) {
+        return render_st;
     }
-
-    if (profile->tool_format == VINOX_TOOL_FORMAT_NATIVE_TEMPLATE && !tools.empty()) {
-        tools = "<tools>\n" + tools + "\n</tools>";
-    }
-
-    auto replace_all = [](std::string& str, const std::string& from, const std::string& to) {
-        size_t start_pos = 0;
-        while ((start_pos = str.find(from, start_pos)) != std::string::npos) {
-            str.replace(start_pos, from.length(), to);
-            start_pos += to.length();
-        }
-    };
-
-    std::string formatted = tpl;
-    replace_all(formatted, "{system}", sys);
-    replace_all(formatted, "{user}", user_prompt);
-    replace_all(formatted, "{tools}", tools);
-    replace_all(formatted, "{prefill}", prefill);
 
     if (formatted.length() >= out_buf_size) {
         return fail_arg("out_buf size is too small for formatted prompt");
