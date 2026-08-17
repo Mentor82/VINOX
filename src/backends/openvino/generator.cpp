@@ -214,10 +214,15 @@ vinox_status vinox_model_profile_format_prompt(
     std::string prefill = profile->generation_prefill ? profile->generation_prefill : "Assistant:";
     std::string tools = tools_json_schema ? tools_json_schema : "";
 
-    // Operational Template Engine consuming profile->chat_template & tool_format (Nephy Blocker 2 & 3)
+    // Operational Template Engine consuming profile->chat_template & tool_format
     std::string tpl = (profile->chat_template && profile->chat_template[0] != '\0') 
         ? profile->chat_template 
-        : "{system}\n{tools}\nUser: {user}\n{prefill}";
+        : "<|im_start|>system\n{system}\n{tools}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n";
+
+    // If template is a raw HF Jinja template without {user}/{system} placeholders, format via ChatML standard template
+    if (tpl.find("{user}") == std::string::npos) {
+        tpl = "<|im_start|>system\n{system}\n{tools}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n";
+    }
 
     if (profile->tool_format == VINOX_TOOL_FORMAT_NATIVE_TEMPLATE && !tools.empty()) {
         tools = "<tools>\n" + tools + "\n</tools>";

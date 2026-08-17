@@ -154,8 +154,13 @@ int main() {
 
     char qw_rendered[16384] = {0};
     size_t qw_written = 0;
-    const char* sample_tool_schema = "[{\"name\":\"calculator\",\"description\":\"Evaluate mathematical expression\",\"parameters\":{\"type\":\"object\",\"properties\":{\"expression\":{\"type\":\"string\"}},\"required\":[\"expression\"]}}]";
-    vinox_status qw_enc_st = vinox_model_protocol_encode_prompt(&qw_contract, "You are a helpful AI assistant with tool capabilities.", "Calculate 15 * 4 using the calculator tool.", sample_tool_schema, qw_rendered, sizeof(qw_rendered), &qw_written);
+    const char* sample_tool_schema = "{\"type\": \"function\", \"function\": {\"name\": \"calculator\", \"description\": \"Evaluate mathematical expression\", \"parameters\": {\"type\": \"object\", \"properties\": {\"expression\": {\"type\": \"string\"}}, \"required\": [\"expression\"]}}}";
+    const char* qwen_sys_prompt = "You are a helpful assistant.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"calculator\", \"description\": \"Evaluate mathematical expression\", \"parameters\": {\"type\": \"object\", \"properties\": {\"expression\": {\"type\": \"string\"}}, \"required\": [\"expression\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": \"<function-name>\", \"arguments\": <args-json-object>}\n</tool_call>";
+
+    vinox_status qw_enc_st = vinox_model_protocol_encode_prompt(&qw_contract,
+        qwen_sys_prompt,
+        "Calculate 15 * 4 using the calculator tool.",
+        sample_tool_schema, qw_rendered, sizeof(qw_rendered), &qw_written);
     assert(qw_enc_st == VINOX_STATUS_OK);
 
     // Qwen Real Model Load & Live Generation (100% Model Generated Output!)
@@ -173,7 +178,7 @@ int main() {
     vinox_generation_options_from_contract(&qw_contract, &qw_gen_opts);
     qw_gen_opts.prompt = qw_rendered;
     qw_gen_opts.max_new_tokens = 96;
-    qw_gen_opts.temperature = 0.1f; // Low temperature for deterministic tool calling
+    qw_gen_opts.temperature = 0.0f; // Greedy deterministic decoding for tool calling
 
     DualChannelStreamContext qw_stream_ctx;
     vinox_status qw_gen_st = vinox_model_generate_stream(qw_model, &qw_gen_opts, realtime_stream_callback, &qw_stream_ctx);
@@ -184,12 +189,8 @@ int main() {
     std::cout << "   - Raw Model Stream Output: \"" << qw_stream_ctx.final_output << "\"\n" << std::flush;
     vinox_model_destroy(qw_model);
 
-    // Real Native Tool Decoder consuming ACTUAL LIVE MODEL OUTPUT!
+    // Real Native Tool Decoder consuming 100% UNMODIFIED REAL MODEL STREAM OUTPUT! NO FALLBACK!
     std::string live_model_raw_tool = qw_stream_ctx.final_output;
-    if (live_model_raw_tool.find("<tool_call>") == std::string::npos) {
-        // Fallback for probe verification if model printed direct JSON
-        live_model_raw_tool = "<tool_call>{\"tool\":\"calculator\",\"arguments\":{\"expression\":\"15 * 4\"}}</tool_call>";
-    }
 
     char canonical_decoded[512] = {0};
     size_t dec_bytes = 0;
@@ -215,15 +216,11 @@ int main() {
     vinox_status reg_tool_st = vinox_tool_registry_register_tool(tool_reg, &calc_def);
     assert(reg_tool_st == VINOX_STATUS_OK);
 
-    // Extract args JSON string from canonical_decoded ("{\"tool\":\"calculator\",\"arguments\":{...}}")
+    // Extract args JSON string strictly from canonical_decoded. NO REPAIR, NO INVENTED DEFAULTS!
     std::string decoded_json_str(canonical_decoded);
-    std::string args_json_str = "{\"expression\":\"15 * 4\"}";
-    try {
-        auto j = nlohmann::json::parse(decoded_json_str);
-        if (j.contains("arguments")) {
-            args_json_str = j["arguments"].dump();
-        }
-    } catch (...) {}
+    auto j_decoded = nlohmann::json::parse(decoded_json_str); // Fail closed if invalid JSON
+    assert(j_decoded.contains("arguments"));
+    std::string args_json_str = j_decoded["arguments"].dump();
 
     char val_err[256] = {0};
     vinox_status val_st = vinox_tool_registry_validate_arguments(tool_reg, "calculator", args_json_str.c_str(), val_err, sizeof(val_err));
