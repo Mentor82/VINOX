@@ -67,7 +67,10 @@ struct Arguments {
     std::string device = "CPU";
     std::string mode = "chat";
     std::string remote_url;
+    std::string reasoning_mode_str = "hide"; // default: hide
     std::uint64_t max_new_tokens = 128;
+    std::uint64_t reasoning_budget = 0;
+    std::uint64_t reasoning_timeout_ms = 0;
     float temperature = 0.7f;
     float top_p = 0.9f;
     bool interactive = false;
@@ -88,6 +91,9 @@ void print_usage() {
         << "  --mode <chat|plan|agent> CLI execution mode (default: chat)\n"
         << "  --interactive, -i      Launch interactive REPL session\n"
         << "  --json                 Output machine-readable JSON events (event_schema_version: 1)\n"
+        << "  --reasoning <hide|show|off> Model reasoning visibility mode (default: hide)\n"
+        << "  --reasoning-budget <N> Max reasoning tokens (default: 0 / unbounded)\n"
+        << "  --reasoning-timeout-ms <N> Reasoning timeout in ms (default: 0 / unbounded)\n"
         << "  --remote <url>         Connect to remote VINOX HTTP server\n"
         << "  --device <CPU|NPU|GPU> Device target (default: CPU)\n"
         << "  --max-new-tokens <N>   Maximum tokens to generate (default: 128)\n"
@@ -148,6 +154,18 @@ bool parse_arguments(int argc, char* argv[], Arguments& arguments) {
             arguments.remote_url = value;
         } else if (argument == "--device") {
             arguments.device = value;
+        } else if (argument == "--reasoning") {
+            arguments.reasoning_mode_str = value;
+        } else if (argument == "--reasoning-budget") {
+            if (!parse_unsigned(value, arguments.reasoning_budget)) {
+                std::cerr << "Invalid reasoning budget: " << value << '\n';
+                return false;
+            }
+        } else if (argument == "--reasoning-timeout-ms") {
+            if (!parse_unsigned(value, arguments.reasoning_timeout_ms)) {
+                std::cerr << "Invalid reasoning timeout: " << value << '\n';
+                return false;
+            }
         } else if (argument == "--max-new-tokens") {
             if (!parse_unsigned(value, arguments.max_new_tokens)) {
                 std::cerr << "Invalid token count: " << value << '\n';
@@ -184,24 +202,49 @@ void print_json_event(const std::string& event_type, const std::string& status, 
 
 struct StreamUserContext {
     bool json_mode{false};
+    std::string reasoning_mode_str{"hide"};
+    std::string accumulated_reasoning;
     std::string accumulated_text;
+    bool reasoning_started_printed{false};
 };
 
-int write_text_callback(const char* text, size_t text_size, void* user_data) {
+int write_stream_callback(vinox_stream_channel channel, const char* text, size_t text_size, void* user_data) {
     if (g_interrupted.load()) return -1;
 
     StreamUserContext* ctx = static_cast<StreamUserContext*>(user_data);
     std::string chunk(text, text_size);
-    if (ctx) {
+    if (!ctx) return 0;
+
+    if (channel == VINOX_STREAM_CHANNEL_REASONING) {
+        ctx->accumulated_reasoning += chunk;
+        if (ctx->json_mode) {
+            print_json_event("reasoning.delta", "OK", {{"content", chunk}});
+        } else if (ctx->reasoning_mode_str == "show") {
+            if (!ctx->reasoning_started_printed) {
+                std::cout << "[THINKING] ";
+                ctx->reasoning_started_printed = true;
+            }
+            std::cout.write(text, static_cast<std::streamsize>(text_size));
+            std::cout.flush();
+        }
+    } else {
         ctx->accumulated_text += chunk;
         if (ctx->json_mode) {
-            print_json_event("cli.generation_chunk", "OK", {{"chunk", chunk}});
+            print_json_event("final.delta", "OK", {{"content", chunk}});
         } else {
+            if (ctx->reasoning_started_printed && ctx->reasoning_mode_str == "show") {
+                std::cout << "\n[FINAL] ";
+                ctx->reasoning_started_printed = false;
+            }
             std::cout.write(text, static_cast<std::streamsize>(text_size));
             std::cout.flush();
         }
     }
     return 0;
+}
+
+int write_text_callback(const char* text, size_t text_size, void* user_data) {
+    return write_stream_callback(VINOX_STREAM_CHANNEL_FINAL, text, text_size, user_data);
 }
 
 int print_version() {
@@ -911,13 +954,24 @@ int main(int argc, char* argv[]) {
     generation_options.temperature = arguments.temperature;
     generation_options.top_p = arguments.top_p;
 
+    if (arguments.reasoning_mode_str == "off") {
+        generation_options.reasoning_mode = VINOX_REASONING_NONE;
+    } else {
+        generation_options.reasoning_mode = VINOX_REASONING_TAGGED;
+    }
+    generation_options.reasoning_start_tag = "<think>";
+    generation_options.reasoning_end_tag = "</think>";
+    generation_options.max_reasoning_tokens = arguments.reasoning_budget;
+    generation_options.reasoning_timeout_ms = arguments.reasoning_timeout_ms;
+
     StreamUserContext oneshot_ctx;
     oneshot_ctx.json_mode = session.json_mode;
+    oneshot_ctx.reasoning_mode_str = arguments.reasoning_mode_str;
 
-    const vinox_status generation_status = vinox_model_generate(
+    const vinox_status generation_status = vinox_model_generate_stream(
         session.model,
         &generation_options,
-        write_text_callback,
+        write_stream_callback,
         &oneshot_ctx
     );
 

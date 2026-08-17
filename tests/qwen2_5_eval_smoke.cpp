@@ -109,24 +109,55 @@ struct TestCorpusItem {
 };
 
 struct StreamContext {
-    std::string generated_text;
+    std::string generated_text; // final channel output
+    std::string reasoning_text; // reasoning channel output
     size_t token_count = 0;
     std::chrono::steady_clock::time_point start_time;
     std::chrono::steady_clock::time_point first_token_time;
     bool has_first_token = false;
 };
 
-static int stream_text_callback(const char* text, size_t text_size, void* user_data) {
+static std::string get_timestamp_str() {
+    auto now = std::chrono::system_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+    auto timer = std::chrono::system_clock::to_time_t(now);
+    std::tm bt;
+#ifdef _WIN32
+    localtime_s(&bt, &timer);
+#else
+    localtime_r(&timer, &bt);
+#endif
+    std::ostringstream oss;
+    oss << "[" << std::setfill('0') << std::setw(2) << bt.tm_hour << ":"
+        << std::setfill('0') << std::setw(2) << bt.tm_min << ":"
+        << std::setfill('0') << std::setw(2) << bt.tm_sec << "."
+        << std::setfill('0') << std::setw(3) << ms.count() << "]";
+    return oss.str();
+}
+
+static int stream_dual_channel_callback(vinox_stream_channel channel, const char* text, size_t text_size, void* user_data) {
     auto* ctx = static_cast<StreamContext*>(user_data);
+    auto now = std::chrono::steady_clock::now();
     if (!ctx->has_first_token) {
-        ctx->first_token_time = std::chrono::steady_clock::now();
+        ctx->first_token_time = now;
         ctx->has_first_token = true;
+        auto ttft_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - ctx->start_time).count();
+        std::cout << "\n" << get_timestamp_str() << " [FIRST_TOKEN_TTFT] TTFT: " << ttft_ms << " ms | Stream: " << std::flush;
     }
     if (text && text_size > 0) {
-        ctx->generated_text.append(text, text_size);
+        if (channel == VINOX_STREAM_CHANNEL_REASONING) {
+            ctx->reasoning_text.append(text, text_size);
+        } else {
+            ctx->generated_text.append(text, text_size);
+        }
         ctx->token_count++;
+        std::cout << text << std::flush;
     }
     return 0;
+}
+
+static int stream_text_callback(const char* text, size_t text_size, void* user_data) {
+    return stream_dual_channel_callback(VINOX_STREAM_CHANNEL_FINAL, text, text_size, user_data);
 }
 
 int main(int argc, char* argv[]) {
@@ -340,19 +371,41 @@ int main(int argc, char* argv[]) {
     // 4. Locate OpenVINO Qwen2.5-Instruct Model
     const char* env_path = std::getenv("VINOX_TEST_MODEL_PATH");
     std::string model_dir = (env_path && strlen(env_path) > 0) ? env_path : "C:\\ai\\models\\OpenVINO\\Qwen2.5-1B-Instruct-fp16-test-ov";
+    model_dir.erase(model_dir.find_last_not_of(" \t\n\r") + 1);
+
+    const char* env_dev = std::getenv("VINOX_TEST_DEVICE");
+    std::string device_str = (env_dev && strlen(env_dev) > 0) ? env_dev : "CPU";
+    device_str.erase(device_str.find_last_not_of(" \t\n\r") + 1);
 
     vinox_model* model = nullptr;
     vinox_model_options model_opts;
     std::memset(&model_opts, 0, sizeof(model_opts));
     model_opts.struct_size = sizeof(model_opts);
     model_opts.model_path = model_dir.c_str();
-    model_opts.device = "CPU";
+    model_opts.device = device_str.c_str();
 
     bool live_model_loaded = false;
-    std::cout << "[EVAL 01] OpenVINO Qwen2.5-1B-Instruct Model Loading ... ";
+    std::cout << get_timestamp_str() << " [MODEL_LOAD_START] Initializing model load for path: " << model_dir << "\n";
+    std::cout << get_timestamp_str() << " [NPU_COMPILE_START] Compiling graph onto device (" << device_str << ") ...\n" << std::flush;
+    auto load_start = std::chrono::steady_clock::now();
+
     if (vinox_model_load(&model_opts, &model) == VINOX_STATUS_OK && model != nullptr) {
+        auto load_end = std::chrono::steady_clock::now();
+        auto load_ms = std::chrono::duration_cast<std::chrono::milliseconds>(load_end - load_start).count();
         live_model_loaded = true;
-        std::cout << "[ PASS ] (Model Path: " << model_dir << ")\n";
+        std::cout << get_timestamp_str() << " [PIPELINE_READY] Model & Device Pipeline Ready in " << load_ms << " ms (" << (load_ms / 1000.0) << " s)\n";
+
+        std::cout << get_timestamp_str() << " [WARMUP_START] Running 1-token warmup inference on " << device_str << " ...\n" << std::flush;
+        auto warmup_start = std::chrono::steady_clock::now();
+        vinox_generation_options warmup_opts;
+        std::memset(&warmup_opts, 0, sizeof(warmup_opts));
+        warmup_opts.struct_size = sizeof(warmup_opts);
+        warmup_opts.prompt = "Hi";
+        warmup_opts.max_new_tokens = 1;
+        vinox_model_generate(model, &warmup_opts, nullptr, nullptr);
+        auto warmup_end = std::chrono::steady_clock::now();
+        auto warmup_ms = std::chrono::duration_cast<std::chrono::milliseconds>(warmup_end - warmup_start).count();
+        std::cout << get_timestamp_str() << " [WARMUP_END] Warmup completed in " << warmup_ms << " ms\n\n";
     } else {
         std::cout << "[ MOCK/SKIP ] (Live model execution unavailable: " << vinox_openvino_last_error() << ")\n";
         std::cout << "\n================================================================================\n";
@@ -374,8 +427,13 @@ int main(int argc, char* argv[]) {
     // Decoding Parameters
     const float TEMPERATURE = 0.1f;
     const float TOP_P = 0.9f;
-    const uint32_t MAX_NEW_TOKENS = 128;
-    const int TRIAL_COUNT = 5; // Multi-trial variance runs (N=5)
+    const char* env_tokens = std::getenv("VINOX_MAX_NEW_TOKENS");
+    const uint32_t MAX_NEW_TOKENS = (env_tokens && strlen(env_tokens) > 0) ? static_cast<uint32_t>(std::atoi(env_tokens)) : 256;
+    const char* env_trials = std::getenv("VINOX_EVAL_TRIALS");
+    const int TRIAL_COUNT = (env_trials && strlen(env_trials) > 0) ? std::atoi(env_trials) : 1;
+
+    const char* env_no_think = std::getenv("VINOX_NO_THINK");
+    bool no_think_mode = (env_no_think && (std::strcmp(env_no_think, "1") == 0 || std::strcmp(env_no_think, "true") == 0));
 
     // System prompt with canonical tool definitions
     std::string system_prompt =
@@ -388,6 +446,10 @@ int main(int argc, char* argv[]) {
         "5. vinox.relation_create: {\"type\":\"object\",\"properties\":{\"source\":{\"type\":\"string\"},\"target\":{\"type\":\"string\"},\"type\":{\"type\":\"string\"}},\"required\":[\"source\",\"target\",\"type\"],\"additionalProperties\":false}\n\n"
         "If a tool is needed, respond ONLY with a JSON object in format {\"tool\":\"<name>\",\"arguments\":{...}}.\n"
         "If NO tool is needed, respond with standard conversational text.\n";
+
+    if (no_think_mode) {
+        system_prompt += "CRITICAL INSTRUCTION: Do NOT generate <think> tags, reasoning, or chain of thought. Respond IMMEDIATELY with the answer.\n";
+    }
 
     // Metrics Counters across All Trials
     size_t total_trial_evaluations = 0;
@@ -447,9 +509,10 @@ int main(int argc, char* argv[]) {
     std::cout << "\n[EVAL 02] Running N=" << TRIAL_COUNT << " Multi-Trial Raw Output Evaluation & Governance Harness:\n";
 
     for (const auto& item : corpus) {
-        std::cout << "  [" << item.id << "] " << item.category << ": \"" << item.user_prompt << "\"\n";
+        std::cout << get_timestamp_str() << " [CASE_START] [" << item.id << "] " << item.category << ": \"" << item.user_prompt << "\"\n";
 
-        std::string full_prompt = system_prompt + "User: " + item.user_prompt + "\nAssistant:";
+        std::string assistant_prefix = no_think_mode ? "Assistant: </think>\n" : "Assistant:";
+        std::string full_prompt = system_prompt + "User: " + item.user_prompt + "\n" + assistant_prefix;
         size_t case_raw_pass_count = 0;
         bool is_no_tool_expected = item.expected_tool.empty();
 
@@ -465,6 +528,7 @@ int main(int argc, char* argv[]) {
             total_trial_evaluations++;
             StreamContext stream_ctx;
             stream_ctx.start_time = std::chrono::steady_clock::now();
+            std::cout << get_timestamp_str() << " [GENERATION_START] Trial " << (trial + 1) << "/" << TRIAL_COUNT << " ..." << std::flush;
 
             vinox_generation_options gen_opts;
             std::memset(&gen_opts, 0, sizeof(gen_opts));
@@ -473,11 +537,19 @@ int main(int argc, char* argv[]) {
             gen_opts.max_new_tokens = MAX_NEW_TOKENS;
             gen_opts.temperature = TEMPERATURE;
             gen_opts.top_p = TOP_P;
+            gen_opts.reasoning_mode = VINOX_REASONING_TAGGED;
+            gen_opts.reasoning_start_tag = "<think>";
+            gen_opts.reasoning_end_tag = "</think>";
 
             std::string raw_output_text;
-            if (vinox_model_generate(model, &gen_opts, stream_text_callback, &stream_ctx) == VINOX_STATUS_OK) {
+            if (vinox_model_generate_stream(model, &gen_opts, stream_dual_channel_callback, &stream_ctx) == VINOX_STATUS_OK) {
                 raw_output_text = stream_ctx.generated_text;
             }
+
+            auto gen_end = std::chrono::steady_clock::now();
+            auto gen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(gen_end - stream_ctx.start_time).count();
+            double tps = (gen_ms > 0) ? (stream_ctx.token_count * 1000.0 / gen_ms) : 0.0;
+            std::cout << "\n" << get_timestamp_str() << " [GENERATION_END] " << stream_ctx.token_count << " tokens in " << gen_ms << " ms (" << std::fixed << std::setprecision(2) << tps << " tok/s)\n";
 
             // Nephy Finding 2: Check for inference failure or empty output
             if (raw_output_text.empty()) {

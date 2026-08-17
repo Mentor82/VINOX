@@ -498,10 +498,10 @@ int main(void) {
         return 1;
     }
 
-    if (gen_out.find("cli.generation_chunk") != std::string::npos &&
+    if ((gen_out.find("final.delta") != std::string::npos || gen_out.find("cli.generation_chunk") != std::string::npos) &&
         gen_out.find("cli.generation_complete") != std::string::npos &&
         gen_out.find("COMPLETED") != std::string::npos) {
-        std::cout << "  [PASS 06] Interactive Prompt Real Model Generation Stream & Event Pipeline: Verified (generation_chunk + generation_complete)\n";
+        std::cout << "  [PASS 06] Interactive Prompt Real Model Generation Stream & Event Pipeline: Verified (final.delta + generation_complete)\n";
     } else {
         std::cerr << "FAILED 06: Interactive model generation streaming verification failed. Output: " << gen_out << "\n";
         return 1;

@@ -30,6 +30,17 @@ typedef struct vinox_model_options {
 #define VINOX_MODEL_OPTIONS_MIN_SIZE \
     ((uint32_t)(offsetof(vinox_model_options, model_path) + sizeof(const char*)))
 
+typedef enum vinox_reasoning_mode {
+    VINOX_REASONING_NONE = 0,
+    VINOX_REASONING_TAGGED = 1,
+    VINOX_REASONING_NATIVE = 2
+} vinox_reasoning_mode;
+
+typedef enum vinox_stream_channel {
+    VINOX_STREAM_CHANNEL_FINAL = 0,
+    VINOX_STREAM_CHANNEL_REASONING = 1
+} vinox_stream_channel;
+
 typedef struct vinox_generation_options {
     uint32_t struct_size;
     const char* prompt;
@@ -40,6 +51,12 @@ typedef struct vinox_generation_options {
     float repetition_penalty;
     float presence_penalty;
     float frequency_penalty;
+    vinox_reasoning_mode reasoning_mode;
+    const char* reasoning_start_tag;
+    const char* reasoning_end_tag;
+    uint64_t max_reasoning_tokens;
+    uint64_t reasoning_timeout_ms;
+    int reasoning_can_disable; /* 1 = can disable reasoning, 0 = cannot disable reasoning */
 } vinox_generation_options;
 
 /* Minimum required struct_size for backward compatibility (up to max_new_tokens) */
@@ -47,6 +64,13 @@ typedef struct vinox_generation_options {
     ((uint32_t)(offsetof(vinox_generation_options, max_new_tokens) + sizeof(uint64_t)))
 
 typedef int (*vinox_text_callback)(
+    const char* text,
+    size_t text_size,
+    void* user_data
+);
+
+typedef int (*vinox_stream_callback)(
+    vinox_stream_channel channel,
     const char* text,
     size_t text_size,
     void* user_data
@@ -61,6 +85,13 @@ VINOX_API vinox_status vinox_model_generate(
     vinox_model* model,
     const vinox_generation_options* options,
     vinox_text_callback callback,
+    void* user_data
+);
+
+VINOX_API vinox_status vinox_model_generate_stream(
+    vinox_model* model,
+    const vinox_generation_options* options,
+    vinox_stream_callback callback,
     void* user_data
 );
 
