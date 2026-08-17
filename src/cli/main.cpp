@@ -893,10 +893,21 @@ int main(int argc, char* argv[]) {
                     gen_opts.temperature = arguments.temperature;
                     gen_opts.top_p = arguments.top_p;
 
+                    if (arguments.reasoning_mode_str == "off") {
+                        gen_opts.reasoning_mode = VINOX_REASONING_NONE;
+                    } else {
+                        gen_opts.reasoning_mode = VINOX_REASONING_TAGGED;
+                    }
+                    gen_opts.reasoning_start_tag = "<think>";
+                    gen_opts.reasoning_end_tag = "</think>";
+                    gen_opts.max_reasoning_tokens = arguments.reasoning_budget;
+                    gen_opts.reasoning_timeout_ms = arguments.reasoning_timeout_ms;
+
                     StreamUserContext stream_ctx;
                     stream_ctx.json_mode = session.json_mode;
+                    stream_ctx.reasoning_mode_str = arguments.reasoning_mode_str;
 
-                    vinox_status gen_st = vinox_model_generate(session.model, &gen_opts, write_text_callback, &stream_ctx);
+                    vinox_status gen_st = vinox_model_generate_stream(session.model, &gen_opts, write_stream_callback, &stream_ctx);
                     if (gen_st == VINOX_STATUS_OK) {
                         vinox_message_info asst_msg{};
                         asst_msg.struct_size = sizeof(asst_msg);

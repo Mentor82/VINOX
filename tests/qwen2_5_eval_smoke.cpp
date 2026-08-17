@@ -538,6 +538,7 @@ int main(int argc, char* argv[]) {
             gen_opts.temperature = TEMPERATURE;
             gen_opts.top_p = TOP_P;
             gen_opts.reasoning_mode = VINOX_REASONING_TAGGED;
+            gen_opts.reasoning_start_policy = (model_dir.find("DeepSeek") != std::string::npos || model_dir.find("R1") != std::string::npos) ? VINOX_REASONING_START_IMPLICIT : VINOX_REASONING_START_EXPLICIT;
             gen_opts.reasoning_start_tag = "<think>";
             gen_opts.reasoning_end_tag = "</think>";
 

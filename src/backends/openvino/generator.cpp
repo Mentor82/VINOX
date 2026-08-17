@@ -89,6 +89,56 @@ vinox_status vinox_model_load(
     }
 }
 
+vinox_status vinox_model_profile_get_default(const char* model_path, vinox_model_profile* profile) {
+    if (profile == nullptr) return fail_arg("profile pointer cannot be null");
+    profile->struct_size = sizeof(vinox_model_profile);
+
+    std::string path_str = model_path ? model_path : "";
+    if (path_str.find("DeepSeek") != std::string::npos || path_str.find("R1") != std::string::npos) {
+        profile->profile_id = "deepseek_r1_tagged_implicit";
+        profile->reasoning_mode = VINOX_REASONING_TAGGED;
+        profile->reasoning_start_policy = VINOX_REASONING_START_IMPLICIT;
+        profile->reasoning_start_tag = "<think>";
+        profile->reasoning_end_tag = "</think>";
+        profile->reasoning_can_disable = 0;
+        profile->tool_format = VINOX_TOOL_FORMAT_CANONICAL_JSON;
+        profile->chat_template = "deepseek_r1_template";
+        profile->generation_prefill = "Assistant:";
+    } else if (path_str.find("Qwen") != std::string::npos || path_str.find("Phi") != std::string::npos) {
+        profile->profile_id = "standard_tagged_explicit";
+        profile->reasoning_mode = VINOX_REASONING_TAGGED;
+        profile->reasoning_start_policy = VINOX_REASONING_START_EXPLICIT;
+        profile->reasoning_start_tag = "<think>";
+        profile->reasoning_end_tag = "</think>";
+        profile->reasoning_can_disable = 1;
+        profile->tool_format = VINOX_TOOL_FORMAT_CANONICAL_JSON;
+        profile->chat_template = "standard_chat_template";
+        profile->generation_prefill = "Assistant:";
+    } else {
+        profile->profile_id = "generic_canonical";
+        profile->reasoning_mode = VINOX_REASONING_NONE;
+        profile->reasoning_start_policy = VINOX_REASONING_START_EXPLICIT;
+        profile->reasoning_start_tag = "";
+        profile->reasoning_end_tag = "";
+        profile->reasoning_can_disable = 1;
+        profile->tool_format = VINOX_TOOL_FORMAT_CANONICAL_JSON;
+        profile->chat_template = "generic_template";
+        profile->generation_prefill = "Assistant:";
+    }
+    return VINOX_STATUS_OK;
+}
+
+vinox_status vinox_model_profile_validate(const vinox_model_profile* profile) {
+    if (profile == nullptr) return fail_arg("profile pointer cannot be null");
+    if (profile->reasoning_mode == VINOX_REASONING_NATIVE && profile->tool_format == VINOX_TOOL_FORMAT_NATIVE_TEMPLATE) {
+        return VINOX_STATUS_INVALID_ARGUMENT;
+    }
+    if (profile->reasoning_mode == VINOX_REASONING_TAGGED && (profile->reasoning_end_tag == nullptr || profile->reasoning_end_tag[0] == '\0')) {
+        return fail_arg("Tagged reasoning profile requires non-empty reasoning_end_tag");
+    }
+    return VINOX_STATUS_OK;
+}
+
 vinox_status vinox_model_generate_stream(
     vinox_model* model,
     const vinox_generation_options* options,
@@ -122,12 +172,18 @@ vinox_status vinox_model_generate_stream(
     }
 
     vinox_reasoning_mode rmode = VINOX_REASONING_NONE;
+    vinox_reasoning_start_policy start_policy = VINOX_REASONING_START_EXPLICIT;
     std::string start_tag = "<think>";
     std::string end_tag = "</think>";
     uint64_t max_r_tokens = 0;
+    uint64_t r_timeout_ms = 0;
+    int can_disable = 1;
 
     if (VINOX_FIELD_PRESENT(options, reasoning_mode)) {
         rmode = options->reasoning_mode;
+    }
+    if (VINOX_FIELD_PRESENT(options, reasoning_start_policy)) {
+        start_policy = options->reasoning_start_policy;
     }
     if (VINOX_FIELD_PRESENT(options, reasoning_start_tag) && options->reasoning_start_tag && options->reasoning_start_tag[0] != '\0') {
         start_tag = options->reasoning_start_tag;
@@ -138,11 +194,30 @@ vinox_status vinox_model_generate_stream(
     if (VINOX_FIELD_PRESENT(options, max_reasoning_tokens)) {
         max_r_tokens = options->max_reasoning_tokens;
     }
+    if (VINOX_FIELD_PRESENT(options, reasoning_timeout_ms)) {
+        r_timeout_ms = options->reasoning_timeout_ms;
+    }
+    if (VINOX_FIELD_PRESENT(options, reasoning_can_disable)) {
+        can_disable = options->reasoning_can_disable;
+    } else {
+        can_disable = 1;
+    }
+
+    // Capability Validation (Blockers 3 & 4)
+    if (rmode == VINOX_REASONING_NONE && can_disable == 0) {
+        last_error = "Model profile forbids disabling reasoning mode";
+        return VINOX_STATUS_NOT_SUPPORTED;
+    }
+    if (rmode == VINOX_REASONING_NATIVE) {
+        // Current OpenVINO text backend does not expose native dual-channel streams
+        last_error = "Native reasoning channel mode is not supported by current backend profile";
+        return VINOX_STATUS_NOT_SUPPORTED;
+    }
 
     if (model->is_mock) {
         model->cancel_requested.store(false);
         std::vector<std::pair<vinox_stream_channel, std::string>> mock_chunks;
-        if (rmode == VINOX_REASONING_TAGGED || rmode == VINOX_REASONING_NATIVE) {
+        if (rmode == VINOX_REASONING_TAGGED) {
             mock_chunks = {
                 {VINOX_STREAM_CHANNEL_REASONING, "Analyzing prompt..."},
                 {VINOX_STREAM_CHANNEL_FINAL, "Hello from OpenVINO mock!"}
@@ -199,12 +274,13 @@ vinox_status vinox_model_generate_stream(
         bool cancelled_by_callback = false;
 
         // Tagged Delimiter Parser State (Section J & L Invariants)
-        bool in_reasoning = false;
+        bool in_reasoning = (start_policy == VINOX_REASONING_START_IMPLICIT);
         bool reasoning_completed = false;
         uint64_t reasoning_token_count = 0;
         uint64_t final_token_count = 0;
         std::string accumulated_buf;
         vinox_status parse_error = VINOX_STATUS_OK;
+        auto gen_start_time = std::chrono::steady_clock::now();
 
         auto streamer = [&](std::string subword) -> ov::genai::StreamingStatus {
             if (model->cancel_requested.load()) {
@@ -215,16 +291,29 @@ vinox_status vinox_model_generate_stream(
                 return ov::genai::StreamingStatus::RUNNING;
             }
 
-            // Global Hard Cap Invariant (Section L)
+            // Monotonic reasoning timeout check (Blocker 2)
+            if (r_timeout_ms > 0) {
+                auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - gen_start_time).count();
+                if (static_cast<uint64_t>(elapsed_ms) >= r_timeout_ms) {
+                    parse_error = VINOX_STATUS_TIMED_OUT;
+                    return ov::genai::StreamingStatus::STOP;
+                }
+            }
+
+            // Global Hard Cap Invariant & Typed Budget Causes (Blocker 8)
             if (reasoning_token_count + final_token_count >= config.max_new_tokens) {
-                parse_error = VINOX_STATUS_OUT_OF_RANGE;
+                if (in_reasoning || !reasoning_completed) {
+                    parse_error = VINOX_STATUS_GLOBAL_GENERATION_BUDGET_EXCEEDED_WHILE_REASONING;
+                } else {
+                    parse_error = VINOX_STATUS_FINAL_OUTPUT_BUDGET_EXCEEDED;
+                }
                 return ov::genai::StreamingStatus::STOP;
             }
 
             if (rmode == VINOX_REASONING_TAGGED) {
                 accumulated_buf += subword;
 
-                // Protocol check: unexpected end tag before reasoning started
+                // Explicit Start Policy: wait for start_tag before entering reasoning mode
                 if (!in_reasoning && !reasoning_completed) {
                     size_t end_pos = accumulated_buf.find(end_tag);
                     size_t start_pos = accumulated_buf.find(start_tag);
@@ -244,18 +333,37 @@ vinox_status vinox_model_generate_stream(
                             }
                         }
                         accumulated_buf = accumulated_buf.substr(start_pos + start_tag.length());
+                    } else {
+                        // Streaming-safe partial start-delimiter buffering
+                        size_t retain_len = 0;
+                        for (size_t len = std::min(accumulated_buf.length(), start_tag.length() - 1); len > 0; --len) {
+                            if (start_tag.compare(0, len, accumulated_buf, accumulated_buf.length() - len, len) == 0) {
+                                retain_len = len;
+                                break;
+                            }
+                        }
+                        if (accumulated_buf.length() > retain_len) {
+                            std::string safe_prefix = accumulated_buf.substr(0, accumulated_buf.length() - retain_len);
+                            accumulated_buf = accumulated_buf.substr(accumulated_buf.length() - retain_len);
+                            final_token_count++;
+                            if (callback(VINOX_STREAM_CHANNEL_FINAL, safe_prefix.data(), safe_prefix.size(), user_data) != 0) {
+                                cancelled_by_callback = true;
+                                return ov::genai::StreamingStatus::STOP;
+                            }
+                        }
+                        return ov::genai::StreamingStatus::RUNNING;
+                    }
+                }
+
+                // Strip leading start_tag if explicitly present at start of reasoning
+                if (in_reasoning && !start_tag.empty()) {
+                    if (accumulated_buf.rfind(start_tag, 0) == 0) {
+                        accumulated_buf = accumulated_buf.substr(start_tag.length());
                     }
                 }
 
                 if (in_reasoning) {
-                    // Protocol check: duplicate start tag inside reasoning block
-                    size_t dup_start = accumulated_buf.find(start_tag);
                     size_t end_pos = accumulated_buf.find(end_tag);
-                    if (dup_start != std::string::npos && (end_pos == std::string::npos || dup_start < end_pos)) {
-                        parse_error = VINOX_STATUS_REASONING_PROTOCOL_ERROR;
-                        return ov::genai::StreamingStatus::STOP;
-                    }
-
                     if (end_pos != std::string::npos) {
                         std::string reasoning_chunk = accumulated_buf.substr(0, end_pos);
                         if (!reasoning_chunk.empty()) {
@@ -289,9 +397,9 @@ vinox_status vinox_model_generate_stream(
                     }
                 }
 
-                if (!accumulated_buf.empty() && (!in_reasoning || reasoning_completed)) {
+                if (!accumulated_buf.empty() && reasoning_completed) {
                     // Protocol check: second end tag or start tag after reasoning completed
-                    if (reasoning_completed && (accumulated_buf.find(end_tag) != std::string::npos || accumulated_buf.find(start_tag) != std::string::npos)) {
+                    if (accumulated_buf.find(end_tag) != std::string::npos || (!start_tag.empty() && accumulated_buf.find(start_tag) != std::string::npos)) {
                         parse_error = VINOX_STATUS_REASONING_PROTOCOL_ERROR;
                         return ov::genai::StreamingStatus::STOP;
                     }
@@ -305,9 +413,8 @@ vinox_status vinox_model_generate_stream(
                     }
                 }
             } else {
-                vinox_stream_channel ch = (rmode == VINOX_REASONING_NATIVE) ? VINOX_STREAM_CHANNEL_REASONING : VINOX_STREAM_CHANNEL_FINAL;
-                if (ch == VINOX_STREAM_CHANNEL_REASONING) reasoning_token_count++; else final_token_count++;
-                if (callback(ch, subword.data(), subword.size(), user_data) != 0) {
+                final_token_count++;
+                if (callback(VINOX_STREAM_CHANNEL_FINAL, subword.data(), subword.size(), user_data) != 0) {
                     cancelled_by_callback = true;
                     return ov::genai::StreamingStatus::STOP;
                 }
@@ -322,6 +429,10 @@ vinox_status vinox_model_generate_stream(
             parse_error = VINOX_STATUS_REASONING_NOT_CONVERGED;
         }
 
+        if (rmode == VINOX_REASONING_TAGGED && reasoning_completed && final_token_count == 0 && parse_error == VINOX_STATUS_OK) {
+            parse_error = VINOX_STATUS_FINAL_OUTPUT_MISSING;
+        }
+
         if (parse_error != VINOX_STATUS_OK) {
             if (parse_error == VINOX_STATUS_REASONING_BUDGET_EXCEEDED) {
                 last_error = "Reasoning token budget exceeded";
@@ -329,8 +440,14 @@ vinox_status vinox_model_generate_stream(
                 last_error = "Reasoning tag </think> did not converge before EOS";
             } else if (parse_error == VINOX_STATUS_REASONING_PROTOCOL_ERROR) {
                 last_error = "Reasoning delimiter protocol error (unexpected tag or invalid sequence)";
-            } else if (parse_error == VINOX_STATUS_OUT_OF_RANGE) {
-                last_error = "Global generation hard cap exceeded";
+            } else if (parse_error == VINOX_STATUS_GLOBAL_GENERATION_BUDGET_EXCEEDED_WHILE_REASONING) {
+                last_error = "Global generation hard cap exceeded while reasoning";
+            } else if (parse_error == VINOX_STATUS_FINAL_OUTPUT_BUDGET_EXCEEDED) {
+                last_error = "Final output token budget exceeded";
+            } else if (parse_error == VINOX_STATUS_FINAL_OUTPUT_MISSING) {
+                last_error = "Reasoning completed but final output is missing";
+            } else if (parse_error == VINOX_STATUS_TIMED_OUT) {
+                last_error = "Reasoning execution timed out";
             }
             return parse_error;
         }
