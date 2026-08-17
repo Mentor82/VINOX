@@ -87,6 +87,8 @@ if(VINOX_OPENVINO_SDK_ROOT)
         PUBLIC
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/thirdparty/minja
     )
     target_link_libraries(vinox_openvino PRIVATE openvino::genai nlohmann_json::nlohmann_json)
 
