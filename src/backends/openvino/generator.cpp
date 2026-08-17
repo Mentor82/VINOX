@@ -89,52 +89,96 @@ vinox_status vinox_model_load(
     }
 }
 
+static std::mutex g_profile_mutex;
+static std::unordered_map<std::string, vinox_model_profile> g_profile_registry;
+
+static void ensure_builtin_profiles_registered() {
+    std::lock_guard<std::mutex> lock(g_profile_mutex);
+    if (!g_profile_registry.empty()) return;
+
+    vinox_model_profile generic_prof{};
+    generic_prof.struct_size = sizeof(generic_prof);
+    generic_prof.profile_id = "generic_canonical";
+    generic_prof.reasoning_mode = VINOX_REASONING_NONE;
+    generic_prof.reasoning_start_policy = VINOX_REASONING_START_EXPLICIT;
+    generic_prof.reasoning_start_tag = "";
+    generic_prof.reasoning_end_tag = "";
+    generic_prof.reasoning_can_disable = 1;
+    generic_prof.tool_format = VINOX_TOOL_FORMAT_CANONICAL_JSON;
+    generic_prof.chat_template = "{system}\n{tools}\nUser: {user}\n{prefill}";
+    generic_prof.generation_prefill = "Assistant:";
+    g_profile_registry["generic_canonical"] = generic_prof;
+    g_profile_registry["generic"] = generic_prof;
+
+    vinox_model_profile implicit_prof{};
+    implicit_prof.struct_size = sizeof(implicit_prof);
+    implicit_prof.profile_id = "tagged_implicit_profile";
+    implicit_prof.reasoning_mode = VINOX_REASONING_TAGGED;
+    implicit_prof.reasoning_start_policy = VINOX_REASONING_START_IMPLICIT;
+    implicit_prof.reasoning_start_tag = "<think>";
+    implicit_prof.reasoning_end_tag = "</think>";
+    implicit_prof.reasoning_can_disable = 0;
+    implicit_prof.tool_format = VINOX_TOOL_FORMAT_CANONICAL_JSON;
+    implicit_prof.chat_template = "<|im_start|>system\n{system}\n{tools}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n{prefill}";
+    implicit_prof.generation_prefill = "Assistant:";
+    g_profile_registry["tagged_implicit_profile"] = implicit_prof;
+    g_profile_registry["deepseek_r1"] = implicit_prof;
+
+    vinox_model_profile explicit_prof{};
+    explicit_prof.struct_size = sizeof(explicit_prof);
+    explicit_prof.profile_id = "standard_tagged_explicit";
+    explicit_prof.reasoning_mode = VINOX_REASONING_TAGGED;
+    explicit_prof.reasoning_start_policy = VINOX_REASONING_START_EXPLICIT;
+    explicit_prof.reasoning_start_tag = "<think>";
+    explicit_prof.reasoning_end_tag = "</think>";
+    explicit_prof.reasoning_can_disable = 1;
+    explicit_prof.tool_format = VINOX_TOOL_FORMAT_CANONICAL_JSON;
+    explicit_prof.chat_template = "<|im_start|>system\n{system}\n{tools}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n{prefill}";
+    explicit_prof.generation_prefill = "Assistant:";
+    g_profile_registry["standard_tagged_explicit"] = explicit_prof;
+    g_profile_registry["qwen2_5"] = explicit_prof;
+
+    vinox_model_profile prefilled_prof{};
+    prefilled_prof.struct_size = sizeof(prefilled_prof);
+    prefilled_prof.profile_id = "prefilled_tagged";
+    prefilled_prof.reasoning_mode = VINOX_REASONING_TAGGED;
+    prefilled_prof.reasoning_start_policy = VINOX_REASONING_START_PREFILLED;
+    prefilled_prof.reasoning_start_tag = "<think>";
+    prefilled_prof.reasoning_end_tag = "</think>";
+    prefilled_prof.reasoning_can_disable = 1;
+    prefilled_prof.tool_format = VINOX_TOOL_FORMAT_NATIVE_TEMPLATE;
+    prefilled_prof.chat_template = "<|im_start|>system\n{system}\n{tools}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n{prefill}";
+    prefilled_prof.generation_prefill = "Assistant: <think>\n";
+    g_profile_registry["prefilled_tagged"] = prefilled_prof;
+}
+
+vinox_status vinox_model_profile_register(const vinox_model_profile* profile) {
+    if (profile == nullptr) return fail_arg("profile pointer cannot be null");
+    vinox_status st = vinox_model_profile_validate(profile);
+    if (st != VINOX_STATUS_OK) return st;
+
+    std::lock_guard<std::mutex> lock(g_profile_mutex);
+    std::string pid = profile->profile_id ? profile->profile_id : "";
+    if (pid.empty()) return fail_arg("profile_id cannot be empty");
+    g_profile_registry[pid] = *profile;
+    return VINOX_STATUS_OK;
+}
+
 vinox_status vinox_model_profile_get_default(const char* profile_id, vinox_model_profile* profile) {
     if (profile == nullptr) return fail_arg("profile pointer cannot be null");
     profile->struct_size = sizeof(vinox_model_profile);
 
+    ensure_builtin_profiles_registered();
     std::string pid = profile_id ? profile_id : "generic";
-    if (pid == "deepseek_r1" || pid == "deepseek_r1_tagged_implicit") {
-        profile->profile_id = "deepseek_r1_tagged_implicit";
-        profile->reasoning_mode = VINOX_REASONING_TAGGED;
-        profile->reasoning_start_policy = VINOX_REASONING_START_IMPLICIT;
-        profile->reasoning_start_tag = "<think>";
-        profile->reasoning_end_tag = "</think>";
-        profile->reasoning_can_disable = 0;
-        profile->tool_format = VINOX_TOOL_FORMAT_CANONICAL_JSON;
-        profile->chat_template = "deepseek_r1_template";
-        profile->generation_prefill = "Assistant:";
-    } else if (pid == "qwen2_5" || pid == "standard_tagged_explicit") {
-        profile->profile_id = "standard_tagged_explicit";
-        profile->reasoning_mode = VINOX_REASONING_TAGGED;
-        profile->reasoning_start_policy = VINOX_REASONING_START_EXPLICIT;
-        profile->reasoning_start_tag = "<think>";
-        profile->reasoning_end_tag = "</think>";
-        profile->reasoning_can_disable = 1;
-        profile->tool_format = VINOX_TOOL_FORMAT_CANONICAL_JSON;
-        profile->chat_template = "standard_chat_template";
-        profile->generation_prefill = "Assistant:";
-    } else if (pid == "prefilled_tagged") {
-        profile->profile_id = "prefilled_tagged";
-        profile->reasoning_mode = VINOX_REASONING_TAGGED;
-        profile->reasoning_start_policy = VINOX_REASONING_START_PREFILLED;
-        profile->reasoning_start_tag = "<think>";
-        profile->reasoning_end_tag = "</think>";
-        profile->reasoning_can_disable = 1;
-        profile->tool_format = VINOX_TOOL_FORMAT_CANONICAL_JSON;
-        profile->chat_template = "prefilled_template";
-        profile->generation_prefill = "Assistant: <think>\n";
-    } else {
-        profile->profile_id = "generic_canonical";
-        profile->reasoning_mode = VINOX_REASONING_NONE;
-        profile->reasoning_start_policy = VINOX_REASONING_START_EXPLICIT;
-        profile->reasoning_start_tag = "";
-        profile->reasoning_end_tag = "";
-        profile->reasoning_can_disable = 1;
-        profile->tool_format = VINOX_TOOL_FORMAT_CANONICAL_JSON;
-        profile->chat_template = "generic_template";
-        profile->generation_prefill = "Assistant:";
+
+    std::lock_guard<std::mutex> lock(g_profile_mutex);
+    auto it = g_profile_registry.find(pid);
+    if (it != g_profile_registry.end()) {
+        *profile = it->second;
+        return VINOX_STATUS_OK;
     }
+
+    *profile = g_profile_registry["generic_canonical"];
     return VINOX_STATUS_OK;
 }
 
@@ -172,11 +216,28 @@ vinox_status vinox_model_profile_format_prompt(
     std::string prefill = profile->generation_prefill ? profile->generation_prefill : "Assistant:";
     std::string tools = tools_json_schema ? tools_json_schema : "";
 
-    std::string formatted = sys + "\n";
-    if (!tools.empty()) {
-        formatted += "Available Tools:\n" + tools + "\n";
+    // Operational Template Engine consuming profile->chat_template & tool_format (Nephy Blocker 2 & 3)
+    std::string tpl = (profile->chat_template && profile->chat_template[0] != '\0') 
+        ? profile->chat_template 
+        : "{system}\n{tools}\nUser: {user}\n{prefill}";
+
+    if (profile->tool_format == VINOX_TOOL_FORMAT_NATIVE_TEMPLATE && !tools.empty()) {
+        tools = "<tools>\n" + tools + "\n</tools>";
     }
-    formatted += "User: " + std::string(user_prompt) + "\n" + prefill;
+
+    auto replace_all = [](std::string& str, const std::string& from, const std::string& to) {
+        size_t start_pos = 0;
+        while ((start_pos = str.find(from, start_pos)) != std::string::npos) {
+            str.replace(start_pos, from.length(), to);
+            start_pos += to.length();
+        }
+    };
+
+    std::string formatted = tpl;
+    replace_all(formatted, "{system}", sys);
+    replace_all(formatted, "{user}", user_prompt);
+    replace_all(formatted, "{tools}", tools);
+    replace_all(formatted, "{prefill}", prefill);
 
     if (formatted.length() >= out_buf_size) {
         return fail_arg("out_buf size is too small for formatted prompt");

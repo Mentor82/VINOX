@@ -66,6 +66,7 @@ typedef struct vinox_model_profile {
     const char* generation_prefill;
 } vinox_model_profile;
 
+VINOX_API vinox_status vinox_model_profile_register(const vinox_model_profile* profile);
 VINOX_API vinox_status vinox_model_profile_get_default(const char* profile_id, vinox_model_profile* profile);
 VINOX_API vinox_status vinox_model_profile_validate(const vinox_model_profile* profile);
 VINOX_API vinox_status vinox_model_profile_format_prompt(
