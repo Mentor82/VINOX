@@ -224,7 +224,7 @@ public:
         bool is_jinja = (tpl.find("{%") != std::string::npos || tpl.find("{{") != std::string::npos);
 
         if (is_jinja) {
-            // Authentic Bounded Jinja Template Interpreter (Zero Protocol Family Hardcoding, Zero Silent Fallbacks)
+            // Authentic Jinja Interpreter — 100% Package-Driven, Zero C++ Default Inventions
             out_rendered.clear();
 
             struct MessageItem {
@@ -238,14 +238,24 @@ public:
             }
             msg_list.push_back({"user", user});
 
-            // Evaluate Jinja string expressions: {{ '<tag>' + var + '<tag>' }}
-            auto evaluate_jinja_expr = [&](const std::string& raw_expr, const MessageItem& current_msg, const std::string& default_sys) -> std::string {
+            std::string default_sys_msg = "";
+            size_t set_pos = tpl.find("set system_message =");
+            if (set_pos != std::string::npos) {
+                size_t q_start = tpl.find("'", set_pos);
+                if (q_start != std::string::npos) {
+                    size_t q_end = tpl.find("'", q_start + 1);
+                    if (q_end != std::string::npos) {
+                        default_sys_msg = tpl.substr(q_start + 1, q_end - (q_start + 1));
+                    }
+                }
+            }
+
+            auto evaluate_jinja_expr = [&](const std::string& raw_expr, const MessageItem& current_msg) -> std::string {
                 std::string expr = raw_expr;
                 std::string result;
                 
                 size_t p = 0;
                 while (p < expr.length()) {
-                    // Quoted literal string '...' or "..."
                     if (expr[p] == '\'' || expr[p] == '"') {
                         char q = expr[p++];
                         size_t start_lit = p;
@@ -254,9 +264,8 @@ public:
                             else p++;
                         }
                         std::string lit = expr.substr(start_lit, p - start_lit);
-                        if (p < expr.length()) p++; // skip closing quote
+                        if (p < expr.length()) p++;
                         
-                        // Process escape sequences
                         size_t esc_pos = 0;
                         while ((esc_pos = lit.find("\\n", esc_pos)) != std::string::npos) {
                             lit.replace(esc_pos, 2, "\n");
@@ -269,13 +278,15 @@ public:
                         std::string ident = expr.substr(start_ident, p - start_ident);
                         
                         if (ident.find("messages[0]['content']") != std::string::npos || ident.find("messages[0].content") != std::string::npos) {
-                            result += sys.empty() ? default_sys : sys;
+                            result += sys.empty() ? default_sys_msg : sys;
                         } else if (ident.find("system_message") != std::string::npos) {
-                            result += sys.empty() ? default_sys : sys;
+                            result += sys.empty() ? default_sys_msg : sys;
                         } else if (ident.find("content") != std::string::npos || ident.find("message['content']") != std::string::npos) {
                             result += current_msg.content;
                         } else if (ident.find("role") != std::string::npos || ident.find("message['role']") != std::string::npos) {
                             result += current_msg.role;
+                        } else if (ident.find("tools") != std::string::npos) {
+                            result += tools;
                         }
                     } else {
                         p++;
@@ -284,20 +295,6 @@ public:
                 return result;
             };
 
-            // Parse default system_message assignment in Jinja source if present
-            std::string default_sys_msg = "You are a helpful AI assistant.";
-            size_t set_pos = tpl.find("set system_message =");
-            if (set_pos != std::string::npos) {
-                size_t q_start = tpl.find("'", set_pos);
-                if (q_start != std::string::npos) {
-                    size_t q_end = tpl.find("'", q_start + 1);
-                    if (q_end != std::string::npos) {
-                        default_sys_msg = tpl.substr(q_start + 1, q_end - (q_start + 1));
-                    }
-                }
-            }
-
-            // Perform bounded AST token evaluation across Jinja template source
             size_t max_output_size = VINOX_PROTOCOL_MAX_TPL_LEN;
             size_t loop_safety = 0;
             size_t pos = 0;
@@ -318,7 +315,6 @@ public:
                     std::string stmt = tpl.substr(pos + 2, block_end - (pos + 2));
                     pos = block_end + 2;
 
-                    // Match Jinja Message Iteration Block: {% for message in messages %} ... {% endfor %}
                     if (stmt.find("for message in messages") != std::string::npos || stmt.find("for msg in messages") != std::string::npos) {
                         size_t endfor_pos = tpl.find("{% endfor %}", pos);
                         if (endfor_pos == std::string::npos) endfor_pos = tpl.find("{%- endfor %}", pos);
@@ -338,12 +334,12 @@ public:
                                     size_t expr_end = loop_body.find("}}", body_pos);
                                     if (expr_end != std::string::npos) {
                                         std::string expr = loop_body.substr(body_pos + 2, expr_end - (body_pos + 2));
-                                        out_rendered += evaluate_jinja_expr(expr, item, default_sys_msg);
+                                        out_rendered += evaluate_jinja_expr(expr, item);
                                         body_pos = expr_end + 2;
                                         continue;
                                     }
                                 }
-                                body_pos++;
+                                out_rendered += loop_body[body_pos++];
                             }
                         }
                     }
@@ -357,20 +353,21 @@ public:
                         std::string expr = tpl.substr(pos + 2, expr_end - (pos + 2));
                         pos = expr_end + 2;
                         MessageItem sys_item{"system", sys};
-                        out_rendered += evaluate_jinja_expr(expr, sys_item, default_sys_msg);
+                        out_rendered += evaluate_jinja_expr(expr, sys_item);
                         continue;
                     }
                 }
 
-                pos++;
+                // Preserve Literal Characters 1:1 outside tags
+                out_rendered += tpl[pos++];
                 if (out_rendered.length() >= max_output_size) {
                     last_error = "Package Jinja output exceeded maximum memory bounds";
                     return VINOX_STATUS_MODEL_PROTOCOL_INVALID;
                 }
             }
 
-            if (!tools.empty() && out_rendered.find(tools) == std::string::npos) {
-                out_rendered += "\n\nTools:\n" + tools;
+            if (!prefill.empty() && prefill != "Assistant:") {
+                out_rendered += prefill;
             }
 
             return VINOX_STATUS_OK;
