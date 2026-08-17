@@ -530,17 +530,22 @@ int main(int argc, char* argv[]) {
             stream_ctx.start_time = std::chrono::steady_clock::now();
             std::cout << get_timestamp_str() << " [GENERATION_START] Trial " << (trial + 1) << "/" << TRIAL_COUNT << " ..." << std::flush;
 
-            vinox_generation_options gen_opts;
+            vinox_model_profile eval_profile{};
+            vinox_model_profile_get_default("tagged_implicit_profile", &eval_profile);
+
+            vinox_generation_options gen_opts{};
             std::memset(&gen_opts, 0, sizeof(gen_opts));
             gen_opts.struct_size = sizeof(gen_opts);
             gen_opts.prompt = full_prompt.c_str();
             gen_opts.max_new_tokens = MAX_NEW_TOKENS;
             gen_opts.temperature = TEMPERATURE;
             gen_opts.top_p = TOP_P;
-            gen_opts.reasoning_mode = VINOX_REASONING_TAGGED;
-            gen_opts.reasoning_start_policy = (model_dir.find("DeepSeek") != std::string::npos || model_dir.find("R1") != std::string::npos) ? VINOX_REASONING_START_IMPLICIT : VINOX_REASONING_START_EXPLICIT;
-            gen_opts.reasoning_start_tag = "<think>";
-            gen_opts.reasoning_end_tag = "</think>";
+            if (no_think_mode) {
+                gen_opts.reasoning_mode = VINOX_REASONING_NONE;
+            } else {
+                gen_opts.profile = &eval_profile;
+                gen_opts.reasoning_mode = eval_profile.reasoning_mode;
+            }
 
             std::string raw_output_text;
             if (vinox_model_generate_stream(model, &gen_opts, stream_dual_channel_callback, &stream_ctx) == VINOX_STATUS_OK) {

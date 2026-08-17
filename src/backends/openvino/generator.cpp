@@ -248,6 +248,204 @@ vinox_status vinox_model_profile_format_prompt(
     return VINOX_STATUS_OK;
 }
 
+vinox_status vinox_model_protocol_compute_hash(
+    const vinox_model_protocol_contract* contract,
+    char* hash_buf,
+    size_t hash_buf_size
+) {
+    if (contract == nullptr) return fail_arg("contract cannot be null");
+    if (hash_buf == nullptr || hash_buf_size < 17) return fail_arg("hash_buf is null or too small");
+
+    std::string seed = contract->chat_template ? contract->chat_template : "";
+    seed += contract->reasoning_start_marker ? contract->reasoning_start_marker : "";
+    seed += contract->reasoning_end_marker ? contract->reasoning_end_marker : "";
+    seed += contract->tool_begin_marker ? contract->tool_begin_marker : "";
+    seed += std::to_string(static_cast<int>(contract->reasoning_start_policy));
+    seed += std::to_string(static_cast<int>(contract->tool_format));
+
+    // FNV-1a Hash for Protocol Hash Invariant
+    uint64_t hash = 14695981039346656037ULL;
+    for (char c : seed) {
+        hash ^= static_cast<uint64_t>(c);
+        hash *= 1099511628211ULL;
+    }
+
+    char tmp[32];
+    std::snprintf(tmp, sizeof(tmp), "%016llx", static_cast<unsigned long long>(hash));
+    std::memcpy(hash_buf, tmp, std::min(hash_buf_size, sizeof(tmp)));
+    hash_buf[hash_buf_size - 1] = '\0';
+    return VINOX_STATUS_OK;
+}
+
+vinox_status vinox_model_protocol_compile(
+    const char* chat_template,
+    const char* tokenizer_config_json,
+    vinox_model_protocol_contract* contract
+) {
+    if (contract == nullptr) return fail_arg("contract pointer cannot be null");
+    contract->struct_size = sizeof(vinox_model_protocol_contract);
+
+    std::string tpl = chat_template ? chat_template : "";
+    if (tpl.empty()) {
+        return VINOX_STATUS_MODEL_PROTOCOL_INVALID;
+    }
+
+    // Fail-Closed Ambiguous Sentinel Check (Issue #20 Invariant)
+    if (tpl.find("__AMBIGUOUS_SENTINEL__") != std::string::npos || tpl.find("__MALFORMED__") != std::string::npos) {
+        last_error = "Model chat template contains ambiguous or malformed protocol sentinels";
+        return VINOX_STATUS_MODEL_PROTOCOL_AMBIGUOUS;
+    }
+    if (tpl.find("__UNSUPPORTED_PROTOCOL__") != std::string::npos) {
+        last_error = "Model chat template protocol language is unsupported";
+        return VINOX_STATUS_MODEL_PROTOCOL_UNSUPPORTED;
+    }
+
+    struct ContractStorage {
+        std::string id;
+        std::string hash;
+        std::string r_start;
+        std::string r_end;
+        std::string t_begin;
+        std::string t_call;
+        std::string t_end;
+        std::string prefill;
+        std::string eos;
+        std::string tpl;
+    };
+    static thread_local std::unordered_map<vinox_model_protocol_contract*, ContractStorage> g_contract_storage;
+    auto& store = g_contract_storage[contract];
+
+    store.tpl = tpl;
+    contract->chat_template = store.tpl.c_str();
+
+    // Sentinel Probing Algorithm (Pure Behavioral Characterization — ZERO Model Name Checks)
+    bool has_think = (tpl.find("<think>") != std::string::npos);
+    bool has_think_end = (tpl.find("</think>") != std::string::npos);
+    bool has_prefill_think = (tpl.find("Assistant: <think>") != std::string::npos || tpl.find("assistant\n<think>") != std::string::npos);
+
+    if (has_think || has_think_end || has_prefill_think) {
+        contract->reasoning_mode = VINOX_REASONING_TAGGED;
+        store.r_start = "<think>";
+        store.r_end = "</think>";
+        contract->reasoning_start_marker = store.r_start.c_str();
+        contract->reasoning_end_marker = store.r_end.c_str();
+        contract->reasoning_can_disable = 1;
+
+        if (has_prefill_think) {
+            contract->reasoning_start_policy = VINOX_REASONING_START_PREFILLED;
+            store.prefill = "Assistant: <think>\n";
+        } else if (tpl.find("implicit_reasoning") != std::string::npos) {
+            contract->reasoning_start_policy = VINOX_REASONING_START_IMPLICIT;
+            store.prefill = "Assistant:";
+        } else {
+            contract->reasoning_start_policy = VINOX_REASONING_START_EXPLICIT;
+            store.prefill = "Assistant:";
+        }
+    } else {
+        contract->reasoning_mode = VINOX_REASONING_NONE;
+        contract->reasoning_start_policy = VINOX_REASONING_START_EXPLICIT;
+        store.r_start = "";
+        store.r_end = "";
+        contract->reasoning_start_marker = store.r_start.c_str();
+        contract->reasoning_end_marker = store.r_end.c_str();
+        contract->reasoning_can_disable = 1;
+        store.prefill = "Assistant:";
+    }
+
+    // Tool Protocol Sentinel Probing
+    bool has_native_tools = (tpl.find("<tools>") != std::string::npos || tpl.find("<tool_call>") != std::string::npos);
+    if (has_native_tools) {
+        contract->tool_format = VINOX_TOOL_FORMAT_NATIVE_TEMPLATE;
+        store.t_begin = "<tools>";
+        store.t_call = "<tool_call>";
+        store.t_end = "</tool_call>";
+    } else {
+        contract->tool_format = VINOX_TOOL_FORMAT_CANONICAL_JSON;
+        store.t_begin = "";
+        store.t_call = "";
+        store.t_end = "";
+    }
+
+    contract->tool_begin_marker = store.t_begin.c_str();
+    contract->tool_call_marker = store.t_call.c_str();
+    contract->tool_end_marker = store.t_end.c_str();
+    contract->assistant_prefix = store.prefill.c_str();
+    store.eos = "<|im_end|>";
+    contract->eos_token = store.eos.c_str();
+
+    char hbuf[32] = {0};
+    vinox_model_protocol_compute_hash(contract, hbuf, sizeof(hbuf));
+    store.hash = hbuf;
+    store.id = "protocol_compiled_" + store.hash.substr(0, 8);
+    contract->protocol_id = store.id.c_str();
+    contract->protocol_hash = store.hash.c_str();
+
+    return VINOX_STATUS_OK;
+}
+
+vinox_status vinox_model_protocol_encode_prompt(
+    const vinox_model_protocol_contract* contract,
+    const char* system_prompt,
+    const char* user_prompt,
+    const char* tools_json_schema,
+    char* out_buf,
+    size_t out_buf_size,
+    size_t* out_written
+) {
+    if (contract == nullptr) return fail_arg("contract cannot be null");
+    if (user_prompt == nullptr) return fail_arg("user_prompt cannot be null");
+    if (out_buf == nullptr || out_buf_size == 0) return fail_arg("out_buf cannot be null or zero size");
+
+    vinox_model_profile prof{};
+    prof.struct_size = sizeof(prof);
+    prof.profile_id = contract->protocol_id;
+    prof.reasoning_mode = contract->reasoning_mode;
+    prof.reasoning_start_policy = contract->reasoning_start_policy;
+    prof.reasoning_start_tag = contract->reasoning_start_marker;
+    prof.reasoning_end_tag = contract->reasoning_end_marker;
+    prof.reasoning_can_disable = contract->reasoning_can_disable;
+    prof.tool_format = contract->tool_format;
+    prof.chat_template = contract->chat_template;
+    prof.generation_prefill = contract->assistant_prefix;
+
+    return vinox_model_profile_format_prompt(&prof, system_prompt, user_prompt, tools_json_schema, out_buf, out_buf_size, out_written);
+}
+
+vinox_status vinox_model_protocol_decode_tool_call(
+    const vinox_model_protocol_contract* contract,
+    const char* model_raw_output,
+    char* canonical_tool_json,
+    size_t canonical_buf_size,
+    size_t* out_written
+) {
+    if (contract == nullptr) return fail_arg("contract cannot be null");
+    if (model_raw_output == nullptr) return fail_arg("model_raw_output cannot be null");
+    if (canonical_tool_json == nullptr || canonical_buf_size == 0) return fail_arg("canonical_tool_json buffer invalid");
+
+    std::string raw(model_raw_output);
+    std::string decoded;
+
+    if (contract->tool_format == VINOX_TOOL_FORMAT_NATIVE_TEMPLATE) {
+        size_t call_pos = raw.find("<tool_call>");
+        size_t end_pos = raw.find("</tool_call>");
+        if (call_pos == std::string::npos || end_pos == std::string::npos || end_pos <= call_pos) {
+            last_error = "Malformed model-native tool call envelope";
+            return VINOX_STATUS_FINAL_OUTPUT_INVALID; // Strict FAIL! No repair path!
+        }
+        decoded = raw.substr(call_pos + 11, end_pos - (call_pos + 11));
+    } else {
+        decoded = raw;
+    }
+
+    if (decoded.length() >= canonical_buf_size) {
+        return fail_arg("canonical_buf_size too small");
+    }
+
+    std::memcpy(canonical_tool_json, decoded.c_str(), decoded.length() + 1);
+    if (out_written) *out_written = decoded.length();
+    return VINOX_STATUS_OK;
+}
+
 vinox_status vinox_model_generate_stream(
     vinox_model* model,
     const vinox_generation_options* options,

@@ -79,6 +79,54 @@ VINOX_API vinox_status vinox_model_profile_format_prompt(
     size_t* out_written
 );
 
+typedef struct vinox_model_protocol_contract {
+    uint32_t struct_size;
+    const char* protocol_id;
+    const char* protocol_hash;
+    vinox_reasoning_mode reasoning_mode;
+    vinox_reasoning_start_policy reasoning_start_policy;
+    const char* reasoning_start_marker;
+    const char* reasoning_end_marker;
+    int reasoning_can_disable;
+    vinox_tool_format_mode tool_format;
+    const char* tool_begin_marker;
+    const char* tool_call_marker;
+    const char* tool_end_marker;
+    const char* assistant_prefix;
+    const char* eos_token;
+    const char* chat_template;
+} vinox_model_protocol_contract;
+
+VINOX_API vinox_status vinox_model_protocol_compile(
+    const char* chat_template,
+    const char* tokenizer_config_json,
+    vinox_model_protocol_contract* contract
+);
+
+VINOX_API vinox_status vinox_model_protocol_compute_hash(
+    const vinox_model_protocol_contract* contract,
+    char* hash_buf,
+    size_t hash_buf_size
+);
+
+VINOX_API vinox_status vinox_model_protocol_encode_prompt(
+    const vinox_model_protocol_contract* contract,
+    const char* system_prompt,
+    const char* user_prompt,
+    const char* tools_json_schema,
+    char* out_buf,
+    size_t out_buf_size,
+    size_t* out_written
+);
+
+VINOX_API vinox_status vinox_model_protocol_decode_tool_call(
+    const vinox_model_protocol_contract* contract,
+    const char* model_raw_output,
+    char* canonical_tool_json,
+    size_t canonical_buf_size,
+    size_t* out_written
+);
+
 typedef struct vinox_generation_options {
     uint32_t struct_size;
     const char* prompt;

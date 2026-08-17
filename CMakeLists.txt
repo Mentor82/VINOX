@@ -359,13 +359,17 @@ if(BUILD_TESTING)
         target_link_libraries(vinox_reasoning_channel_smoke PRIVATE vinox::openvino vinox::core)
         add_test(NAME reasoning_channel_smoke COMMAND vinox_reasoning_channel_smoke)
 
+        add_executable(vinox_model_protocol_compiler_smoke tests/model_protocol_compiler_smoke.cpp)
+        target_link_libraries(vinox_model_protocol_compiler_smoke PRIVATE vinox::openvino vinox::core)
+        add_test(NAME model_protocol_compiler_smoke COMMAND vinox_model_protocol_compiler_smoke)
+
         add_executable(vinox_qwen2_5_eval_smoke tests/qwen2_5_eval_smoke.cpp)
         target_link_libraries(vinox_qwen2_5_eval_smoke PRIVATE vinox::core vinox::openvino vinox::serving vinox::storage nlohmann_json::nlohmann_json)
         file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/tests/corpus DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/tests)
         add_test(NAME qwen2_5_eval_smoke COMMAND vinox_qwen2_5_eval_smoke)
 
         if(WIN32 AND VINOX_OPENVINO_SDK_ROOT)
-            set_tests_properties(openvino_abi_smoke reasoning_channel_smoke qwen2_5_eval_smoke cli_process_smoke PROPERTIES ENVIRONMENT
+            set_tests_properties(openvino_abi_smoke reasoning_channel_smoke model_protocol_compiler_smoke qwen2_5_eval_smoke cli_process_smoke PROPERTIES ENVIRONMENT
                 "PATH=C:/ai/openvino_genai_2026.2.1/openvino_genai_windows_2026.2.1.0_x86_64/runtime/bin/intel64/Release\\\;C:/ai/openvino_genai_2026.2.1/openvino_genai_windows_2026.2.1.0_x86_64/runtime/3rdparty/tbb/bin\\\;${VINOX_OPENVINO_SDK_ROOT}/runtime/bin/intel64/$<CONFIG>\\\;${VINOX_OPENVINO_SDK_ROOT}/runtime/3rdparty/tbb/bin\\\;$ENV{PATH}"
             )
         endif()
