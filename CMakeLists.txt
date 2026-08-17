@@ -79,6 +79,7 @@ if(VINOX_OPENVINO_SDK_ROOT)
 
     add_library(vinox_openvino SHARED
         src/backends/openvino/generator.cpp
+        src/backends/openvino/minja_template_runtime.cpp
     )
     add_library(vinox::openvino ALIAS vinox_openvino)
     set_target_properties(vinox_openvino PROPERTIES EXPORT_NAME openvino)
@@ -372,6 +373,19 @@ if(BUILD_TESTING)
         add_executable(vinox_template_protocol_evidence_probe tests/template_protocol_evidence_probe.cpp)
         target_link_libraries(vinox_template_protocol_evidence_probe PRIVATE vinox::openvino vinox::core nlohmann_json::nlohmann_json)
         add_test(NAME template_protocol_evidence_probe COMMAND vinox_template_protocol_evidence_probe)
+
+        # MinjaTemplateRuntime is an internal (non-ABI) C++ class, deliberately
+        # not exported across the vinox_openvino DLL boundary (Architekturregeln,
+        # PLAN.md #2: "STL-Typen und Exceptions ueberschreiten keine DLL-Grenze").
+        # This smoke test therefore compiles the runtime's .cpp directly into the
+        # test binary rather than linking against vinox::openvino.
+        add_executable(vinox_minja_template_runtime_smoke
+            tests/minja_template_runtime_smoke.cpp
+            src/backends/openvino/minja_template_runtime.cpp
+        )
+        target_include_directories(vinox_minja_template_runtime_smoke PRIVATE src src/thirdparty/minja)
+        target_link_libraries(vinox_minja_template_runtime_smoke PRIVATE nlohmann_json::nlohmann_json)
+        add_test(NAME minja_template_runtime_smoke COMMAND vinox_minja_template_runtime_smoke)
 
         add_executable(vinox_qwen2_5_eval_smoke tests/qwen2_5_eval_smoke.cpp)
         target_link_libraries(vinox_qwen2_5_eval_smoke PRIVATE vinox::core vinox::openvino vinox::serving vinox::storage nlohmann_json::nlohmann_json)
