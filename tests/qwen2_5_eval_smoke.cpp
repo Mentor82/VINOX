@@ -511,8 +511,7 @@ int main(int argc, char* argv[]) {
     for (const auto& item : corpus) {
         std::cout << get_timestamp_str() << " [CASE_START] [" << item.id << "] " << item.category << ": \"" << item.user_prompt << "\"\n";
 
-        std::string assistant_prefix = no_think_mode ? "Assistant: </think>\n" : "Assistant:";
-        std::string full_prompt = system_prompt + "User: " + item.user_prompt + "\n" + assistant_prefix;
+        std::string full_prompt = "<|im_start|>system\n" + system_prompt + "<|im_end|>\n<|im_start|>user\n" + item.user_prompt + "<|im_end|>\n<|im_start|>assistant\n";
         size_t case_raw_pass_count = 0;
         bool is_no_tool_expected = item.expected_tool.empty();
 
@@ -530,9 +529,6 @@ int main(int argc, char* argv[]) {
             stream_ctx.start_time = std::chrono::steady_clock::now();
             std::cout << get_timestamp_str() << " [GENERATION_START] Trial " << (trial + 1) << "/" << TRIAL_COUNT << " ..." << std::flush;
 
-            vinox_model_profile eval_profile{};
-            vinox_model_profile_get_default("tagged_implicit_profile", &eval_profile);
-
             vinox_generation_options gen_opts{};
             std::memset(&gen_opts, 0, sizeof(gen_opts));
             gen_opts.struct_size = sizeof(gen_opts);
@@ -540,16 +536,15 @@ int main(int argc, char* argv[]) {
             gen_opts.max_new_tokens = MAX_NEW_TOKENS;
             gen_opts.temperature = TEMPERATURE;
             gen_opts.top_p = TOP_P;
-            if (no_think_mode) {
-                gen_opts.reasoning_mode = VINOX_REASONING_NONE;
-            } else {
-                gen_opts.profile = &eval_profile;
-                gen_opts.reasoning_mode = eval_profile.reasoning_mode;
-            }
+            gen_opts.reasoning_mode = VINOX_REASONING_NONE;
+            gen_opts.reasoning_can_disable = 1;
 
             std::string raw_output_text;
-            if (vinox_model_generate_stream(model, &gen_opts, stream_dual_channel_callback, &stream_ctx) == VINOX_STATUS_OK) {
+            vinox_status gen_st = vinox_model_generate_stream(model, &gen_opts, stream_dual_channel_callback, &stream_ctx);
+            if (gen_st == VINOX_STATUS_OK) {
                 raw_output_text = stream_ctx.generated_text;
+            } else {
+                std::cout << " [STREAM_ERR: " << gen_st << " - " << (vinox_openvino_last_error() ? vinox_openvino_last_error() : "") << "] " << std::flush;
             }
 
             auto gen_end = std::chrono::steady_clock::now();
