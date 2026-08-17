@@ -151,6 +151,11 @@ typedef struct vinox_generation_options {
     const vinox_model_profile* profile;
 } vinox_generation_options;
 
+VINOX_API vinox_status vinox_generation_options_from_contract(
+    const vinox_model_protocol_contract* contract,
+    vinox_generation_options* gen_opts
+);
+
 /* Minimum required struct_size for backward compatibility (up to max_new_tokens) */
 #define VINOX_GENERATION_OPTIONS_MIN_SIZE \
     ((uint32_t)(offsetof(vinox_generation_options, max_new_tokens) + sizeof(uint64_t)))

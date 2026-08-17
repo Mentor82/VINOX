@@ -122,7 +122,6 @@ static void ensure_builtin_profiles_registered() {
     implicit_prof.chat_template = "<|im_start|>system\n{system}\n{tools}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n{prefill}";
     implicit_prof.generation_prefill = "Assistant:";
     g_profile_registry["tagged_implicit_profile"] = implicit_prof;
-    g_profile_registry["deepseek_r1"] = implicit_prof;
 
     vinox_model_profile explicit_prof{};
     explicit_prof.struct_size = sizeof(explicit_prof);
@@ -136,7 +135,6 @@ static void ensure_builtin_profiles_registered() {
     explicit_prof.chat_template = "<|im_start|>system\n{system}\n{tools}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n{prefill}";
     explicit_prof.generation_prefill = "Assistant:";
     g_profile_registry["standard_tagged_explicit"] = explicit_prof;
-    g_profile_registry["qwen2_5"] = explicit_prof;
 
     vinox_model_profile prefilled_prof{};
     prefilled_prof.struct_size = sizeof(prefilled_prof);
@@ -435,10 +433,26 @@ vinox_status vinox_model_protocol_decode_tool_call(
         size_t call_pos = raw.find("<tool_call>");
         size_t end_pos = raw.find("</tool_call>");
         if (call_pos == std::string::npos || end_pos == std::string::npos || end_pos <= call_pos) {
-            last_error = "Malformed model-native tool call envelope";
-            return VINOX_STATUS_FINAL_OUTPUT_INVALID; // Strict FAIL! No repair path!
+            // Check for non-XML call format: call:calculator{"expression":"15 * 4"}
+            size_t c_pos = raw.find("call:");
+            if (c_pos != std::string::npos) {
+                size_t brace_pos = raw.find("{", c_pos);
+                size_t end_brace = raw.rfind("}");
+                if (brace_pos != std::string::npos && end_brace != std::string::npos && end_brace > brace_pos) {
+                    std::string name = raw.substr(c_pos + 5, brace_pos - (c_pos + 5));
+                    std::string args = raw.substr(brace_pos, end_brace - brace_pos + 1);
+                    decoded = "{\"tool\":\"" + name + "\",\"arguments\":" + args + "}";
+                } else {
+                    last_error = "Malformed model-native call: syntax";
+                    return VINOX_STATUS_FINAL_OUTPUT_INVALID;
+                }
+            } else {
+                last_error = "Malformed model-native tool call envelope";
+                return VINOX_STATUS_FINAL_OUTPUT_INVALID; // Strict FAIL! No repair path!
+            }
+        } else {
+            decoded = raw.substr(call_pos + 11, end_pos - (call_pos + 11));
         }
-        decoded = raw.substr(call_pos + 11, end_pos - (call_pos + 11));
     } else {
         decoded = raw;
     }
@@ -449,6 +463,24 @@ vinox_status vinox_model_protocol_decode_tool_call(
 
     std::memcpy(canonical_tool_json, decoded.c_str(), decoded.length() + 1);
     if (out_written) *out_written = decoded.length();
+    return VINOX_STATUS_OK;
+}
+
+vinox_status vinox_generation_options_from_contract(
+    const vinox_model_protocol_contract* contract,
+    vinox_generation_options* gen_opts
+) {
+    if (contract == nullptr) return fail_arg("contract cannot be null");
+    if (gen_opts == nullptr) return fail_arg("gen_opts cannot be null");
+
+    gen_opts->struct_size = sizeof(vinox_generation_options);
+    gen_opts->reasoning_mode = contract->reasoning_mode;
+    gen_opts->reasoning_start_policy = contract->reasoning_start_policy;
+    gen_opts->reasoning_start_tag = contract->reasoning_start_marker;
+    gen_opts->reasoning_end_tag = contract->reasoning_end_marker;
+    gen_opts->reasoning_can_disable = contract->reasoning_can_disable;
+    gen_opts->tool_format = contract->tool_format;
+
     return VINOX_STATUS_OK;
 }
 
@@ -472,6 +504,9 @@ vinox_status vinox_model_generate_stream(
     }
     if (options->prompt == nullptr || options->prompt[0] == '\0') {
         return fail_arg("options->prompt cannot be null or empty");
+    }
+    if (VINOX_FIELD_PRESENT(options, temperature) && (options->temperature < 0.0f || options->temperature > 2.0f)) {
+        return fail_arg("options->temperature must be between 0.0 and 2.0");
     }
 
     // Profile Resolution: Options profile provides authoritative defaults

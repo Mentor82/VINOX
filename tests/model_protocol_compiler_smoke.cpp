@@ -9,7 +9,7 @@
 int main() {
     std::cout << "================================================================================\n";
     std::cout << "  VINOX Issue #20 — Model Protocol Compiler & Canonical Contract Unit Harness  \n";
-    std::cout << "================================================================================\n";
+    std::cout << "================================================================================\n" << std::flush;
 
     // TEST 01: Compile Generic Chat Template (Behavioral Sentinel Probe)
     {
