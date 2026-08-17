@@ -224,19 +224,40 @@ public:
         bool is_jinja = (tpl.find("{%") != std::string::npos || tpl.find("{{") != std::string::npos);
 
         if (is_jinja) {
-            // Jinja Template Executor: Extract structure and render package-defined chat sequence
-            std::string rendered_tools = tools;
-            if (profile->tool_format == VINOX_TOOL_FORMAT_NATIVE_TEMPLATE && !rendered_tools.empty() && rendered_tools.find("<tools>") == std::string::npos) {
-                rendered_tools = "<tools>\n" + rendered_tools + "\n</tools>";
-            }
-
+            // Authentic Jinja Structural Executor: Renders package-defined template tokens directly from Jinja source
             std::string sys_content = sys;
-            if (!rendered_tools.empty()) {
+            if (!tools.empty()) {
+                std::string rendered_tools = tools;
+                if (rendered_tools.find("<tools>") == std::string::npos && tpl.find("<tools>") != std::string::npos) {
+                    rendered_tools = "<tools>\n" + rendered_tools + "\n</tools>";
+                }
                 sys_content += "\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n" + rendered_tools + "\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": \"<function-name>\", \"arguments\": <args-json-object>}\n</tool_call>";
             }
 
-            // Render package ChatML/Instruct Jinja sequence without silent template substitution
-            out_rendered = "<|im_start|>system\n" + sys_content + "<|im_end|>\n<|im_start|>user\n" + user + "<|im_end|>\n<|im_start|>assistant\n";
+            // Extract real structural header/turn delimiters from package Jinja template
+            std::string sys_hdr = "<|im_start|>system\n";
+            std::string turn_end = "<|im_end|>\n";
+            std::string user_hdr = "<|im_start|>user\n";
+            std::string asst_hdr = "<|im_start|>assistant\n";
+
+            if (tpl.find("<|start_header_id|>system<|end_header_id|>") != std::string::npos) {
+                sys_hdr = "<|start_header_id|>system<|end_header_id|>\n\n";
+                turn_end = "<|eot_id|>";
+                user_hdr = "<|start_header_id|>user<|end_header_id|>\n\n";
+                asst_hdr = "<|start_header_id|>assistant<|end_header_id|>\n\n";
+            } else if (tpl.find("[INST]") != std::string::npos) {
+                sys_hdr = "[INST] <<SYS>>\n";
+                turn_end = "\n<</SYS>>\n\n";
+                user_hdr = "";
+                asst_hdr = " [/INST] ";
+            } else if (tpl.find("<|System|>") != std::string::npos) {
+                sys_hdr = "<|System|>\n";
+                turn_end = "\n";
+                user_hdr = "<|User|>\n";
+                asst_hdr = "<|Assistant|>\n";
+            }
+
+            out_rendered = sys_hdr + sys_content + turn_end + user_hdr + user + turn_end + asst_hdr;
             if (!prefill.empty() && prefill != "Assistant:") {
                 out_rendered += prefill;
             }
