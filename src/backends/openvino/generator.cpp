@@ -89,12 +89,12 @@ vinox_status vinox_model_load(
     }
 }
 
-vinox_status vinox_model_profile_get_default(const char* model_path, vinox_model_profile* profile) {
+vinox_status vinox_model_profile_get_default(const char* profile_id, vinox_model_profile* profile) {
     if (profile == nullptr) return fail_arg("profile pointer cannot be null");
     profile->struct_size = sizeof(vinox_model_profile);
 
-    std::string path_str = model_path ? model_path : "";
-    if (path_str.find("DeepSeek") != std::string::npos || path_str.find("R1") != std::string::npos) {
+    std::string pid = profile_id ? profile_id : "generic";
+    if (pid == "deepseek_r1" || pid == "deepseek_r1_tagged_implicit") {
         profile->profile_id = "deepseek_r1_tagged_implicit";
         profile->reasoning_mode = VINOX_REASONING_TAGGED;
         profile->reasoning_start_policy = VINOX_REASONING_START_IMPLICIT;
@@ -104,7 +104,7 @@ vinox_status vinox_model_profile_get_default(const char* model_path, vinox_model
         profile->tool_format = VINOX_TOOL_FORMAT_CANONICAL_JSON;
         profile->chat_template = "deepseek_r1_template";
         profile->generation_prefill = "Assistant:";
-    } else if (path_str.find("Qwen") != std::string::npos || path_str.find("Phi") != std::string::npos) {
+    } else if (pid == "qwen2_5" || pid == "standard_tagged_explicit") {
         profile->profile_id = "standard_tagged_explicit";
         profile->reasoning_mode = VINOX_REASONING_TAGGED;
         profile->reasoning_start_policy = VINOX_REASONING_START_EXPLICIT;
@@ -114,6 +114,16 @@ vinox_status vinox_model_profile_get_default(const char* model_path, vinox_model
         profile->tool_format = VINOX_TOOL_FORMAT_CANONICAL_JSON;
         profile->chat_template = "standard_chat_template";
         profile->generation_prefill = "Assistant:";
+    } else if (pid == "prefilled_tagged") {
+        profile->profile_id = "prefilled_tagged";
+        profile->reasoning_mode = VINOX_REASONING_TAGGED;
+        profile->reasoning_start_policy = VINOX_REASONING_START_PREFILLED;
+        profile->reasoning_start_tag = "<think>";
+        profile->reasoning_end_tag = "</think>";
+        profile->reasoning_can_disable = 1;
+        profile->tool_format = VINOX_TOOL_FORMAT_CANONICAL_JSON;
+        profile->chat_template = "prefilled_template";
+        profile->generation_prefill = "Assistant: <think>\n";
     } else {
         profile->profile_id = "generic_canonical";
         profile->reasoning_mode = VINOX_REASONING_NONE;
@@ -130,11 +140,17 @@ vinox_status vinox_model_profile_get_default(const char* model_path, vinox_model
 
 vinox_status vinox_model_profile_validate(const vinox_model_profile* profile) {
     if (profile == nullptr) return fail_arg("profile pointer cannot be null");
+    if (profile->struct_size < sizeof(vinox_model_profile)) {
+        return VINOX_STATUS_INCOMPATIBLE_ABI;
+    }
     if (profile->reasoning_mode == VINOX_REASONING_NATIVE && profile->tool_format == VINOX_TOOL_FORMAT_NATIVE_TEMPLATE) {
         return VINOX_STATUS_INVALID_ARGUMENT;
     }
     if (profile->reasoning_mode == VINOX_REASONING_TAGGED && (profile->reasoning_end_tag == nullptr || profile->reasoning_end_tag[0] == '\0')) {
         return fail_arg("Tagged reasoning profile requires non-empty reasoning_end_tag");
+    }
+    if (profile->reasoning_mode == VINOX_REASONING_TAGGED && profile->reasoning_start_policy == VINOX_REASONING_START_EXPLICIT && (profile->reasoning_start_tag == nullptr || profile->reasoning_start_tag[0] == '\0')) {
+        return fail_arg("Explicit start reasoning profile requires non-empty reasoning_start_tag");
     }
     return VINOX_STATUS_OK;
 }
@@ -161,55 +177,35 @@ vinox_status vinox_model_generate_stream(
         return fail_arg("options->prompt cannot be null or empty");
     }
 
-    if (VINOX_FIELD_PRESENT(options, temperature) && options->temperature < 0.0f) {
-        return fail_arg("Invalid generation option: temperature must be >= 0.0");
-    }
-    if (VINOX_FIELD_PRESENT(options, top_p) && (options->top_p < 0.0f || options->top_p > 1.0f)) {
-        return fail_arg("Invalid generation option: top_p must be between 0.0 and 1.0");
-    }
-    if (VINOX_FIELD_PRESENT(options, repetition_penalty) && options->repetition_penalty < 0.0f) {
-        return fail_arg("Invalid generation option: repetition_penalty must be >= 0.0");
-    }
-
-    vinox_reasoning_mode rmode = VINOX_REASONING_NONE;
-    vinox_reasoning_start_policy start_policy = VINOX_REASONING_START_EXPLICIT;
-    std::string start_tag = "<think>";
-    std::string end_tag = "</think>";
-    uint64_t max_r_tokens = 0;
-    uint64_t r_timeout_ms = 0;
-    int can_disable = 1;
-
-    if (VINOX_FIELD_PRESENT(options, reasoning_mode)) {
-        rmode = options->reasoning_mode;
-    }
-    if (VINOX_FIELD_PRESENT(options, reasoning_start_policy)) {
-        start_policy = options->reasoning_start_policy;
-    }
-    if (VINOX_FIELD_PRESENT(options, reasoning_start_tag) && options->reasoning_start_tag && options->reasoning_start_tag[0] != '\0') {
-        start_tag = options->reasoning_start_tag;
-    }
-    if (VINOX_FIELD_PRESENT(options, reasoning_end_tag) && options->reasoning_end_tag && options->reasoning_end_tag[0] != '\0') {
-        end_tag = options->reasoning_end_tag;
-    }
-    if (VINOX_FIELD_PRESENT(options, max_reasoning_tokens)) {
-        max_r_tokens = options->max_reasoning_tokens;
-    }
-    if (VINOX_FIELD_PRESENT(options, reasoning_timeout_ms)) {
-        r_timeout_ms = options->reasoning_timeout_ms;
-    }
-    if (VINOX_FIELD_PRESENT(options, reasoning_can_disable)) {
-        can_disable = options->reasoning_can_disable;
+    // Profile Resolution: Options profile provides authoritative defaults
+    vinox_model_profile active_profile{};
+    if (VINOX_FIELD_PRESENT(options, profile) && options->profile != nullptr) {
+        active_profile = *options->profile;
     } else {
-        can_disable = 1;
+        vinox_model_profile_get_default("qwen2_5", &active_profile);
     }
+    if (VINOX_FIELD_PRESENT(options, reasoning_mode)) {
+        active_profile.reasoning_mode = options->reasoning_mode;
+    }
+
+    vinox_status prof_st = vinox_model_profile_validate(&active_profile);
+    if (prof_st != VINOX_STATUS_OK) {
+        return prof_st;
+    }
+
+    vinox_reasoning_mode rmode = active_profile.reasoning_mode;
+    vinox_reasoning_start_policy start_policy = active_profile.reasoning_start_policy;
+    std::string start_tag = active_profile.reasoning_start_tag ? active_profile.reasoning_start_tag : "";
+    std::string end_tag = active_profile.reasoning_end_tag ? active_profile.reasoning_end_tag : "";
+    uint64_t max_r_tokens = VINOX_FIELD_PRESENT(options, max_reasoning_tokens) ? options->max_reasoning_tokens : 0;
+    uint64_t r_timeout_ms = VINOX_FIELD_PRESENT(options, reasoning_timeout_ms) ? options->reasoning_timeout_ms : 0;
 
     // Capability Validation (Blockers 3 & 4)
-    if (rmode == VINOX_REASONING_NONE && can_disable == 0) {
+    if (rmode == VINOX_REASONING_NONE && active_profile.reasoning_can_disable == 0) {
         last_error = "Model profile forbids disabling reasoning mode";
         return VINOX_STATUS_NOT_SUPPORTED;
     }
     if (rmode == VINOX_REASONING_NATIVE) {
-        // Current OpenVINO text backend does not expose native dual-channel streams
         last_error = "Native reasoning channel mode is not supported by current backend profile";
         return VINOX_STATUS_NOT_SUPPORTED;
     }
@@ -291,8 +287,8 @@ vinox_status vinox_model_generate_stream(
                 return ov::genai::StreamingStatus::RUNNING;
             }
 
-            // Monotonic reasoning timeout check (Blocker 2)
-            if (r_timeout_ms > 0) {
+            // Monotonic reasoning timeout check: strictly scoped to reasoning phase (Blocker 6)
+            if (r_timeout_ms > 0 && !reasoning_completed) {
                 auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - gen_start_time).count();
                 if (static_cast<uint64_t>(elapsed_ms) >= r_timeout_ms) {
                     parse_error = VINOX_STATUS_TIMED_OUT;

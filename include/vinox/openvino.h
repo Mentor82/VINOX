@@ -66,7 +66,7 @@ typedef struct vinox_model_profile {
     const char* generation_prefill;
 } vinox_model_profile;
 
-VINOX_API vinox_status vinox_model_profile_get_default(const char* model_path, vinox_model_profile* profile);
+VINOX_API vinox_status vinox_model_profile_get_default(const char* profile_id, vinox_model_profile* profile);
 VINOX_API vinox_status vinox_model_profile_validate(const vinox_model_profile* profile);
 
 typedef struct vinox_generation_options {
@@ -87,6 +87,7 @@ typedef struct vinox_generation_options {
     int reasoning_can_disable; /* 1 = can disable reasoning, 0 = cannot disable reasoning */
     vinox_reasoning_start_policy reasoning_start_policy;
     vinox_tool_format_mode tool_format;
+    const vinox_model_profile* profile;
 } vinox_generation_options;
 
 /* Minimum required struct_size for backward compatibility (up to max_new_tokens) */

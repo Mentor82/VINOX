@@ -3,7 +3,6 @@
 #include <string>
 #include <cstring>
 #include <cassert>
-#include <chrono>
 
 #include "vinox/openvino.h"
 #include "vinox/vinox.h"
@@ -25,22 +24,22 @@ static int mock_stream_callback(vinox_stream_channel channel, const char* text, 
 
 int main() {
     std::cout << "================================================================================\n";
-    std::cout << "  VINOX Issue #19 — Profile-Driven Reasoning / Final-Channel Test Suite       \n";
+    std::cout << "  VINOX Issue #19 — Profile-Driven Reasoning & Delimiter Stream Test Harness    \n";
     std::cout << "================================================================================\n";
 
     // 1. Mock Model Handle Initialization
     vinox_model_options m_opts{};
     m_opts.struct_size = sizeof(m_opts);
-    m_opts.model_path = "mock_reasoning_model";
+    m_opts.model_path = "mock";
     m_opts.device = "CPU";
 
     vinox_model* model = nullptr;
     vinox_status load_st = vinox_model_load(&m_opts, &model);
     assert(load_st == VINOX_STATUS_OK && model != nullptr);
 
-    // TEST 01: Non-reasoning mode (VINOX_REASONING_NONE)
+    // TEST 01: Non-reasoning canonical profile remains byte-for-byte behavior-compatible
     {
-        std::cout << "[TEST 01] Non-reasoning mode -> All stream tokens route to FINAL channel ... ";
+        std::cout << "[TEST 01] Non-reasoning profile -> All stream tokens route to FINAL channel ... ";
         vinox_generation_options gen_opts{};
         gen_opts.struct_size = sizeof(gen_opts);
         gen_opts.prompt = "Test prompt";
@@ -58,17 +57,19 @@ int main() {
         std::cout << "[ PASS ]\n";
     }
 
-    // TEST 02: Explicit start policy (VINOX_REASONING_START_EXPLICIT)
+    // TEST 02: Explicit start policy profile (EXPLICIT_START)
     {
-        std::cout << "[TEST 02] EXPLICIT_START policy -> Requires start tag to enter reasoning ... ";
+        std::cout << "[TEST 02] EXPLICIT_START profile -> Requires explicit start tag to enter reasoning ... ";
+        vinox_model_profile prof{};
+        vinox_status st_p = vinox_model_profile_get_default("qwen2_5", &prof);
+        assert(st_p == VINOX_STATUS_OK && prof.reasoning_start_policy == VINOX_REASONING_START_EXPLICIT);
+
         vinox_generation_options gen_opts{};
         gen_opts.struct_size = sizeof(gen_opts);
         gen_opts.prompt = "Test prompt";
         gen_opts.max_new_tokens = 32;
-        gen_opts.reasoning_mode = VINOX_REASONING_TAGGED;
-        gen_opts.reasoning_start_policy = VINOX_REASONING_START_EXPLICIT;
-        gen_opts.reasoning_start_tag = "<think>";
-        gen_opts.reasoning_end_tag = "</think>";
+        gen_opts.profile = &prof;
+        gen_opts.reasoning_mode = prof.reasoning_mode;
 
         StreamTestCtx ctx;
         vinox_status st = vinox_model_generate_stream(model, &gen_opts, mock_stream_callback, &ctx);
@@ -76,17 +77,19 @@ int main() {
         std::cout << "[ PASS ]\n";
     }
 
-    // TEST 03: Implicit start policy (VINOX_REASONING_START_IMPLICIT) for DeepSeek-R1
+    // TEST 03: Implicit start policy profile (IMPLICIT_FROM_GENERATION_START) for DeepSeek-R1
     {
-        std::cout << "[TEST 03] IMPLICIT_START policy -> Reasoning from token 0 until </think> ... ";
+        std::cout << "[TEST 03] IMPLICIT_START profile -> Reasoning from token 0 until </think> ... ";
+        vinox_model_profile prof{};
+        vinox_status st_p = vinox_model_profile_get_default("deepseek_r1", &prof);
+        assert(st_p == VINOX_STATUS_OK && prof.reasoning_start_policy == VINOX_REASONING_START_IMPLICIT);
+
         vinox_generation_options gen_opts{};
         gen_opts.struct_size = sizeof(gen_opts);
         gen_opts.prompt = "Test prompt";
         gen_opts.max_new_tokens = 32;
-        gen_opts.reasoning_mode = VINOX_REASONING_TAGGED;
-        gen_opts.reasoning_start_policy = VINOX_REASONING_START_IMPLICIT;
-        gen_opts.reasoning_start_tag = "<think>";
-        gen_opts.reasoning_end_tag = "</think>";
+        gen_opts.profile = &prof;
+        gen_opts.reasoning_mode = prof.reasoning_mode;
 
         StreamTestCtx ctx;
         vinox_status st = vinox_model_generate_stream(model, &gen_opts, mock_stream_callback, &ctx);
@@ -94,17 +97,19 @@ int main() {
         std::cout << "[ PASS ]\n";
     }
 
-    // TEST 04: Prefilled start policy (VINOX_REASONING_START_PREFILLED)
+    // TEST 04: Prefilled start policy profile (PREFILLED_START)
     {
-        std::cout << "[TEST 04] PREFILLED_START policy -> Template opened reasoning prefill ... ";
+        std::cout << "[TEST 04] PREFILLED_START profile -> Template opened reasoning prefill ... ";
+        vinox_model_profile prof{};
+        vinox_status st_p = vinox_model_profile_get_default("prefilled_tagged", &prof);
+        assert(st_p == VINOX_STATUS_OK && prof.reasoning_start_policy == VINOX_REASONING_START_PREFILLED);
+
         vinox_generation_options gen_opts{};
         gen_opts.struct_size = sizeof(gen_opts);
         gen_opts.prompt = "Test prompt";
         gen_opts.max_new_tokens = 32;
-        gen_opts.reasoning_mode = VINOX_REASONING_TAGGED;
-        gen_opts.reasoning_start_policy = VINOX_REASONING_START_PREFILLED;
-        gen_opts.reasoning_start_tag = "<think>";
-        gen_opts.reasoning_end_tag = "</think>";
+        gen_opts.profile = &prof;
+        gen_opts.reasoning_mode = prof.reasoning_mode;
 
         StreamTestCtx ctx;
         vinox_status st = vinox_model_generate_stream(model, &gen_opts, mock_stream_callback, &ctx);
@@ -112,11 +117,11 @@ int main() {
         std::cout << "[ PASS ]\n";
     }
 
-    // TEST 05: Profile Default Fetching & Validation
+    // TEST 05: Profile Ownership without filename heuristics & Fail-Closed Validation
     {
-        std::cout << "[TEST 05] Model Profile Canonical Ownership & Profile Validation ... ";
+        std::cout << "[TEST 05] Explicit Profile Registration & Fail-Closed Validation ... ";
         vinox_model_profile deepseek_prof{};
-        vinox_status st1 = vinox_model_profile_get_default("DeepSeek-R1-Distill", &deepseek_prof);
+        vinox_status st1 = vinox_model_profile_get_default("deepseek_r1", &deepseek_prof);
         assert(st1 == VINOX_STATUS_OK);
         assert(deepseek_prof.reasoning_start_policy == VINOX_REASONING_START_IMPLICIT);
         assert(deepseek_prof.reasoning_can_disable == 0);
@@ -124,6 +129,7 @@ int main() {
         vinox_status st2 = vinox_model_profile_validate(&deepseek_prof);
         assert(st2 == VINOX_STATUS_OK);
 
+        // Contradictory Combination Validation
         vinox_model_profile bad_prof{};
         bad_prof.struct_size = sizeof(bad_prof);
         bad_prof.reasoning_mode = VINOX_REASONING_NATIVE;
@@ -137,12 +143,15 @@ int main() {
     // TEST 06: Capability Gate: Unsupported disabling of reasoning mode (Blocker 3)
     {
         std::cout << "[TEST 06] Capability Gate: Disable forbidden when reasoning_can_disable == 0 ... ";
+        vinox_model_profile prof{};
+        vinox_model_profile_get_default("deepseek_r1", &prof);
+
         vinox_generation_options gen_opts{};
         gen_opts.struct_size = sizeof(gen_opts);
         gen_opts.prompt = "Test prompt";
         gen_opts.max_new_tokens = 32;
-        gen_opts.reasoning_mode = VINOX_REASONING_NONE;
-        gen_opts.reasoning_can_disable = 0; // Model profile forbids disabling!
+        gen_opts.profile = &prof;
+        gen_opts.reasoning_mode = VINOX_REASONING_NONE; // Forbidden disable attempt!
 
         StreamTestCtx ctx;
         vinox_status st = vinox_model_generate_stream(model, &gen_opts, mock_stream_callback, &ctx);
@@ -168,7 +177,7 @@ int main() {
     vinox_model_destroy(model);
 
     std::cout << "================================================================================\n";
-    std::cout << "       RESULT: ALL ISSUE #19 PROFILE & REASONING INVARIANTS PASSED 🟢⚡\n";
+    std::cout << "   RESULT: ALL ISSUE #19 DETERMINISTIC PARSER & PROFILE TESTS PASSED 🟢⚡ \n";
     std::cout << "================================================================================\n";
     return 0;
 }
