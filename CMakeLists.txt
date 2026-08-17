@@ -363,6 +363,10 @@ if(BUILD_TESTING)
         target_link_libraries(vinox_model_protocol_compiler_smoke PRIVATE vinox::openvino vinox::core)
         add_test(NAME model_protocol_compiler_smoke COMMAND vinox_model_protocol_compiler_smoke)
 
+        add_executable(vinox_realtime_evidence_harness tests/realtime_evidence_harness.cpp)
+        target_link_libraries(vinox_realtime_evidence_harness PRIVATE vinox::openvino vinox::core nlohmann_json::nlohmann_json)
+        add_test(NAME realtime_evidence_harness COMMAND vinox_realtime_evidence_harness)
+
         add_executable(vinox_qwen2_5_eval_smoke tests/qwen2_5_eval_smoke.cpp)
         target_link_libraries(vinox_qwen2_5_eval_smoke PRIVATE vinox::core vinox::openvino vinox::serving vinox::storage nlohmann_json::nlohmann_json)
         file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/tests/corpus DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/tests)

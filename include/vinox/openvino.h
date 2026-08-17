@@ -80,7 +80,7 @@ VINOX_API vinox_status vinox_model_profile_format_prompt(
 );
 
 #define VINOX_PROTOCOL_MAX_STR_LEN 256
-#define VINOX_PROTOCOL_MAX_TPL_LEN 2048
+#define VINOX_PROTOCOL_MAX_TPL_LEN 16384
 
 typedef struct vinox_model_protocol_contract {
     uint32_t struct_size;
