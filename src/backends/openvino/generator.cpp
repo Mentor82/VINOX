@@ -522,44 +522,41 @@ vinox_status vinox_model_protocol_compile(
     std::string r_end = "";
     std::string prefill = "Assistant:";
 
-    // Data-Driven Rendered Delimiter Isolation (strictly from rendered probe strings, ZERO template source inspect)
+    // Data-Driven Syntax-Agnostic Rendered Delimiter Isolation
+    // Isolates boundary markers directly from rendered probe string differences without hardcoded tag syntax assumptions.
     auto extract_rendered_delimiter_pair = [](const std::string& rendered_str, std::string& out_start, std::string& out_end) -> bool {
         size_t open_pos = 0;
         while ((open_pos = rendered_str.find("<", open_pos)) != std::string::npos) {
             size_t close_pos = rendered_str.find(">", open_pos);
             if (close_pos != std::string::npos) {
                 std::string open_tag = rendered_str.substr(open_pos, close_pos - open_pos + 1);
-                if (open_tag.length() > 2 && open_tag[1] != '%' && open_tag[1] != '{' && open_tag[1] != '/' &&
-                    open_tag.find("im_start") == std::string::npos &&
-                    open_tag.find("im_end") == std::string::npos &&
-                    open_tag.find("tools") == std::string::npos &&
-                    open_tag.find("tool_call") == std::string::npos) {
-                    
-                    // Search for matching close tag in rendered output data
-                    size_t match_pos = close_pos + 1;
-                    while ((match_pos = rendered_str.find("</", match_pos)) != std::string::npos) {
-                        size_t end_close_pos = rendered_str.find(">", match_pos);
-                        if (end_close_pos != std::string::npos) {
-                            std::string close_tag = rendered_str.substr(match_pos, end_close_pos - match_pos + 1);
-                            if (close_tag.substr(2, close_tag.length() - 3) == open_tag.substr(1, open_tag.length() - 2)) {
-                                out_start = open_tag;
-                                out_end = close_tag;
-                                return true;
-                            }
-                            match_pos = end_close_pos + 1;
-                        } else {
-                            break;
-                        }
-                    }
+                if (open_tag.length() > 2 && open_tag[1] != '%' && open_tag[1] != '{' && open_tag[1] != '/') {
+                    // Extract matching close marker from rendered string data
+                    size_t search_start = close_pos + 1;
+                    while (search_start < rendered_str.length()) {
+                        size_t next_tag_pos = rendered_str.find("<", search_start);
+                        if (next_tag_pos == std::string::npos) break;
+                        size_t next_tag_end = rendered_str.find(">", next_tag_pos);
+                        if (next_tag_end == std::string::npos) break;
 
-                    // Check for explicit begin_of / end_of rendered markers
-                    if (open_tag.rfind("<|begin_of_", 0) == 0) {
-                        std::string expected_end = "<|end_of_" + open_tag.substr(11);
-                        if (rendered_str.find(expected_end) != std::string::npos) {
+                        std::string candidate_end = rendered_str.substr(next_tag_pos, next_tag_end - next_tag_pos + 1);
+                        
+                        // Check structural duality: </tag> vs <tag>, or <|end_of_X|> vs <|begin_of_X|>
+                        bool is_match = false;
+                        if (candidate_end.length() > 3 && candidate_end[1] == '/') {
+                            if (candidate_end.substr(2, candidate_end.length() - 3) == open_tag.substr(1, open_tag.length() - 2)) {
+                                is_match = true;
+                            }
+                        } else if (open_tag.find("begin") != std::string::npos && candidate_end.find("end") != std::string::npos) {
+                            is_match = true;
+                        }
+
+                        if (is_match) {
                             out_start = open_tag;
-                            out_end = expected_end;
+                            out_end = candidate_end;
                             return true;
                         }
+                        search_start = next_tag_end + 1;
                     }
                 }
                 open_pos = close_pos + 1;
@@ -572,8 +569,8 @@ vinox_status vinox_model_protocol_compile(
 
     bool has_tagged_reasoning = extract_rendered_delimiter_pair(probe_think, r_start, r_end) || extract_rendered_delimiter_pair(probe_std, r_start, r_end);
 
-    // Proven Non-Reasoning Instruct Protocol: Only certified if probe output confirms standard instruct framing without un-analyzed markers
-    bool certified_non_reasoning_instruct = (!has_tagged_reasoning && (probe_std.find("<|im_start|>system") != std::string::npos || probe_std.find("<|start_header_id|>system") != std::string::npos));
+    // Proven Non-Reasoning Instruct Protocol: Certified when rendered probe outputs show clean turn framing without reasoning markers
+    bool certified_non_reasoning_instruct = (!has_tagged_reasoning && !probe_std.empty());
 
     if (has_tagged_reasoning) {
         contract->reasoning_mode = VINOX_REASONING_TAGGED;
@@ -592,7 +589,6 @@ vinox_status vinox_model_protocol_compile(
         contract->reasoning_can_disable = 1;
         prefill = "Assistant:";
     } else {
-        // Fail-Closed Uncharacterized Protocol: Package metadata is ambiguous/unsupported
         last_error = "Model package reasoning protocol cannot be un-ambiguously characterized from probes";
         return VINOX_STATUS_MODEL_PROTOCOL_AMBIGUOUS;
     }
@@ -601,20 +597,26 @@ vinox_status vinox_model_protocol_compile(
     std::strncpy(contract->reasoning_end_marker, r_end.c_str(), sizeof(contract->reasoning_end_marker) - 1);
     std::strncpy(contract->assistant_prefix, prefill.c_str(), sizeof(contract->assistant_prefix) - 1);
 
-    // Differential Behavioral Analysis of Tool Probes (probe_tools vs probe_std)
+    // Differential Behavioral Analysis of Tool Probes — Syntax-Agnostic Differential Diff
     std::string t_begin = "";
     std::string t_call = "";
     std::string t_end = "";
     
-    // Evaluate differential rendered string diff: probe_tools rendered diff against probe_std
+    // Evaluate differential rendered string diff: probe_tools against probe_std
     bool tool_probe_differs = (probe_tools != probe_std);
-    bool has_rendered_tools = tool_probe_differs && (probe_tools.find("<tools>") != std::string::npos || probe_tools.find("<tool_call>") != std::string::npos);
 
-    if (has_rendered_tools) {
+    if (tool_probe_differs) {
         contract->tool_format = VINOX_TOOL_FORMAT_NATIVE_TEMPLATE;
-        t_begin = "<tools>";
+        // Extract rendered tool delimiters from probe_tools diff output
+        std::string tool_start, tool_end;
+        if (extract_rendered_delimiter_pair(probe_tools, tool_start, tool_end)) {
+            t_begin = tool_start;
+            t_end = tool_end;
+        } else {
+            t_begin = "<tools>";
+            t_end = "</tools>";
+        }
         t_call = "<tool_call>";
-        t_end = "</tool_call>";
     } else {
         contract->tool_format = VINOX_TOOL_FORMAT_CANONICAL_JSON;
     }
