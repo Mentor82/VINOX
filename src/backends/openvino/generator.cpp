@@ -155,6 +155,38 @@ vinox_status vinox_model_profile_validate(const vinox_model_profile* profile) {
     return VINOX_STATUS_OK;
 }
 
+vinox_status vinox_model_profile_format_prompt(
+    const vinox_model_profile* profile,
+    const char* system_prompt,
+    const char* user_prompt,
+    const char* tools_json_schema,
+    char* out_buf,
+    size_t out_buf_size,
+    size_t* out_written
+) {
+    if (profile == nullptr) return fail_arg("profile pointer cannot be null");
+    if (user_prompt == nullptr) return fail_arg("user_prompt cannot be null");
+    if (out_buf == nullptr || out_buf_size == 0) return fail_arg("out_buf cannot be null or zero size");
+
+    std::string sys = system_prompt ? system_prompt : "You are a helpful AI assistant.";
+    std::string prefill = profile->generation_prefill ? profile->generation_prefill : "Assistant:";
+    std::string tools = tools_json_schema ? tools_json_schema : "";
+
+    std::string formatted = sys + "\n";
+    if (!tools.empty()) {
+        formatted += "Available Tools:\n" + tools + "\n";
+    }
+    formatted += "User: " + std::string(user_prompt) + "\n" + prefill;
+
+    if (formatted.length() >= out_buf_size) {
+        return fail_arg("out_buf size is too small for formatted prompt");
+    }
+
+    std::memcpy(out_buf, formatted.c_str(), formatted.length() + 1);
+    if (out_written) *out_written = formatted.length();
+    return VINOX_STATUS_OK;
+}
+
 vinox_status vinox_model_generate_stream(
     vinox_model* model,
     const vinox_generation_options* options,
@@ -182,10 +214,22 @@ vinox_status vinox_model_generate_stream(
     if (VINOX_FIELD_PRESENT(options, profile) && options->profile != nullptr) {
         active_profile = *options->profile;
     } else {
-        vinox_model_profile_get_default("qwen2_5", &active_profile);
+        vinox_model_profile_get_default("generic", &active_profile);
     }
     if (VINOX_FIELD_PRESENT(options, reasoning_mode)) {
         active_profile.reasoning_mode = options->reasoning_mode;
+    }
+    if (VINOX_FIELD_PRESENT(options, reasoning_start_tag) && options->reasoning_start_tag && options->reasoning_start_tag[0] != '\0') {
+        active_profile.reasoning_start_tag = options->reasoning_start_tag;
+    }
+    if (VINOX_FIELD_PRESENT(options, reasoning_end_tag) && options->reasoning_end_tag && options->reasoning_end_tag[0] != '\0') {
+        active_profile.reasoning_end_tag = options->reasoning_end_tag;
+    }
+    if (VINOX_FIELD_PRESENT(options, reasoning_can_disable)) {
+        active_profile.reasoning_can_disable = options->reasoning_can_disable;
+    }
+    if (VINOX_FIELD_PRESENT(options, tool_format)) {
+        active_profile.tool_format = options->tool_format;
     }
 
     vinox_status prof_st = vinox_model_profile_validate(&active_profile);
@@ -270,13 +314,17 @@ vinox_status vinox_model_generate_stream(
         bool cancelled_by_callback = false;
 
         // Tagged Delimiter Parser State (Section J & L Invariants)
-        bool in_reasoning = (start_policy == VINOX_REASONING_START_IMPLICIT);
+        // PREFILLED & IMPLICIT start reasoning immediately from token 0 (Nephy Blocker 1)
+        bool in_reasoning = (start_policy == VINOX_REASONING_START_IMPLICIT || start_policy == VINOX_REASONING_START_PREFILLED);
         bool reasoning_completed = false;
         uint64_t reasoning_token_count = 0;
         uint64_t final_token_count = 0;
         std::string accumulated_buf;
         vinox_status parse_error = VINOX_STATUS_OK;
-        auto gen_start_time = std::chrono::steady_clock::now();
+
+        // Monotonic Reasoning-Scoped Timeout Clock (Nephy Blocker 2)
+        auto reasoning_start_time = std::chrono::steady_clock::now();
+        bool reasoning_clock_started = in_reasoning;
 
         auto streamer = [&](std::string subword) -> ov::genai::StreamingStatus {
             if (model->cancel_requested.load()) {
@@ -287,9 +335,9 @@ vinox_status vinox_model_generate_stream(
                 return ov::genai::StreamingStatus::RUNNING;
             }
 
-            // Monotonic reasoning timeout check: strictly scoped to reasoning phase (Blocker 6)
-            if (r_timeout_ms > 0 && !reasoning_completed) {
-                auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - gen_start_time).count();
+            // Monotonic reasoning timeout check: strictly scoped to reasoning phase (Nephy Blocker 2)
+            if (r_timeout_ms > 0 && in_reasoning && !reasoning_completed && reasoning_clock_started) {
+                auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - reasoning_start_time).count();
                 if (static_cast<uint64_t>(elapsed_ms) >= r_timeout_ms) {
                     parse_error = VINOX_STATUS_TIMED_OUT;
                     return ov::genai::StreamingStatus::STOP;
@@ -320,6 +368,8 @@ vinox_status vinox_model_generate_stream(
 
                     if (start_pos != std::string::npos) {
                         in_reasoning = true;
+                        reasoning_start_time = std::chrono::steady_clock::now();
+                        reasoning_clock_started = true;
                         std::string prefix = accumulated_buf.substr(0, start_pos);
                         if (!prefix.empty()) {
                             final_token_count++;

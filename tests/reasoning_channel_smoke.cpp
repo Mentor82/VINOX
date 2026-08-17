@@ -57,9 +57,34 @@ int main() {
         std::cout << "[ PASS ]\n";
     }
 
-    // TEST 02: Explicit start policy profile (EXPLICIT_START)
+    // TEST 02: Operational vinox_model_profile_format_prompt (Nephy Blocker 5)
     {
-        std::cout << "[TEST 02] EXPLICIT_START profile -> Requires explicit start tag to enter reasoning ... ";
+        std::cout << "[TEST 02] Operational vinox_model_profile_format_prompt execution ... ";
+        vinox_model_profile prof{};
+        vinox_status st_p = vinox_model_profile_get_default("deepseek_r1", &prof);
+        assert(st_p == VINOX_STATUS_OK);
+
+        char formatted_buf[512] = {0};
+        size_t written = 0;
+        vinox_status st_fmt = vinox_model_profile_format_prompt(
+            &prof,
+            "System prompt",
+            "What is 2+2?",
+            "{\"tools\":[]}",
+            formatted_buf,
+            sizeof(formatted_buf),
+            &written
+        );
+        assert(st_fmt == VINOX_STATUS_OK);
+        assert(written > 0);
+        assert(std::string(formatted_buf).find("What is 2+2?") != std::string::npos);
+        assert(std::string(formatted_buf).find("Assistant:") != std::string::npos);
+        std::cout << "[ PASS ]\n";
+    }
+
+    // TEST 03: Explicit start policy profile (EXPLICIT_START)
+    {
+        std::cout << "[TEST 03] EXPLICIT_START profile -> Requires explicit start tag to enter reasoning ... ";
         vinox_model_profile prof{};
         vinox_status st_p = vinox_model_profile_get_default("qwen2_5", &prof);
         assert(st_p == VINOX_STATUS_OK && prof.reasoning_start_policy == VINOX_REASONING_START_EXPLICIT);
@@ -77,9 +102,9 @@ int main() {
         std::cout << "[ PASS ]\n";
     }
 
-    // TEST 03: Implicit start policy profile (IMPLICIT_FROM_GENERATION_START) for DeepSeek-R1
+    // TEST 04: Implicit start policy profile (IMPLICIT_FROM_GENERATION_START) for DeepSeek-R1
     {
-        std::cout << "[TEST 03] IMPLICIT_START profile -> Reasoning from token 0 until </think> ... ";
+        std::cout << "[TEST 04] IMPLICIT_START profile -> Reasoning from token 0 until </think> ... ";
         vinox_model_profile prof{};
         vinox_status st_p = vinox_model_profile_get_default("deepseek_r1", &prof);
         assert(st_p == VINOX_STATUS_OK && prof.reasoning_start_policy == VINOX_REASONING_START_IMPLICIT);
@@ -97,9 +122,9 @@ int main() {
         std::cout << "[ PASS ]\n";
     }
 
-    // TEST 04: Prefilled start policy profile (PREFILLED_START)
+    // TEST 05: Prefilled start policy profile (PREFILLED_START)
     {
-        std::cout << "[TEST 04] PREFILLED_START profile -> Template opened reasoning prefill ... ";
+        std::cout << "[TEST 05] PREFILLED_START profile -> Template opened reasoning prefill ... ";
         vinox_model_profile prof{};
         vinox_status st_p = vinox_model_profile_get_default("prefilled_tagged", &prof);
         assert(st_p == VINOX_STATUS_OK && prof.reasoning_start_policy == VINOX_REASONING_START_PREFILLED);
@@ -117,9 +142,9 @@ int main() {
         std::cout << "[ PASS ]\n";
     }
 
-    // TEST 05: Profile Ownership without filename heuristics & Fail-Closed Validation
+    // TEST 06: Neutral Profile Fallback & Fail-Closed Validation (Nephy Blocker 4)
     {
-        std::cout << "[TEST 05] Explicit Profile Registration & Fail-Closed Validation ... ";
+        std::cout << "[TEST 06] Neutral Profile Fallback & Fail-Closed Validation ... ";
         vinox_model_profile deepseek_prof{};
         vinox_status st1 = vinox_model_profile_get_default("deepseek_r1", &deepseek_prof);
         assert(st1 == VINOX_STATUS_OK);
@@ -140,9 +165,9 @@ int main() {
         std::cout << "[ PASS ]\n";
     }
 
-    // TEST 06: Capability Gate: Unsupported disabling of reasoning mode (Blocker 3)
+    // TEST 07: Capability Gate: Unsupported disabling of reasoning mode
     {
-        std::cout << "[TEST 06] Capability Gate: Disable forbidden when reasoning_can_disable == 0 ... ";
+        std::cout << "[TEST 07] Capability Gate: Disable forbidden when reasoning_can_disable == 0 ... ";
         vinox_model_profile prof{};
         vinox_model_profile_get_default("deepseek_r1", &prof);
 
@@ -159,9 +184,9 @@ int main() {
         std::cout << "[ PASS ]\n";
     }
 
-    // TEST 07: Capability Gate: Native channel mode precedence (Blocker 4)
+    // TEST 08: Capability Gate: Native channel mode precedence
     {
-        std::cout << "[TEST 07] Capability Gate: VINOX_REASONING_NATIVE returns NOT_SUPPORTED if unsupported ... ";
+        std::cout << "[TEST 08] Capability Gate: VINOX_REASONING_NATIVE returns NOT_SUPPORTED if unsupported ... ";
         vinox_generation_options gen_opts{};
         gen_opts.struct_size = sizeof(gen_opts);
         gen_opts.prompt = "Test prompt";

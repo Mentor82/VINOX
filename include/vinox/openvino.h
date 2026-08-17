@@ -68,6 +68,15 @@ typedef struct vinox_model_profile {
 
 VINOX_API vinox_status vinox_model_profile_get_default(const char* profile_id, vinox_model_profile* profile);
 VINOX_API vinox_status vinox_model_profile_validate(const vinox_model_profile* profile);
+VINOX_API vinox_status vinox_model_profile_format_prompt(
+    const vinox_model_profile* profile,
+    const char* system_prompt,
+    const char* user_prompt,
+    const char* tools_json_schema,
+    char* out_buf,
+    size_t out_buf_size,
+    size_t* out_written
+);
 
 typedef struct vinox_generation_options {
     uint32_t struct_size;
