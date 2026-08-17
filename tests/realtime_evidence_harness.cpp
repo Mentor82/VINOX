@@ -48,7 +48,32 @@ struct ModelPackageSpec {
     bool expect_tool;
 };
 
-void run_model_package_evidence(const ModelPackageSpec& spec, size_t index) {
+enum class EvidenceOutcome {
+    PASS,
+    FAIL,
+    INCOMPLETE
+};
+
+struct EvidenceResult {
+    EvidenceOutcome outcome{EvidenceOutcome::FAIL};
+    std::string reason;
+};
+
+static const char* outcome_text(EvidenceOutcome outcome) {
+    switch (outcome) {
+        case EvidenceOutcome::PASS: return "PASS";
+        case EvidenceOutcome::FAIL: return "FAIL";
+        case EvidenceOutcome::INCOMPLETE: return "INCOMPLETE";
+    }
+    return "FAIL";
+}
+
+static bool contains_observed_reasoning_marker(const std::string& text) {
+    return text.find("<think>") != std::string::npos ||
+           text.find("<|begin_of_thought|>") != std::string::npos;
+}
+
+EvidenceResult run_model_package_evidence(const ModelPackageSpec& spec, size_t index) {
     std::cout << "\n--------------------------------------------------------------------------------\n";
     std::cout << "  EVIDENCE PACKAGE " << char('A' + index) << ": " << spec.name << "\n";
     std::cout << "--------------------------------------------------------------------------------\n" << std::flush;
@@ -74,8 +99,8 @@ void run_model_package_evidence(const ModelPackageSpec& spec, size_t index) {
     std::cout << "   - special_tokens_present:     " << (!spec_tok_content.empty() ? "true" : "false") << "\n" << std::flush;
 
     if (chat_tpl.empty()) {
-        std::cout << "   - Status:                     SKIP (Package template not found on disk yet)\n";
-        return;
+        std::cout << "   - Status:                     INCOMPLETE (Package template not found on disk)\n";
+        return {EvidenceOutcome::INCOMPLETE, "package template missing"};
     }
 
     vinox_model_protocol_contract contract{};
@@ -83,7 +108,9 @@ void run_model_package_evidence(const ModelPackageSpec& spec, size_t index) {
     vinox_status compile_st = vinox_model_protocol_compile(chat_tpl.c_str(), tok_cfg_content.c_str(), &contract);
     std::cout << "2. Compiled Contract Evidence:\n";
     std::cout << "   - Compiler Status:        " << (compile_st == VINOX_STATUS_OK ? "PASS" : "FAIL") << " (Code " << compile_st << ")\n";
-    if (compile_st != VINOX_STATUS_OK) return;
+    if (compile_st != VINOX_STATUS_OK) {
+        return {EvidenceOutcome::FAIL, "protocol compiler failed"};
+    }
 
     std::cout << "   - Protocol ID:            " << contract.protocol_id << "\n";
     std::cout << "   - Protocol Hash:          " << contract.protocol_hash << "\n";
@@ -93,7 +120,7 @@ void run_model_package_evidence(const ModelPackageSpec& spec, size_t index) {
     char rendered_prompt[16384] = {0};
     size_t written_bytes = 0;
     const char* calc_schema = "{\"type\": \"function\", \"function\": {\"name\": \"calculator\", \"description\": \"Evaluate mathematical expression\", \"parameters\": {\"type\": \"object\", \"properties\": {\"expression\": {\"type\": \"string\"}}, \"required\": [\"expression\"]}}}";
-    
+
     vinox_status enc_st = vinox_model_protocol_encode_prompt(&contract,
         "You are a helpful assistant.",
         spec.prompt.c_str(),
@@ -101,7 +128,7 @@ void run_model_package_evidence(const ModelPackageSpec& spec, size_t index) {
         rendered_prompt, sizeof(rendered_prompt), &written_bytes);
     if (enc_st != VINOX_STATUS_OK) {
         std::cout << "3. Prompt Encoding: FAIL (Status " << enc_st << ": " << (vinox_openvino_last_error() ? vinox_openvino_last_error() : "") << ")\n";
-        return;
+        return {EvidenceOutcome::FAIL, "prompt encoding failed"};
     }
 
     std::cout << "3. OpenVINO Live Model Generation & Channel Evidence:\n";
@@ -114,7 +141,7 @@ void run_model_package_evidence(const ModelPackageSpec& spec, size_t index) {
     vinox_status load_st = vinox_model_load(&m_opts, &model);
     if (load_st != VINOX_STATUS_OK || model == nullptr) {
         std::cout << "   - Live Model Load:       FAIL (Status " << load_st << ": " << (vinox_openvino_last_error() ? vinox_openvino_last_error() : "") << ")\n";
-        return;
+        return {EvidenceOutcome::FAIL, "live model load failed"};
     }
 
     vinox_generation_options gen_opts{};
@@ -129,27 +156,145 @@ void run_model_package_evidence(const ModelPackageSpec& spec, size_t index) {
         std::cout << "   - Live Model Load:       PASS\n";
         std::cout << "   - Stream Status:         FAIL (Status " << gen_st << ": " << (vinox_openvino_last_error() ? vinox_openvino_last_error() : "") << ")\n";
         vinox_model_destroy(model);
-        return;
+        return {EvidenceOutcome::FAIL, "live generation or reasoning protocol failed"};
     }
 
     std::cout << "   - Live Model Load:       PASS (OpenVINO CPU graph compiled successfully)\n";
     std::cout << "   - Stream Status:         PASS (Generated " << (stream_ctx.reasoning_delta_count + stream_ctx.final_delta_count) << " stream deltas)\n";
     std::cout << "   - REASONING Channel:     " << stream_ctx.reasoning_delta_count << " stream deltas (" << stream_ctx.reasoning_output.length() << " bytes)\n";
     std::cout << "   - FINAL Channel:         " << stream_ctx.final_delta_count << " stream deltas (" << stream_ctx.final_output.length() << " bytes)\n";
-    std::cout << "   - Raw Model Output:      \"" << stream_ctx.final_output << "\"\n" << std::flush;
+    std::cout << "   - Raw Reasoning Output:  \"" << stream_ctx.reasoning_output << "\"\n";
+    std::cout << "   - Raw Final Output:      \"" << stream_ctx.final_output << "\"\n" << std::flush;
 
-    if (spec.expect_tool && !stream_ctx.final_output.empty()) {
+    if (contract.reasoning_mode == VINOX_REASONING_NONE && contains_observed_reasoning_marker(stream_ctx.final_output)) {
+        std::cout << "   - Protocol Semantics:    FAIL (reasoning marker observed in FINAL while compiled mode is NONE)\n";
+        vinox_model_destroy(model);
+        return {EvidenceOutcome::FAIL, "compiled reasoning mode disagrees with live output"};
+    }
+
+    if (contract.reasoning_mode == VINOX_REASONING_TAGGED && stream_ctx.reasoning_delta_count == 0 && contains_observed_reasoning_marker(stream_ctx.final_output)) {
+        std::cout << "   - Protocol Semantics:    FAIL (tagged reasoning observed in FINAL but reasoning channel stayed empty)\n";
+        vinox_model_destroy(model);
+        return {EvidenceOutcome::FAIL, "tagged reasoning was not routed to reasoning channel"};
+    }
+
+    if (spec.expect_tool) {
+        if (stream_ctx.final_output.empty()) {
+            std::cout << "4. Tool Decoder + Governance: FAIL (empty FINAL output)\n";
+            vinox_model_destroy(model);
+            return {EvidenceOutcome::FAIL, "expected tool output missing"};
+        }
+
         char canonical_decoded[1024] = {0};
         size_t dec_bytes = 0;
         vinox_status dec_st = vinox_model_protocol_decode_tool_call(&contract, stream_ctx.final_output.c_str(), canonical_decoded, sizeof(canonical_decoded), &dec_bytes);
         std::cout << "4. Native Tool-Call Decoder & Pipeline Governance:\n";
         std::cout << "   - Decoder Status:        " << (dec_st == VINOX_STATUS_OK ? "PASS" : "FAIL") << "\n";
-        if (dec_st == VINOX_STATUS_OK) {
-            std::cout << "   - Decoded Canonical JSON: " << canonical_decoded << "\n";
+        if (dec_st != VINOX_STATUS_OK) {
+            vinox_model_destroy(model);
+            return {EvidenceOutcome::FAIL, "tool decoder failed"};
+        }
+
+        std::cout << "   - Decoded Canonical JSON: " << canonical_decoded << "\n";
+
+        nlohmann::json decoded_json;
+        try {
+            decoded_json = nlohmann::json::parse(canonical_decoded);
+        } catch (...) {
+            std::cout << "   - Canonical JSON Syntax: FAIL\n";
+            vinox_model_destroy(model);
+            return {EvidenceOutcome::FAIL, "decoded tool call is not valid JSON"};
+        }
+
+        if (!decoded_json.is_object() || !decoded_json.contains("arguments") || !decoded_json["arguments"].is_object()) {
+            std::cout << "   - Canonical Contract:    FAIL (missing object arguments)\n";
+            vinox_model_destroy(model);
+            return {EvidenceOutcome::FAIL, "decoded tool call missing arguments"};
+        }
+
+        std::string decoded_tool_name;
+        if (decoded_json.contains("tool") && decoded_json["tool"].is_string()) {
+            decoded_tool_name = decoded_json["tool"].get<std::string>();
+        } else if (decoded_json.contains("name") && decoded_json["name"].is_string()) {
+            decoded_tool_name = decoded_json["name"].get<std::string>();
+        } else {
+            std::cout << "   - Canonical Contract:    FAIL (missing tool/name field)\n";
+            vinox_model_destroy(model);
+            return {EvidenceOutcome::FAIL, "decoded tool call missing tool name"};
+        }
+
+        if (decoded_tool_name != "calculator") {
+            std::cout << "   - Canonical Contract:    FAIL (unexpected tool '" << decoded_tool_name << "')\n";
+            vinox_model_destroy(model);
+            return {EvidenceOutcome::FAIL, "unexpected tool selected"};
+        }
+
+        std::string args_json = decoded_json["arguments"].dump();
+
+        vinox_tool_registry* tool_reg = nullptr;
+        vinox_status reg_st = vinox_tool_registry_create(&tool_reg);
+        if (reg_st != VINOX_STATUS_OK || tool_reg == nullptr) {
+            vinox_model_destroy(model);
+            return {EvidenceOutcome::FAIL, "tool registry creation failed"};
+        }
+
+        vinox_tool_definition calc_def{};
+        calc_def.struct_size = sizeof(calc_def);
+        calc_def.name = "calculator";
+        calc_def.description = "Evaluate mathematical expression";
+        calc_def.parameters_json_schema = "{\"type\":\"object\",\"properties\":{\"expression\":{\"type\":\"string\"}},\"required\":[\"expression\"]}";
+        calc_def.security_class = 1;
+
+        vinox_status reg_tool_st = vinox_tool_registry_register_tool(tool_reg, &calc_def);
+        if (reg_tool_st != VINOX_STATUS_OK) {
+            vinox_tool_registry_destroy(tool_reg);
+            vinox_model_destroy(model);
+            return {EvidenceOutcome::FAIL, "calculator registration failed"};
+        }
+
+        char val_err[256] = {0};
+        vinox_status val_st = vinox_tool_registry_validate_arguments(tool_reg, decoded_tool_name.c_str(), args_json.c_str(), val_err, sizeof(val_err));
+        std::cout << "   - Schema Validation:     " << (val_st == VINOX_STATUS_OK ? "PASS" : "FAIL") << "\n";
+        if (val_st != VINOX_STATUS_OK) {
+            vinox_tool_registry_destroy(tool_reg);
+            vinox_model_destroy(model);
+            return {EvidenceOutcome::FAIL, "strict argument validation failed"};
+        }
+
+        vinox_policy_engine* policy_eng = nullptr;
+        vinox_status pol_create_st = vinox_policy_engine_create(&policy_eng);
+        if (pol_create_st != VINOX_STATUS_OK || policy_eng == nullptr) {
+            vinox_tool_registry_destroy(tool_reg);
+            vinox_model_destroy(model);
+            return {EvidenceOutcome::FAIL, "policy engine creation failed"};
+        }
+
+        vinox_policy_engine_set_rule(policy_eng, "calculator", 2, 0);
+
+        vinox_tool_call_request req{};
+        req.struct_size = sizeof(req);
+        req.tool_name = decoded_tool_name.c_str();
+        req.arguments_json = args_json.c_str();
+
+        vinox_policy_decision decision{};
+        decision.struct_size = sizeof(decision);
+        char pol_reason[256] = {0};
+        vinox_status pol_st = vinox_policy_engine_evaluate(policy_eng, &req, &calc_def, &decision, pol_reason, sizeof(pol_reason));
+        std::cout << "   - Policy Authorization:  " << ((pol_st == VINOX_STATUS_OK && decision.allowed) ? "ALLOW" : "DENY/FAIL") << "\n";
+
+        bool governance_ok = (pol_st == VINOX_STATUS_OK && decision.allowed);
+        vinox_policy_engine_destroy(policy_eng);
+        vinox_tool_registry_destroy(tool_reg);
+
+        if (!governance_ok) {
+            vinox_model_destroy(model);
+            return {EvidenceOutcome::FAIL, "policy authorization failed"};
         }
     }
 
     vinox_model_destroy(model);
+    std::cout << "5. Package Evidence Outcome: PASS\n";
+    return {EvidenceOutcome::PASS, "all required evidence stages passed"};
 }
 
 int main() {
@@ -202,13 +347,37 @@ int main() {
         }
     };
 
+    std::vector<EvidenceResult> results;
+    results.reserve(packages.size());
+
     for (size_t i = 0; i < packages.size(); ++i) {
-        run_model_package_evidence(packages[i], i);
+        results.push_back(run_model_package_evidence(packages[i], i));
     }
 
-    std::cout << "\n================================================================================\n";
-    std::cout << "  All Model Packages Verified Live through OpenVINO C-ABI Engine 🟢🔒           \n";
-    std::cout << "================================================================================\n" << std::flush;
+    size_t pass_count = 0;
+    size_t fail_count = 0;
+    size_t incomplete_count = 0;
 
-    return 0;
+    std::cout << "\n================================================================================\n";
+    std::cout << "  ACCEPTANCE SUMMARY\n";
+    std::cout << "================================================================================\n";
+    for (size_t i = 0; i < results.size(); ++i) {
+        std::cout << "  [" << char('A' + i) << "] " << outcome_text(results[i].outcome) << " - " << results[i].reason << "\n";
+        if (results[i].outcome == EvidenceOutcome::PASS) ++pass_count;
+        else if (results[i].outcome == EvidenceOutcome::FAIL) ++fail_count;
+        else ++incomplete_count;
+    }
+
+    std::cout << "--------------------------------------------------------------------------------\n";
+    std::cout << "  PASS=" << pass_count << " FAIL=" << fail_count << " INCOMPLETE=" << incomplete_count << " TOTAL=" << results.size() << "\n";
+
+    if (fail_count == 0 && incomplete_count == 0 && pass_count == results.size()) {
+        std::cout << "  All required model packages VERIFIED live through the exercised OpenVINO C-ABI path 🟢🔒\n";
+        std::cout << "================================================================================\n" << std::flush;
+        return 0;
+    }
+
+    std::cout << "  Acceptance evidence NOT VERIFIED: one or more required packages failed or were incomplete.\n";
+    std::cout << "================================================================================\n" << std::flush;
+    return 1;
 }
