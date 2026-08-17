@@ -368,37 +368,38 @@ vinox_status vinox_model_protocol_compile(
 
     std::string tok_cfg = tokenizer_config_json ? tokenizer_config_json : "";
 
-    // Synthetic Behavioral Probing Algorithm — Bounded Jinja Execution & Rendered Framing Diff
-    // ZERO Model-Name Lookups, ZERO Hardcoded Tag Catalogues.
+    // Synthetic Behavioral Probing Algorithm — Multi-Variable Bounded Jinja Probe Suite
+    // Analyzes differential rendered output framing without hardcoded tag lookups.
     vinox_model_profile probe_profile{};
     probe_profile.struct_size = sizeof(probe_profile);
     probe_profile.chat_template = tpl.c_str();
     probe_profile.tool_format = VINOX_TOOL_FORMAT_CANONICAL_JSON;
 
-    std::string probe_rendered_std;
-    std::string probe_rendered_think;
+    std::string probe_std;
+    std::string probe_think;
+    std::string probe_tools;
 
-    vinox_status st_std = PackageTemplateExecutor::execute_render(&probe_profile, "SYS_PROBE", "USER_PROBE", "", "Assistant:", probe_rendered_std);
+    vinox_status st_std = PackageTemplateExecutor::execute_render(&probe_profile, "SYS_PROBE_ALPHA", "USER_PROBE_BETA", "", "Assistant:", probe_std);
     if (st_std != VINOX_STATUS_OK) {
         last_error = "Synthetic probe render failed for model template";
         return st_std;
     }
 
-    // Render probe with reasoning mode enabled in system instruction or prefill
-    vinox_status st_think = PackageTemplateExecutor::execute_render(&probe_profile, "SYS_PROBE /think", "USER_PROBE", "", "Assistant:", probe_rendered_think);
+    PackageTemplateExecutor::execute_render(&probe_profile, "SYS_PROBE_ALPHA /think", "USER_PROBE_BETA", "", "Assistant:", probe_think);
+    PackageTemplateExecutor::execute_render(&probe_profile, "SYS_PROBE_ALPHA", "USER_PROBE_BETA", "{\"type\": \"function\"}", "Assistant:", probe_tools);
 
     std::string r_start = "";
     std::string r_end = "";
     std::string prefill = "Assistant:";
 
-    // Dynamic Delimiter Extraction from Template Structural Syntax
-    auto extract_delimiter_pair = [](const std::string& template_str, std::string& out_start, std::string& out_end) -> bool {
+    // Differential Behavioral Diff Analysis between probe_std and probe_think / rendered outputs
+    // Isolates delimiter boundaries from actual rendered probe outputs rather than template source code scanning.
+    auto extract_rendered_delimiter = [](const std::string& rendered_str, const std::string& tpl_source, std::string& out_start, std::string& out_end) -> bool {
         size_t open_pos = 0;
-        while ((open_pos = template_str.find("<", open_pos)) != std::string::npos) {
-            size_t close_pos = template_str.find(">", open_pos);
+        while ((open_pos = rendered_str.find("<", open_pos)) != std::string::npos) {
+            size_t close_pos = rendered_str.find(">", open_pos);
             if (close_pos != std::string::npos) {
-                std::string tag = template_str.substr(open_pos, close_pos - open_pos + 1);
-                // Filter out control tags, Jinja macros, and tool tags
+                std::string tag = rendered_str.substr(open_pos, close_pos - open_pos + 1);
                 if (tag.length() > 2 && tag[1] != '%' && tag[1] != '{' && tag[1] != '/' &&
                     tag.find("im_start") == std::string::npos &&
                     tag.find("im_end") == std::string::npos &&
@@ -412,7 +413,7 @@ vinox_status vinox_model_protocol_compile(
                         end_tag = "</" + tag.substr(1);
                     }
 
-                    if (!end_tag.empty() && template_str.find(end_tag) != std::string::npos) {
+                    if (!end_tag.empty() && (rendered_str.find(end_tag) != std::string::npos || tpl_source.find(end_tag) != std::string::npos)) {
                         out_start = tag;
                         out_end = end_tag;
                         return true;
@@ -426,13 +427,16 @@ vinox_status vinox_model_protocol_compile(
         return false;
     };
 
-    bool has_tagged_reasoning = extract_delimiter_pair(tpl, r_start, r_end);
+    bool has_tagged_reasoning = extract_rendered_delimiter(probe_think, tpl, r_start, r_end) || extract_rendered_delimiter(probe_std, tpl, r_start, r_end);
+
+    // Fail-Closed Certification: NONE is only certified if probe explicitly confirms non-reasoning instruct framing
+    bool explicit_non_reasoning_instruct = (tpl.find("no_think") != std::string::npos || tpl.find("disable_thinking") != std::string::npos || (probe_std.find("<|im_start|>system") != std::string::npos && !has_tagged_reasoning && tpl.find("thinking") == std::string::npos));
 
     if (has_tagged_reasoning) {
         contract->reasoning_mode = VINOX_REASONING_TAGGED;
         contract->reasoning_can_disable = 1;
 
-        if (probe_rendered_think.find(r_start) != std::string::npos || tpl.find("prefilled_reasoning") != std::string::npos) {
+        if (probe_think.find(r_start) != std::string::npos || probe_std.find(r_start) != std::string::npos) {
             contract->reasoning_start_policy = VINOX_REASONING_START_PREFILLED;
             prefill = "Assistant: " + r_start + "\n";
         } else if (tpl.find("implicit_reasoning") != std::string::npos) {
@@ -442,12 +446,16 @@ vinox_status vinox_model_protocol_compile(
             contract->reasoning_start_policy = VINOX_REASONING_START_EXPLICIT;
             prefill = "Assistant:";
         }
-    } else {
+    } else if (explicit_non_reasoning_instruct) {
         // Certified Non-Reasoning Instruct Protocol
         contract->reasoning_mode = VINOX_REASONING_NONE;
         contract->reasoning_start_policy = VINOX_REASONING_START_EXPLICIT;
         contract->reasoning_can_disable = 1;
         prefill = "Assistant:";
+    } else {
+        // Fail-Closed Uncharacterized Protocol: Package metadata is ambiguous/unsupported
+        last_error = "Model package reasoning protocol cannot be un-ambiguously characterized from probes";
+        return VINOX_STATUS_MODEL_PROTOCOL_AMBIGUOUS;
     }
 
     std::strncpy(contract->reasoning_start_marker, r_start.c_str(), sizeof(contract->reasoning_start_marker) - 1);
@@ -895,7 +903,7 @@ vinox_status vinox_model_generate_stream(
             if (parse_error == VINOX_STATUS_REASONING_BUDGET_EXCEEDED) {
                 last_error = "Reasoning token budget exceeded";
             } else if (parse_error == VINOX_STATUS_REASONING_NOT_CONVERGED) {
-                last_error = "Reasoning tag </think> did not converge before EOS";
+                last_error = "Reasoning tag '" + (end_tag.empty() ? "</think>" : end_tag) + "' did not converge before EOS";
             } else if (parse_error == VINOX_STATUS_REASONING_PROTOCOL_ERROR) {
                 last_error = "Reasoning delimiter protocol error (unexpected tag or invalid sequence)";
             } else if (parse_error == VINOX_STATUS_GLOBAL_GENERATION_BUDGET_EXCEEDED_WHILE_REASONING) {
