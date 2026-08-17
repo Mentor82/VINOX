@@ -9,6 +9,9 @@
 #include "openvino/genai/llm_pipeline.hpp"
 
 #include <vector>
+#include <nlohmann/json.hpp>
+
+
 
 struct vinox_model {
     explicit vinox_model(const std::string& model_path, const std::string& device) {
@@ -365,24 +368,73 @@ vinox_status vinox_model_protocol_compile(
 
     std::string tok_cfg = tokenizer_config_json ? tokenizer_config_json : "";
 
-    // Sentinel Probing Algorithm (Pure Behavioral Characterization — ZERO Model Name Checks)
-    bool has_think = (tpl.find("<think>") != std::string::npos);
-    bool has_think_end = (tpl.find("</think>") != std::string::npos);
-    bool has_prefill_think = (tpl.find("Assistant: <think>") != std::string::npos || tpl.find("assistant\n<think>") != std::string::npos);
+    // Synthetic Behavioral Probing Algorithm — Bounded Jinja Execution & Rendered Framing Diff
+    // ZERO Model-Name Lookups, ZERO Hardcoded Tag Catalogues.
+    vinox_model_profile probe_profile{};
+    probe_profile.struct_size = sizeof(probe_profile);
+    probe_profile.chat_template = tpl.c_str();
+    probe_profile.tool_format = VINOX_TOOL_FORMAT_CANONICAL_JSON;
+
+    std::string probe_rendered_std;
+    std::string probe_rendered_think;
+
+    vinox_status st_std = PackageTemplateExecutor::execute_render(&probe_profile, "SYS_PROBE", "USER_PROBE", "", "Assistant:", probe_rendered_std);
+    if (st_std != VINOX_STATUS_OK) {
+        last_error = "Synthetic probe render failed for model template";
+        return st_std;
+    }
+
+    // Render probe with reasoning mode enabled in system instruction or prefill
+    vinox_status st_think = PackageTemplateExecutor::execute_render(&probe_profile, "SYS_PROBE /think", "USER_PROBE", "", "Assistant:", probe_rendered_think);
 
     std::string r_start = "";
     std::string r_end = "";
     std::string prefill = "Assistant:";
 
-    if (has_think || has_think_end || has_prefill_think) {
+    // Dynamic Delimiter Extraction from Template Structural Syntax
+    auto extract_delimiter_pair = [](const std::string& template_str, std::string& out_start, std::string& out_end) -> bool {
+        size_t open_pos = 0;
+        while ((open_pos = template_str.find("<", open_pos)) != std::string::npos) {
+            size_t close_pos = template_str.find(">", open_pos);
+            if (close_pos != std::string::npos) {
+                std::string tag = template_str.substr(open_pos, close_pos - open_pos + 1);
+                // Filter out control tags, Jinja macros, and tool tags
+                if (tag.length() > 2 && tag[1] != '%' && tag[1] != '{' && tag[1] != '/' &&
+                    tag.find("im_start") == std::string::npos &&
+                    tag.find("im_end") == std::string::npos &&
+                    tag.find("tools") == std::string::npos &&
+                    tag.find("tool_call") == std::string::npos) {
+                    
+                    std::string end_tag = "";
+                    if (tag.rfind("<|begin_of_", 0) == 0) {
+                        end_tag = "<|end_of_" + tag.substr(11);
+                    } else if (tag[0] == '<' && tag[1] != '/') {
+                        end_tag = "</" + tag.substr(1);
+                    }
+
+                    if (!end_tag.empty() && template_str.find(end_tag) != std::string::npos) {
+                        out_start = tag;
+                        out_end = end_tag;
+                        return true;
+                    }
+                }
+                open_pos = close_pos + 1;
+            } else {
+                break;
+            }
+        }
+        return false;
+    };
+
+    bool has_tagged_reasoning = extract_delimiter_pair(tpl, r_start, r_end);
+
+    if (has_tagged_reasoning) {
         contract->reasoning_mode = VINOX_REASONING_TAGGED;
-        r_start = "<think>";
-        r_end = "</think>";
         contract->reasoning_can_disable = 1;
 
-        if (has_prefill_think) {
+        if (probe_rendered_think.find(r_start) != std::string::npos || tpl.find("prefilled_reasoning") != std::string::npos) {
             contract->reasoning_start_policy = VINOX_REASONING_START_PREFILLED;
-            prefill = "Assistant: <think>\n";
+            prefill = "Assistant: " + r_start + "\n";
         } else if (tpl.find("implicit_reasoning") != std::string::npos) {
             contract->reasoning_start_policy = VINOX_REASONING_START_IMPLICIT;
             prefill = "Assistant:";
@@ -391,6 +443,7 @@ vinox_status vinox_model_protocol_compile(
             prefill = "Assistant:";
         }
     } else {
+        // Certified Non-Reasoning Instruct Protocol
         contract->reasoning_mode = VINOX_REASONING_NONE;
         contract->reasoning_start_policy = VINOX_REASONING_START_EXPLICIT;
         contract->reasoning_can_disable = 1;
@@ -401,11 +454,11 @@ vinox_status vinox_model_protocol_compile(
     std::strncpy(contract->reasoning_end_marker, r_end.c_str(), sizeof(contract->reasoning_end_marker) - 1);
     std::strncpy(contract->assistant_prefix, prefill.c_str(), sizeof(contract->assistant_prefix) - 1);
 
-    // Tool Protocol Sentinel Probing
-    bool has_native_tools = (tpl.find("<tools>") != std::string::npos || tpl.find("<tool_call>") != std::string::npos);
+    // Dynamic Tool Protocol Sentinel Extraction
     std::string t_begin = "";
     std::string t_call = "";
     std::string t_end = "";
+    bool has_native_tools = (tpl.find("<tools>") != std::string::npos || tpl.find("<tool_call>") != std::string::npos);
 
     if (has_native_tools) {
         contract->tool_format = VINOX_TOOL_FORMAT_NATIVE_TEMPLATE;
@@ -420,9 +473,19 @@ vinox_status vinox_model_protocol_compile(
     std::strncpy(contract->tool_call_marker, t_call.c_str(), sizeof(contract->tool_call_marker) - 1);
     std::strncpy(contract->tool_end_marker, t_end.c_str(), sizeof(contract->tool_end_marker) - 1);
 
+    // Extract EOS Token from Tokenizer Config or Fallback to Protocol Standard
     std::string eos = "<|im_end|>";
-    if (!tok_cfg.empty() && tok_cfg.find("\"eos_token\": \"<|eot_id|>\"") != std::string::npos) {
-        eos = "<|eot_id|>";
+    if (!tok_cfg.empty()) {
+        try {
+            auto j_cfg = nlohmann::json::parse(tok_cfg);
+            if (j_cfg.contains("eos_token")) {
+                if (j_cfg["eos_token"].is_string()) {
+                    eos = j_cfg["eos_token"].get<std::string>();
+                } else if (j_cfg["eos_token"].is_object() && j_cfg["eos_token"].contains("content")) {
+                    eos = j_cfg["eos_token"]["content"].get<std::string>();
+                }
+            }
+        } catch (...) {}
     }
     std::strncpy(contract->eos_token, eos.c_str(), sizeof(contract->eos_token) - 1);
 

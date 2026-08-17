@@ -88,7 +88,7 @@ if(VINOX_OPENVINO_SDK_ROOT)
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     )
-    target_link_libraries(vinox_openvino PRIVATE openvino::genai)
+    target_link_libraries(vinox_openvino PRIVATE openvino::genai nlohmann_json::nlohmann_json)
 
     if(MSVC)
         target_compile_options(vinox_openvino PRIVATE /W4 /permissive- /EHsc)
