@@ -65,9 +65,6 @@ int main() {
         size_t user_count = count_occurrences(res.rendered_text, "What is 2+2?");
         assert(sys_count == 1);
         assert(user_count == 1);
-        // DeepSeek's own template appends "<think>\n" right after the
-        // assistant marker when add_generation_prompt is set -- i.e. reasoning
-        // is prefilled, matching Issue #20's own worked example.
         const std::string think_prefill_marker =
             "<" "\xef" "\xbd" "\x9c" "Assistant" "\xef" "\xbd" "\x9c" "><think>";
         bool ends_with_think_prefill = res.rendered_text.find(think_prefill_marker) != std::string::npos;
@@ -135,6 +132,20 @@ int main() {
         req.template_source = "{% if tools %}unclosed if block with no endif";
         TemplateRenderResult res = runtime.render(req);
         assert(res.status == TemplateRenderStatus::Invalid);
+        assert(res.rendered_text.empty());
+        std::printf("[ PASS ]\n");
+    }
+
+    // TEST 06: A caller-requested deterministic work bound that minja cannot
+    // instrument must fail closed before render. This prevents the runtime
+    // from claiming a fake timeout/resource guarantee.
+    {
+        std::printf("[TEST 06] Unsupported deterministic bound -> Unsupported before render ... ");
+        TemplateRenderRequest req;
+        req.template_source = "{{ 'safe' }}";
+        req.limits.max_work_units = 100;
+        TemplateRenderResult res = runtime.render(req);
+        assert(res.status == TemplateRenderStatus::Unsupported);
         assert(res.rendered_text.empty());
         std::printf("[ PASS ]\n");
     }

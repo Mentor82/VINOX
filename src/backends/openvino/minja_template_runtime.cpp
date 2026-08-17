@@ -1,7 +1,5 @@
 #include "minja_template_runtime.hpp"
 
-#include <chrono>
-#include <future>
 #include <stdexcept>
 #include <utility>
 
@@ -24,7 +22,6 @@ namespace {
 
 constexpr size_t kDefaultMaxTemplateSize = 65536;
 constexpr size_t kDefaultMaxOutputSize = 65536;
-constexpr auto kRenderTimeout = std::chrono::milliseconds(3000);
 
 // minja's parser accepts `{% generation %}...{% endgeneration %}` but
 // (see minja.hpp's GenerationTemplateToken handling) treats it as a pure
@@ -32,9 +29,8 @@ constexpr auto kRenderTimeout = std::chrono::milliseconds(3000);
 // TemplateNode::render()'s public string-returning API. Since minja is
 // vendored verbatim and not modified to add span instrumentation, this
 // runtime cannot honor a caller's request for generation/endgeneration spans.
-// Per the Issue #21 decision (2026-08-18 review), that gap must fail closed
-// rather than silently return text with an empty span list, so any template
-// using the construct is rejected as Unsupported.
+// Per the Issue #21 decision, that gap must fail closed rather than silently
+// return text with an empty span list.
 bool contains_generation_block(const std::string& source) {
     return source.find("{% generation") != std::string::npos ||
            source.find("{%- generation") != std::string::npos ||
@@ -151,27 +147,26 @@ TemplateRenderResult MinjaTemplateRuntime::render(const TemplateRenderRequest& r
         return result;
     }
 
-    // minja exposes no loop/iteration counter, no recursion/nesting-depth
-    // limit, and no cooperative cancellation hook, and the vendored source is
-    // intentionally left unmodified (src/thirdparty/minja/PROVENANCE.md), so
-    // request.limits.max_iterations / max_nesting_depth / max_work_units
-    // cannot be enforced as literal counters by this implementation -- that
-    // is a known, deliberate gap, not an oversight. As the only bound this
-    // implementation *can* give for "execution time or deterministic work
-    // budget" (Issue #21), render runs on a worker thread under a fixed
-    // wall-clock ceiling. This bounds how long the caller waits, not the
-    // worker itself: minja gives no way to cancel a render in flight, so a
-    // genuinely pathological template's thread keeps running (and holding
-    // its memory) after the timeout fires. Callers must not treat a timeout
-    // as proof the underlying work has stopped.
-    std::future<TemplateRenderResult> future =
-        std::async(std::launch::async, render_once, request, max_output_size);
-    if (future.wait_for(kRenderTimeout) != std::future_status::ready) {
-        result.status = TemplateRenderStatus::ResourceExceeded;
-        result.error_detail = "template render exceeded the execution time budget";
+    // minja currently exposes no instrumentation/cancellation hook for hard
+    // iteration, nesting-depth, or deterministic work-unit limits. Do not
+    // pretend otherwise: std::async+wait_for is not a hard execution bound
+    // because destruction of an async future may still wait for the worker,
+    // and the underlying render cannot be cancelled. If a caller explicitly
+    // requests one of these bounds, reject before executing any template code.
+    if (request.limits.max_iterations != 0 ||
+        request.limits.max_nesting_depth != 0 ||
+        request.limits.max_work_units != 0) {
+        result.status = TemplateRenderStatus::Unsupported;
+        result.error_detail =
+            "requested deterministic template execution bound is not enforceable by the "
+            "current unmodified minja backend; failing closed before render";
         return result;
     }
-    return future.get();
+
+    // Synchronous by design. This backend makes no false wall-clock timeout
+    // guarantee until minja gains cooperative cancellation/instrumentation or
+    // VINOX moves template execution behind a killable process boundary.
+    return render_once(request, max_output_size);
 }
 
 }  // namespace vinox::model

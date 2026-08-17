@@ -14,9 +14,9 @@
 // syntax, VINOX owns the canonical contract. A concrete ITemplateRuntime may
 // execute syntax, but it must never invent protocol semantics, never
 // silently substitute, simplify, or drop unsupported constructs, and must
-// enforce every resource bound present on the request. This header defines
-// only the boundary types; it deliberately contains no rendering logic and
-// no knowledge of any specific model family.
+// enforce every resource bound it claims to support. If a caller requests a
+// bound the concrete runtime cannot enforce, that runtime must fail closed as
+// Unsupported rather than pretending the bound was honored.
 
 #include <cstddef>
 #include <string>
@@ -37,8 +37,11 @@ struct TemplateMessage {
 };
 
 // Explicit, caller-supplied resource bounds (Issue #21 "Security / Resource
-// Bounds"). A value of 0 means "runtime default", not "unbounded" -- a
-// concrete ITemplateRuntime must never treat 0 as unlimited.
+// Bounds"). For the always-supported size limits, 0 means "runtime default",
+// never unlimited. Operation-sensitive bounds (iterations, nesting depth,
+// work units) are optional requests: 0 means "not requested"; a non-zero
+// value is a hard requirement. A runtime that cannot enforce a requested
+// non-zero bound must return Unsupported before executing the template.
 struct TemplateRenderLimits {
     size_t max_template_size = 0;
     size_t max_output_size = 0;
@@ -69,9 +72,9 @@ struct TemplateSpan {
 
 enum class TemplateRenderStatus {
     Ok,
-    Unsupported,       // construct/feature the runtime cannot safely execute
+    Unsupported,       // construct/feature/bound the runtime cannot safely honor
     Invalid,           // malformed template syntax
-    ResourceExceeded,  // a declared bound in TemplateRenderLimits was hit
+    ResourceExceeded,  // an enforced resource bound was hit
 };
 
 struct TemplateRenderResult {
@@ -87,10 +90,11 @@ struct TemplateRenderResult {
 // {% generation %} spans.
 //
 // Fail-closed contract: if the template uses a construct the implementation
-// cannot execute faithfully, or a declared bound is exceeded, the
-// implementation must return Unsupported / ResourceExceeded (with
-// `rendered_text` left empty) rather than a partial or best-effort render.
-// It must never know or branch on a model family, filename, or display name.
+// cannot execute faithfully, a requested bound cannot be enforced, or an
+// enforced bound is exceeded, the implementation must return Unsupported /
+// ResourceExceeded (with `rendered_text` left empty) rather than a partial or
+// best-effort render. It must never know or branch on a model family,
+// filename, or display name.
 class ITemplateRuntime {
 public:
     virtual ~ITemplateRuntime() = default;
