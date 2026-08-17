@@ -203,6 +203,36 @@ int main() {
         std::cout << "[ PASS ]\n";
     }
 
+    // TEST 15: Decoder Missing Tool/Name Property -> Fail Closed (Zero C++ Default Tool Inventions)
+    {
+        std::cout << "[TEST 15] Missing Tool Property -> Strict FINAL_OUTPUT_INVALID (Zero Invention) ... ";
+        vinox_model_protocol_contract contract{};
+        contract.struct_size = sizeof(contract);
+        contract.tool_format = VINOX_TOOL_FORMAT_CANONICAL_JSON;
+
+        const char* raw_invalid_json = "{\"some_other_field\":\"value\"}";
+        char canonical_buf[256] = {0};
+        size_t written = 0;
+        vinox_status st_dec = vinox_model_protocol_decode_tool_call(&contract, raw_invalid_json, canonical_buf, sizeof(canonical_buf), &written);
+        assert(st_dec == VINOX_STATUS_FINAL_OUTPUT_INVALID);
+        std::cout << "[ PASS ]\n";
+    }
+
+    // TEST 16: Generation Options Bridge Copy -> reasoning_start_policy
+    {
+        std::cout << "[TEST 16] Options Contract Bridge -> reasoning_start_policy ... ";
+        vinox_model_protocol_contract contract{};
+        contract.struct_size = sizeof(contract);
+        contract.reasoning_mode = VINOX_REASONING_TAGGED;
+        contract.reasoning_start_policy = VINOX_REASONING_START_PREFILLED;
+
+        vinox_generation_options options{};
+        vinox_status st_opt = vinox_generation_options_from_contract(&contract, &options);
+        assert(st_opt == VINOX_STATUS_OK);
+        assert(options.reasoning_start_policy == VINOX_REASONING_START_PREFILLED);
+        std::cout << "[ PASS ]\n";
+    }
+
     std::cout << "================================================================================\n";
     std::cout << "   Deterministic ModelProtocolContract Unit & Compiler Fixture Tests Passed 🟢⚡ \n";
     std::cout << "================================================================================\n";

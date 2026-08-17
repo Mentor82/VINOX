@@ -888,7 +888,8 @@ vinox_status vinox_model_protocol_decode_tool_call(
             } else if (j.contains("name") && j["name"].is_string()) {
                 canonical["tool"] = j["name"];
             } else {
-                canonical["tool"] = "calculator";
+                last_error = "Malformed model-native call: missing tool or name string property";
+                return VINOX_STATUS_FINAL_OUTPUT_INVALID;
             }
 
             if (j.contains("arguments") && j["arguments"].is_object()) {
@@ -896,7 +897,8 @@ vinox_status vinox_model_protocol_decode_tool_call(
             } else if (j.contains("parameters") && j["parameters"].is_object()) {
                 canonical["arguments"] = j["parameters"];
             } else {
-                canonical["arguments"] = j;
+                last_error = "Malformed model-native call: missing arguments or parameters object property";
+                return VINOX_STATUS_FINAL_OUTPUT_INVALID;
             }
             decoded = canonical.dump();
         }
@@ -965,6 +967,9 @@ vinox_status vinox_model_generate_stream(
     }
     if (VINOX_FIELD_PRESENT(options, reasoning_mode)) {
         active_profile.reasoning_mode = options->reasoning_mode;
+    }
+    if (VINOX_FIELD_PRESENT(options, reasoning_start_policy)) {
+        active_profile.reasoning_start_policy = options->reasoning_start_policy;
     }
     if (VINOX_FIELD_PRESENT(options, reasoning_start_tag) && options->reasoning_start_tag && options->reasoning_start_tag[0] != '\0') {
         active_profile.reasoning_start_tag = options->reasoning_start_tag;
