@@ -199,6 +199,35 @@ int main() {
         }
     }
 
+    // Pinned positive regression case (found + fixed 2026-08-18, #20 scope):
+    // Phi-4-mini-instruct-ov advertises tools as a per-message field on the
+    // system turn (`{% if 'tools' in message %}`), not the top-level `tools`
+    // context variable most other packages use (`{% if tools %}`). VINOX only
+    // ever set the latter, so this package's tools were silently never
+    // rendered into the prompt at all -- confirmed live in
+    // realtime_evidence_harness Package G, where the model answered a
+    // calculator prompt conversationally because it was never told a
+    // calculator tool existed. Fixed by attaching the same canonical tools
+    // JSON verbatim to the system message too (MinjaTemplateRuntime's
+    // build_messages_json), satisfying both conventions from one input.
+    // Pinned forward: if this package's tools stop being detected, the fix
+    // regressed.
+    {
+        std::printf("[REGRESSION PIN] Phi-4-mini-instruct-ov sees advertised tools (fixed 2026-08-18) ... ");
+        ProbeOutcome outcome = run_probe(root + "Phi-4-mini-instruct-ov\\chat_template.jinja");
+        if (outcome.compile_status != VINOX_STATUS_OK || outcome.encode_status != VINOX_STATUS_OK) {
+            std::printf("[ SKIP ] (compile/encode did not succeed the way it did during triage)\n");
+        } else {
+            bool tools_visible = outcome.rendered_prompt.find("<|tool|>") != std::string::npos;
+            if (tools_visible) {
+                std::printf("[ PASS ] (tools now rendered into the prompt -- do not regress)\n");
+            } else {
+                std::printf("[ REGRESSED ] tools missing from rendered prompt again\n");
+                return 1;
+            }
+        }
+    }
+
     std::printf("================================================================================\n");
     std::printf("   Evidence probe complete. Re-run unmodified after #21 lands.\n");
     std::printf("================================================================================\n");

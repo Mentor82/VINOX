@@ -39,6 +39,7 @@ bool contains_generation_block(const std::string& source) {
 
 nlohmann::ordered_json build_messages_json(const TemplateRenderRequest& request) {
     nlohmann::ordered_json messages = nlohmann::ordered_json::array();
+    bool tools_attached_to_a_message = false;
     for (const auto& msg : request.messages) {
         nlohmann::ordered_json m;
         m["role"] = msg.role;
@@ -58,6 +59,18 @@ nlohmann::ordered_json build_messages_json(const TemplateRenderRequest& request)
         }
         if (!msg.tool_call_id.empty()) {
             m["tool_call_id"] = msg.tool_call_id;
+        }
+        // Some packages (e.g. Phi-4-mini) advertise tools as a per-message
+        // field on the system turn (`{% if 'tools' in message %}`) rather
+        // than a top-level `tools` context variable (Qwen-style
+        // `{% if tools %}`). Both conventions get the exact same canonical
+        // tool data verbatim as a raw JSON string, matching how this
+        // template style always string-concatenates message fields --
+        // nothing about the tool definitions themselves is altered, this
+        // only widens which convention can see them.
+        if (!request.tools_json.empty() && !tools_attached_to_a_message && msg.role == "system") {
+            m["tools"] = request.tools_json;
+            tools_attached_to_a_message = true;
         }
         messages.push_back(std::move(m));
     }

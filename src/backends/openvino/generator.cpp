@@ -590,6 +590,29 @@ vinox_status vinox_model_protocol_compile(
         size_t diff_end = (probe_tools.length() >= suffix_len) ? (probe_tools.length() - suffix_len) : probe_tools.length();
         if (diff_end < diff_begin) diff_end = diff_begin;
 
+        // Byte-level prefix/suffix matching has no notion of tag boundaries,
+        // so a boundary can land mid-tag purely by coincidence -- e.g. probe_std's
+        // "<|end|>" and probe_tools's "<|tool|>" share a "<|" prefix, which would
+        // otherwise get counted as "common" and silently truncate the very tag
+        // the diff region exists to find. Snap diff_begin backward (and diff_end
+        // forward) out of any tag they land inside of, in probe_tools.
+        {
+            size_t open_before_begin = (diff_begin == 0) ? std::string::npos : probe_tools.rfind('<', diff_begin - 1);
+            if (open_before_begin != std::string::npos) {
+                size_t close_before_begin = probe_tools.find('>', open_before_begin);
+                if (close_before_begin == std::string::npos || close_before_begin >= diff_begin) {
+                    diff_begin = open_before_begin;
+                }
+            }
+            size_t open_before_end = (diff_end == 0) ? std::string::npos : probe_tools.rfind('<', diff_end - 1);
+            if (open_before_end != std::string::npos) {
+                size_t close_before_end = probe_tools.find('>', open_before_end);
+                if (close_before_end != std::string::npos && close_before_end >= diff_end) {
+                    diff_end = close_before_end + 1;
+                }
+            }
+        }
+
         std::vector<std::string> diff_tags;
         size_t scan_pos = diff_begin;
         while (scan_pos < diff_end) {
