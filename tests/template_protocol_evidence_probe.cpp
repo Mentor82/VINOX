@@ -109,6 +109,10 @@ void report(const char* label, const ProbeOutcome& outcome) {
         reasoning_mode_name(outcome.contract.reasoning_mode),
         start_policy_name(outcome.contract.reasoning_start_policy),
         tool_format_name(outcome.contract.tool_format));
+    if (outcome.contract.tool_format != VINOX_TOOL_FORMAT_CANONICAL_JSON) {
+        std::printf("tool_begin_marker='%s' tool_call_marker='%s' tool_end_marker='%s'\n",
+            outcome.contract.tool_begin_marker, outcome.contract.tool_call_marker, outcome.contract.tool_end_marker);
+    }
     std::printf("encode_status = %d\n", static_cast<int>(outcome.encode_status));
     if (outcome.encode_status == VINOX_STATUS_OK) {
         size_t sys_dupes = count_occurrences(outcome.rendered_prompt, "helpful assistant");
@@ -148,17 +152,28 @@ int main() {
     // the generic Llama role-header token `<|start_header_id|>` (present in
     // every message, not tool-specific) as a native tool boundary marker.
     //
-    // 2026-08-18 update, after #21 (real ITemplateRuntime/minja rendering)
+    // 2026-08-18 update #1, after #21 (real ITemplateRuntime/minja rendering)
     // landed: the dropped-user-text half is fixed -- rendering is now a
     // faithful execution of the package's own template, so this half is
     // re-pinned as a forward regression guard (must stay present).
-    // The bogus tool-marker half is a *separate* bug in #20's own delimiter-
-    // extraction heuristic (vinox_model_protocol_compile's
-    // extract_rendered_delimiter_pair grabs the first "<...>...</...>"-shaped
-    // pair in the tools probe render, and Llama3.3's role header happens to
-    // match that shape on every turn, tools or not) -- rendering correctness
-    // doesn't touch it, so it is re-pinned as still-broken pending Issue #20
-    // characterization work (tracked as a follow-up, not #21's scope).
+    //
+    // 2026-08-18 update #2, after the diff-region-scoped tool-marker
+    // extraction landed: the OLD `<|start_header_id|>` false positive is
+    // gone (that exact tag is common to every render regardless of tools,
+    // so it's correctly excluded now). But Llama3.3's real native tool-call
+    // *output* format is untagged bare JSON (`{"name":..,"parameters":..}`,
+    // see its chat_template.jinja) with no delimiters at all -- the probe
+    // suite only renders system+user+tools, never an actual assistant
+    // tool-call turn, so it has no way to see that. The diff region still
+    // picks up *some* tag that happens to differ between the tools/no-tools
+    // system-message branches (currently `<|eot_id|>`/`<|end_header_id|>`,
+    // itself just incidental to message-boundary shifts, not a real tool
+    // marker) and still misclassifies this package as NATIVE_TEMPLATE. This
+    // needs a probe that actually renders an assistant tool-call message to
+    // observe the true output format -- tracked as a follow-up, not #21's
+    // or this diff-extraction fix's scope. Pinning on tool_format rather
+    // than the exact marker string so this doesn't re-trip on every
+    // incidental marker change while the underlying gap remains open.
     {
         std::printf("[REGRESSION PIN] Llama3.3-8B-Instruct-Thinking-ov user text (fixed by #21) ... ");
         ProbeOutcome outcome = run_probe(root + "Llama3.3-8B-Instruct-Thinking-ov\\chat_template.jinja");
@@ -173,12 +188,12 @@ int main() {
                 return 1;
             }
 
-            std::printf("[REGRESSION PIN] Llama3.3-8B-Instruct-Thinking-ov bogus tool marker (still open, #20 scope) ... ");
-            bool bogus_tool_marker = std::strcmp(outcome.contract.tool_begin_marker, "<|start_header_id|>") == 0;
-            if (bogus_tool_marker) {
-                std::printf("[ PASS ] (still misdetected as triaged -- fix pending #20 delimiter-extraction rework)\n");
+            std::printf("[REGRESSION PIN] Llama3.3-8B-Instruct-Thinking-ov false NATIVE_TEMPLATE (still open, #20 scope) ... ");
+            bool still_falsely_native = (outcome.contract.tool_format == VINOX_TOOL_FORMAT_NATIVE_TEMPLATE);
+            if (still_falsely_native) {
+                std::printf("[ PASS ] (still misclassified as triaged -- fix needs an assistant-tool-call probe, #20 follow-up)\n");
             } else {
-                std::printf("[ CHANGED ] tool-marker detection differs from triage baseline -- update this pin\n");
+                std::printf("[ CHANGED ] tool_format differs from triage baseline -- update this pin\n");
                 return 1;
             }
         }

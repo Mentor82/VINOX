@@ -560,24 +560,60 @@ vinox_status vinox_model_protocol_compile(
     std::strncpy(contract->reasoning_end_marker, r_end.c_str(), sizeof(contract->reasoning_end_marker) - 1);
     std::strncpy(contract->assistant_prefix, "", sizeof(contract->assistant_prefix) - 1);
 
-    // Differential Behavioral Analysis of Tool Probes — Purely Syntax-Agnostic Rendered Diff Extraction
+    // Differential Behavioral Analysis of Tool Probes — Diff-Region-Scoped Tag Extraction
+    // (Nephy review, 2026-08-18): scanning the WHOLE probe_tools render for the first
+    // tag-shaped token false-positives on tags that appear in EVERY render regardless of
+    // tools -- e.g. Llama's per-message "<|start_header_id|>" role header was previously
+    // misdetected as a native tool boundary marker. Isolating the region where
+    // probe_tools genuinely diverges from probe_std (trimming the common prefix/suffix
+    // first) means a tag common to both renders can never be picked up here.
     std::string t_begin = "";
     std::string t_call = "";
     std::string t_end = "";
 
     // Evaluate differential rendered string diff: probe_tools against probe_std
     bool tool_probe_differs = (probe_tools != probe_std);
-    
+
     if (tool_probe_differs) {
-        std::string tool_start, tool_end;
-        if (extract_rendered_delimiter_pair(probe_tools, tool_start, tool_end)) {
-            t_begin = tool_start;
-            t_end = tool_end;
+        size_t max_common = std::min(probe_std.length(), probe_tools.length());
+        size_t prefix_len = 0;
+        while (prefix_len < max_common && probe_std[prefix_len] == probe_tools[prefix_len]) {
+            ++prefix_len;
         }
-        if (probe_tools.find("<tool_call>") != std::string::npos) {
-            t_call = "<tool_call>";
-        } else if (probe_tools.find("call:") != std::string::npos) {
-            t_call = "call:";
+        size_t suffix_len = 0;
+        size_t suffix_budget = max_common - prefix_len;
+        while (suffix_len < suffix_budget &&
+               probe_std[probe_std.length() - 1 - suffix_len] == probe_tools[probe_tools.length() - 1 - suffix_len]) {
+            ++suffix_len;
+        }
+        size_t diff_begin = prefix_len;
+        size_t diff_end = (probe_tools.length() >= suffix_len) ? (probe_tools.length() - suffix_len) : probe_tools.length();
+        if (diff_end < diff_begin) diff_end = diff_begin;
+
+        std::vector<std::string> diff_tags;
+        size_t scan_pos = diff_begin;
+        while (scan_pos < diff_end) {
+            size_t open_pos = probe_tools.find('<', scan_pos);
+            if (open_pos == std::string::npos || open_pos >= diff_end) break;
+            size_t close_pos = probe_tools.find('>', open_pos);
+            if (close_pos == std::string::npos || close_pos >= diff_end) break;
+            std::string tag = probe_tools.substr(open_pos, close_pos - open_pos + 1);
+            if (tag.length() > 2 && tag[1] != '%' && tag[1] != '{') {
+                diff_tags.push_back(tag);
+            }
+            scan_pos = close_pos + 1;
+        }
+
+        if (!diff_tags.empty()) {
+            t_begin = diff_tags.front();
+            t_end = diff_tags.back();
+            t_call = t_begin;
+            for (const auto& tag : diff_tags) {
+                if (tag.find("call") != std::string::npos) {
+                    t_call = tag;
+                    break;
+                }
+            }
         }
     }
 
@@ -665,7 +701,27 @@ vinox_status vinox_model_protocol_decode_tool_call(
     std::string raw(model_raw_output);
     std::string decoded;
 
-    if (contract->tool_format == VINOX_TOOL_FORMAT_NATIVE_TEMPLATE || raw.find("<tool_call>") != std::string::npos || raw.find("call:") != std::string::npos) {
+    // Prefer the markers the compiler actually discovered for this specific
+    // package (Nephy review, 2026-08-18): the compiled contract's
+    // tool_call_marker/tool_end_marker were previously computed and stored
+    // but never consulted here -- this decoder instead hardcoded exactly the
+    // two literal formats ("<tool_call>...</tool_call>" and "call:{...}")
+    // regardless of what the model's own template actually uses.
+    std::string call_marker = contract->tool_call_marker ? contract->tool_call_marker : "";
+    std::string end_marker = contract->tool_end_marker ? contract->tool_end_marker : "";
+
+    if (!call_marker.empty() && !end_marker.empty() && call_marker != end_marker) {
+        size_t call_pos = raw.find(call_marker);
+        size_t end_pos = (call_pos != std::string::npos) ? raw.find(end_marker, call_pos + call_marker.length()) : std::string::npos;
+        if (call_pos != std::string::npos && end_pos != std::string::npos && end_pos > call_pos) {
+            decoded = raw.substr(call_pos + call_marker.length(), end_pos - (call_pos + call_marker.length()));
+        } else if (contract->tool_format == VINOX_TOOL_FORMAT_NATIVE_TEMPLATE) {
+            last_error = "Malformed model-native tool call envelope";
+            return VINOX_STATUS_FINAL_OUTPUT_INVALID;
+        } else {
+            decoded = raw;
+        }
+    } else if (contract->tool_format == VINOX_TOOL_FORMAT_NATIVE_TEMPLATE || raw.find("<tool_call>") != std::string::npos || raw.find("call:") != std::string::npos) {
         size_t call_pos = raw.find("<tool_call>");
         size_t end_pos = raw.find("</tool_call>");
         if (call_pos != std::string::npos && end_pos != std::string::npos && end_pos > call_pos) {

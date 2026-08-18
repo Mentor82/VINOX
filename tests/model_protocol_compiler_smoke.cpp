@@ -55,9 +55,15 @@ int main() {
     }
 
     // TEST 04: Native Tool Envelope Template -> NATIVE_TEMPLATE
+    // Uses a real conditional Jinja construct (tags only render when `tools`
+    // is truthy) rather than an unconditional placeholder string, since a
+    // tag present in every render regardless of tools cannot be -- and must
+    // not be -- attributed to tools by a diff-based extractor (Nephy review,
+    // 2026-08-18: this is what caught Llama3.3's <|start_header_id|> false
+    // positive).
     {
         std::cout << "[TEST 04] Native Tool Envelope Template -> NATIVE_TEMPLATE ... ";
-        const char* tpl = "<tools>\n{tools}\n</tools>\n<tool_call>";
+        const char* tpl = "<|im_start|>system\nHello.<|im_end|>\n{% if tools %}<tools>NAME</tools>Use <tool_call>NAME</tool_call> tags.{% endif %}";
         vinox_model_protocol_contract contract{};
         contract.struct_size = sizeof(contract);
         vinox_status st = vinox_model_protocol_compile(tpl, nullptr, &contract);
@@ -65,14 +71,14 @@ int main() {
         assert(contract.tool_format == VINOX_TOOL_FORMAT_NATIVE_TEMPLATE);
         assert(std::string(contract.tool_begin_marker) == "<tools>");
         assert(std::string(contract.tool_call_marker) == "<tool_call>");
-        assert(std::string(contract.tool_end_marker) == "</tools>");
+        assert(std::string(contract.tool_end_marker) == "</tool_call>");
         std::cout << "[ PASS ]\n";
     }
 
     // TEST 05: Native Tool Call Decoder -> Canonical VINOX JSON
     {
         std::cout << "[TEST 05] Native Tool Call Decoder -> Canonical VINOX JSON ... ";
-        const char* tpl = "<tools>\n{tools}\n</tools>\n<tool_call>";
+        const char* tpl = "<|im_start|>system\nHello.<|im_end|>\n{% if tools %}<tools>NAME</tools>Use <tool_call>NAME</tool_call> tags.{% endif %}";
         vinox_model_protocol_contract contract{};
         contract.struct_size = sizeof(contract);
         vinox_status st = vinox_model_protocol_compile(tpl, nullptr, &contract);
@@ -93,7 +99,7 @@ int main() {
     // TEST 06: Malformed Native Tool Call -> Strict FAIL
     {
         std::cout << "[TEST 06] Malformed Native Envelope -> Strict FAIL (FINAL_OUTPUT_INVALID) ... ";
-        const char* tpl = "<tools>\n{tools}\n</tools>\n<tool_call>";
+        const char* tpl = "<|im_start|>system\nHello.<|im_end|>\n{% if tools %}<tools>NAME</tools>Use <tool_call>NAME</tool_call> tags.{% endif %}";
         vinox_model_protocol_contract contract{};
         contract.struct_size = sizeof(contract);
         vinox_status st = vinox_model_protocol_compile(tpl, nullptr, &contract);
