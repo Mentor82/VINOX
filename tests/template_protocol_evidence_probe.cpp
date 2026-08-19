@@ -163,17 +163,18 @@ int main() {
     // so it's correctly excluded now). But Llama3.3's real native tool-call
     // *output* format is untagged bare JSON (`{"name":..,"parameters":..}`,
     // see its chat_template.jinja) with no delimiters at all -- the probe
-    // suite only renders system+user+tools, never an actual assistant
-    // tool-call turn, so it has no way to see that. The diff region still
-    // picks up *some* tag that happens to differ between the tools/no-tools
-    // system-message branches (currently `<|eot_id|>`/`<|end_header_id|>`,
-    // itself just incidental to message-boundary shifts, not a real tool
-    // marker) and still misclassifies this package as NATIVE_TEMPLATE. This
-    // needs a probe that actually renders an assistant tool-call message to
-    // observe the true output format -- tracked as a follow-up, not #21's
-    // or this diff-extraction fix's scope. Pinning on tool_format rather
-    // than the exact marker string so this doesn't re-trip on every
-    // incidental marker change while the underlying gap remains open.
+    // suite only rendered system+user+tools, never an actual assistant
+    // tool-call turn, so it had no way to see that yet.
+    //
+    // 2026-08-18 update #3, after the assistant-tool-call probe (task #10)
+    // landed: fixed for real. The new probe renders an actual assistant turn
+    // with a native tool_calls entry and diffs it against a plain-content
+    // assistant turn, so it directly observes that Llama3.3's output has no
+    // delimiting tags at all -- tool_format now correctly resolves to
+    // CANONICAL_JSON (decode's generic brace-extraction + name/parameters
+    // aliasing is the right fallback for an untagged native shape, not a
+    // NATIVE_TEMPLATE with a marker that was never real). Re-pinned as a
+    // forward regression guard against the false classification returning.
     {
         std::printf("[REGRESSION PIN] Llama3.3-8B-Instruct-Thinking-ov user text (fixed by #21) ... ");
         ProbeOutcome outcome = run_probe(root + "Llama3.3-8B-Instruct-Thinking-ov\\chat_template.jinja");
@@ -188,12 +189,12 @@ int main() {
                 return 1;
             }
 
-            std::printf("[REGRESSION PIN] Llama3.3-8B-Instruct-Thinking-ov false NATIVE_TEMPLATE (still open, #20 scope) ... ");
-            bool still_falsely_native = (outcome.contract.tool_format == VINOX_TOOL_FORMAT_NATIVE_TEMPLATE);
-            if (still_falsely_native) {
-                std::printf("[ PASS ] (still misclassified as triaged -- fix needs an assistant-tool-call probe, #20 follow-up)\n");
+            std::printf("[REGRESSION PIN] Llama3.3-8B-Instruct-Thinking-ov correct CANONICAL_JSON (fixed by #20 task #10) ... ");
+            bool correctly_canonical = (outcome.contract.tool_format == VINOX_TOOL_FORMAT_CANONICAL_JSON);
+            if (correctly_canonical) {
+                std::printf("[ PASS ] (no false NATIVE_TEMPLATE marker -- do not regress)\n");
             } else {
-                std::printf("[ CHANGED ] tool_format differs from triage baseline -- update this pin\n");
+                std::printf("[ REGRESSED ] tool_format is no longer CANONICAL_JSON -- false-marker bug may be back\n");
                 return 1;
             }
         }
@@ -224,6 +225,53 @@ int main() {
             } else {
                 std::printf("[ REGRESSED ] tools missing from rendered prompt again\n");
                 return 1;
+            }
+        }
+    }
+
+    // Pinned negative regression case (found 2026-08-18, after task #10's
+    // assistant-tool-call probe landed): the probe now correctly finds
+    // DeepSeek's real *outer* native envelope markers
+    // ("<｜tool▁calls▁begin｜>" / "<｜tool▁call▁end｜>"), so
+    // vinox_model_protocol_decode_tool_call successfully locates and extracts
+    // the content between them. But DeepSeek's *inner* envelope is not JSON
+    // at all -- "<｜tool▁call▁begin｜>function<｜tool▁sep｜>NAME\n```json\n
+    // ARGS\n```<｜tool▁call▁end｜>", a custom name/sep + markdown-fence shape
+    // (see its chat_template.jinja). The extracted content fails
+    // nlohmann::json::parse, and decode's fallback ("Retain original string
+    // if non-JSON") means it comes back as VINOX_STATUS_OK with the raw,
+    // un-parsed envelope text as the "canonical" JSON -- a silent pass-
+    // through of garbage rather than a clean failure. This is a distinct gap
+    // from what task #10 set out to fix (marker *discovery*, now working)
+    // and needs its own inner-envelope parser or a fail-closed rejection
+    // when marker-extracted NATIVE_TEMPLATE content isn't valid JSON --
+    // tracked separately.
+    {
+        std::printf("[REGRESSION PIN] DeepSeek-R1-Distill-Qwen-1.5B-ov decode of a real native call (still open) ... ");
+        ProbeOutcome outcome = run_probe(root + "DeepSeek-R1-Distill-Qwen-1.5B-ov\\chat_template.jinja");
+        if (outcome.compile_status != VINOX_STATUS_OK) {
+            std::printf("[ SKIP ] (compile did not succeed the way it did during triage)\n");
+        } else {
+            const std::string raw_native =
+                "<" "\xef" "\xbd" "\x9c" "tool" "\xe2" "\x96" "\x81" "calls" "\xe2" "\x96" "\x81" "begin" "\xef" "\xbd" "\x9c" ">"
+                "<" "\xef" "\xbd" "\x9c" "tool" "\xe2" "\x96" "\x81" "call" "\xe2" "\x96" "\x81" "begin" "\xef" "\xbd" "\x9c" ">"
+                "function" "<" "\xef" "\xbd" "\x9c" "tool" "\xe2" "\x96" "\x81" "sep" "\xef" "\xbd" "\x9c" ">"
+                "get_weather\n```json\n{\"location\": \"Berlin\"}\n```"
+                "<" "\xef" "\xbd" "\x9c" "tool" "\xe2" "\x96" "\x81" "call" "\xe2" "\x96" "\x81" "end" "\xef" "\xbd" "\x9c" ">"
+                "<" "\xef" "\xbd" "\x9c" "tool" "\xe2" "\x96" "\x81" "calls" "\xe2" "\x96" "\x81" "end" "\xef" "\xbd" "\x9c" ">";
+            char canonical_buf[512] = {0};
+            size_t written = 0;
+            vinox_status dst = vinox_model_protocol_decode_tool_call(
+                &outcome.contract, raw_native.c_str(), canonical_buf, sizeof(canonical_buf), &written);
+            bool looks_like_valid_json_tool_call =
+                (dst == VINOX_STATUS_OK) &&
+                std::string(canonical_buf).find("\"tool\"") != std::string::npos &&
+                std::string(canonical_buf).find("get_weather") != std::string::npos;
+            if (looks_like_valid_json_tool_call) {
+                std::printf("[ CHANGED ] decode now produces a clean canonical call -- update this pin, gap is fixed\n");
+                return 1;
+            } else {
+                std::printf("[ PASS ] (still returns non-JSON envelope text as triaged, status=%d -- fix pending, tracked separately)\n", (int)dst);
             }
         }
     }

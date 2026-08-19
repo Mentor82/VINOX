@@ -54,6 +54,67 @@ vinox_status fail_runtime(const std::exception& error) {
     return VINOX_STATUS_RUNTIME_ERROR;
 }
 
+// Data-Driven Diff-Scoped Tag Extraction (Nephy review, 2026-08-18): isolates
+// the byte range where `variant` genuinely diverges from `baseline` (trimming
+// the common prefix/suffix first, snapped so neither boundary lands mid-tag)
+// and returns every "<...>"-shaped token found strictly inside that range, in
+// source order. A tag common to both renders can never be returned, since it
+// lives outside the diff region by construction -- this is what keeps a
+// per-turn role header like "<|start_header_id|>" (present in every render,
+// tools or not) from ever being mistaken for something tools-specific.
+std::vector<std::string> extract_diff_tags(const std::string& baseline, const std::string& variant) {
+    std::vector<std::string> tags;
+    if (baseline == variant) return tags;
+
+    size_t max_common = std::min(baseline.length(), variant.length());
+    size_t prefix_len = 0;
+    while (prefix_len < max_common && baseline[prefix_len] == variant[prefix_len]) {
+        ++prefix_len;
+    }
+    size_t suffix_len = 0;
+    size_t suffix_budget = max_common - prefix_len;
+    while (suffix_len < suffix_budget &&
+           baseline[baseline.length() - 1 - suffix_len] == variant[variant.length() - 1 - suffix_len]) {
+        ++suffix_len;
+    }
+    size_t diff_begin = prefix_len;
+    size_t diff_end = (variant.length() >= suffix_len) ? (variant.length() - suffix_len) : variant.length();
+    if (diff_end < diff_begin) diff_end = diff_begin;
+
+    // Byte-level prefix/suffix matching has no notion of tag boundaries, so a
+    // boundary can land mid-tag purely by coincidence (two different tags
+    // sharing an opening substring). Snap diff_begin backward and diff_end
+    // forward out of any tag they land inside of, in `variant`.
+    size_t open_before_begin = (diff_begin == 0) ? std::string::npos : variant.rfind('<', diff_begin - 1);
+    if (open_before_begin != std::string::npos) {
+        size_t close_before_begin = variant.find('>', open_before_begin);
+        if (close_before_begin == std::string::npos || close_before_begin >= diff_begin) {
+            diff_begin = open_before_begin;
+        }
+    }
+    size_t open_before_end = (diff_end == 0) ? std::string::npos : variant.rfind('<', diff_end - 1);
+    if (open_before_end != std::string::npos) {
+        size_t close_before_end = variant.find('>', open_before_end);
+        if (close_before_end != std::string::npos && close_before_end >= diff_end) {
+            diff_end = close_before_end + 1;
+        }
+    }
+
+    size_t scan_pos = diff_begin;
+    while (scan_pos < diff_end) {
+        size_t open_pos = variant.find('<', scan_pos);
+        if (open_pos == std::string::npos || open_pos >= diff_end) break;
+        size_t close_pos = variant.find('>', open_pos);
+        if (close_pos == std::string::npos || close_pos >= diff_end) break;
+        std::string tag = variant.substr(open_pos, close_pos - open_pos + 1);
+        if (tag.length() > 2 && tag[1] != '%' && tag[1] != '{') {
+            tags.push_back(tag);
+        }
+        scan_pos = close_pos + 1;
+    }
+    return tags;
+}
+
 }  // namespace
 
 vinox_status vinox_model_load(
@@ -567,81 +628,98 @@ vinox_status vinox_model_protocol_compile(
     // misdetected as a native tool boundary marker. Isolating the region where
     // probe_tools genuinely diverges from probe_std (trimming the common prefix/suffix
     // first) means a tag common to both renders can never be picked up here.
-    std::string t_begin = "";
-    std::string t_call = "";
-    std::string t_end = "";
+    std::vector<std::string> advertisement_tags = extract_diff_tags(probe_std, probe_tools);
 
-    // Evaluate differential rendered string diff: probe_tools against probe_std
-    bool tool_probe_differs = (probe_tools != probe_std);
+    // Issue #20 follow-up probe: the tools-advertisement probes above only ever
+    // render system+user+tools. Several real packages advertise tools that way
+    // (or not at all -- DeepSeek's template has no {% if tools %} mechanism at
+    // all) but render a *materially different* framing for an actual assistant
+    // tool_calls turn (DeepSeek's "<｜tool▁calls▁begin｜>...", Qwen's own
+    // "<tool_call>...</tool_call>" repeated for real). The advertisement probes
+    // can therefore find markers that don't correspond to what decode_tool_call
+    // actually needs to search for (or find nothing, when a package's real
+    // native output has no tools-advertisement path to observe at all). Probe
+    // an assistant turn directly -- same message list, only the last turn
+    // swapped between plain content and a native tool_calls entry -- so the
+    // *output* framing can be observed independently of the advertisement
+    // framing. Only meaningful for real Jinja templates (the non-Jinja
+    // placeholder path has no assistant-history rendering concept at all).
+    std::vector<std::string> output_tags;
+    bool assistant_probe_differs = false;
+    bool is_jinja_template = (tpl.find("{%") != std::string::npos || tpl.find("{{") != std::string::npos);
+    if (is_jinja_template) {
+        vinox::model::TemplateRenderRequest req_plain;
+        req_plain.template_source = tpl;
+        req_plain.messages.push_back({"system", "SYS_PROBE_ALPHA", "", ""});
+        req_plain.messages.push_back({"user", "USER_PROBE_BETA", "", ""});
+        req_plain.messages.push_back({"assistant", "PLAIN_PROBE_RESPONSE", "", ""});
+        req_plain.eos_token = eos;
 
-    if (tool_probe_differs) {
-        size_t max_common = std::min(probe_std.length(), probe_tools.length());
-        size_t prefix_len = 0;
-        while (prefix_len < max_common && probe_std[prefix_len] == probe_tools[prefix_len]) {
-            ++prefix_len;
-        }
-        size_t suffix_len = 0;
-        size_t suffix_budget = max_common - prefix_len;
-        while (suffix_len < suffix_budget &&
-               probe_std[probe_std.length() - 1 - suffix_len] == probe_tools[probe_tools.length() - 1 - suffix_len]) {
-            ++suffix_len;
-        }
-        size_t diff_begin = prefix_len;
-        size_t diff_end = (probe_tools.length() >= suffix_len) ? (probe_tools.length() - suffix_len) : probe_tools.length();
-        if (diff_end < diff_begin) diff_end = diff_begin;
+        vinox::model::TemplateRenderRequest req_tool = req_plain;
+        req_tool.messages.back() = {
+            "assistant", "",
+            "[{\"type\":\"function\",\"function\":{\"name\":\"probe_tool_alpha\",\"arguments\":{\"x\":\"1\"}}}]",
+            ""
+        };
 
-        // Byte-level prefix/suffix matching has no notion of tag boundaries,
-        // so a boundary can land mid-tag purely by coincidence -- e.g. probe_std's
-        // "<|end|>" and probe_tools's "<|tool|>" share a "<|" prefix, which would
-        // otherwise get counted as "common" and silently truncate the very tag
-        // the diff region exists to find. Snap diff_begin backward (and diff_end
-        // forward) out of any tag they land inside of, in probe_tools.
-        {
-            size_t open_before_begin = (diff_begin == 0) ? std::string::npos : probe_tools.rfind('<', diff_begin - 1);
-            if (open_before_begin != std::string::npos) {
-                size_t close_before_begin = probe_tools.find('>', open_before_begin);
-                if (close_before_begin == std::string::npos || close_before_begin >= diff_begin) {
-                    diff_begin = open_before_begin;
-                }
-            }
-            size_t open_before_end = (diff_end == 0) ? std::string::npos : probe_tools.rfind('<', diff_end - 1);
-            if (open_before_end != std::string::npos) {
-                size_t close_before_end = probe_tools.find('>', open_before_end);
-                if (close_before_end != std::string::npos && close_before_end >= diff_end) {
-                    diff_end = close_before_end + 1;
-                }
-            }
-        }
-
-        std::vector<std::string> diff_tags;
-        size_t scan_pos = diff_begin;
-        while (scan_pos < diff_end) {
-            size_t open_pos = probe_tools.find('<', scan_pos);
-            if (open_pos == std::string::npos || open_pos >= diff_end) break;
-            size_t close_pos = probe_tools.find('>', open_pos);
-            if (close_pos == std::string::npos || close_pos >= diff_end) break;
-            std::string tag = probe_tools.substr(open_pos, close_pos - open_pos + 1);
-            if (tag.length() > 2 && tag[1] != '%' && tag[1] != '{') {
-                diff_tags.push_back(tag);
-            }
-            scan_pos = close_pos + 1;
-        }
-
-        if (!diff_tags.empty()) {
-            t_begin = diff_tags.front();
-            t_end = diff_tags.back();
-            t_call = t_begin;
-            for (const auto& tag : diff_tags) {
-                if (tag.find("call") != std::string::npos) {
-                    t_call = tag;
-                    break;
-                }
+        static const vinox::model::MinjaTemplateRuntime assistant_probe_runtime;
+        vinox::model::TemplateRenderResult r_plain = assistant_probe_runtime.render(req_plain);
+        vinox::model::TemplateRenderResult r_tool = assistant_probe_runtime.render(req_tool);
+        if (r_plain.status == vinox::model::TemplateRenderStatus::Ok &&
+            r_tool.status == vinox::model::TemplateRenderStatus::Ok) {
+            assistant_probe_differs = (r_plain.rendered_text != r_tool.rendered_text);
+            if (assistant_probe_differs) {
+                output_tags = extract_diff_tags(r_plain.rendered_text, r_tool.rendered_text);
             }
         }
     }
 
-    if (tool_probe_differs && (!t_begin.empty() || !t_call.empty())) {
+    // The assistant-turn probe observes the model's real tool-call *output*
+    // framing, which is what decode_tool_call actually needs -- prefer it
+    // whenever it produced a conclusive diff. Fall back to the
+    // tools-advertisement probe only when the assistant probe isn't available
+    // or the template renders assistant tool_calls identically to plain
+    // content (i.e. it doesn't special-case them at all).
+    std::string t_begin, t_call, t_end;
+    bool native_untagged_output = false;
+    if (!output_tags.empty()) {
+        t_begin = output_tags.front();
+        t_end = output_tags.back();
+        t_call = t_begin;
+        for (const auto& tag : output_tags) {
+            if (tag.find("call") != std::string::npos) {
+                t_call = tag;
+                break;
+            }
+        }
+    } else if (assistant_probe_differs) {
+        // Assistant turn genuinely renders differently for a tool call, but
+        // with no delimiting tags at all (e.g. Llama3.3's bare
+        // {"name":..,"parameters":..} with no wrapper) -- a real native
+        // output shape, just not one with a marker to search for.
+        native_untagged_output = true;
+    } else if (!advertisement_tags.empty()) {
+        t_begin = advertisement_tags.front();
+        t_end = advertisement_tags.back();
+        t_call = t_begin;
+        for (const auto& tag : advertisement_tags) {
+            if (tag.find("call") != std::string::npos) {
+                t_call = tag;
+                break;
+            }
+        }
+    }
+
+    if (!t_begin.empty() || !t_call.empty()) {
         contract->tool_format = VINOX_TOOL_FORMAT_NATIVE_TEMPLATE;
+    } else if (native_untagged_output) {
+        // No wrapper markers to hand decode_tool_call, but the output is
+        // still not canonical VINOX JSON field names -- decode's generic
+        // brace-extraction plus name/parameters aliasing is the correct
+        // fallback here, so this is intentionally left as CANONICAL_JSON
+        // with empty markers rather than a NATIVE_TEMPLATE with nothing to
+        // search for.
+        contract->tool_format = VINOX_TOOL_FORMAT_CANONICAL_JSON;
     } else {
         contract->tool_format = VINOX_TOOL_FORMAT_CANONICAL_JSON;
     }
