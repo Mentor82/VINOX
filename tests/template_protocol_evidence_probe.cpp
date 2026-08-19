@@ -229,25 +229,28 @@ int main() {
         }
     }
 
-    // Pinned negative regression case (found 2026-08-18, after task #10's
-    // assistant-tool-call probe landed): the probe now correctly finds
+    // Pinned case (found 2026-08-18 after task #10's assistant-tool-call
+    // probe landed; fixed 2026-08-18, task #11): the probe correctly finds
     // DeepSeek's real *outer* native envelope markers
     // ("<｜tool▁calls▁begin｜>" / "<｜tool▁call▁end｜>"), so
     // vinox_model_protocol_decode_tool_call successfully locates and extracts
     // the content between them. But DeepSeek's *inner* envelope is not JSON
     // at all -- "<｜tool▁call▁begin｜>function<｜tool▁sep｜>NAME\n```json\n
     // ARGS\n```<｜tool▁call▁end｜>", a custom name/sep + markdown-fence shape
-    // (see its chat_template.jinja). The extracted content fails
-    // nlohmann::json::parse, and decode's fallback ("Retain original string
-    // if non-JSON") means it comes back as VINOX_STATUS_OK with the raw,
-    // un-parsed envelope text as the "canonical" JSON -- a silent pass-
-    // through of garbage rather than a clean failure. This is a distinct gap
-    // from what task #10 set out to fix (marker *discovery*, now working)
-    // and needs its own inner-envelope parser or a fail-closed rejection
-    // when marker-extracted NATIVE_TEMPLATE content isn't valid JSON --
-    // tracked separately.
+    // (see its chat_template.jinja) that VINOX has no generic (non-model-
+    // specific) way to parse into a canonical call. Originally this fell
+    // through decode's "retain original string if non-JSON" path and
+    // returned VINOX_STATUS_OK with the raw, un-parsed envelope text as the
+    // "canonical" JSON -- a silent pass-through of garbage. Fixed: decode now
+    // distinguishes "no envelope located at all" (legitimately lenient, e.g.
+    // a plain conversational CANONICAL_JSON response) from "envelope located
+    // but its contents aren't valid JSON" (a real format mismatch) and fails
+    // closed with FINAL_OUTPUT_INVALID for the latter, rather than
+    // fabricating a canonical call VINOX never actually understood. Re-pinned
+    // as a forward regression guard against the silent pass-through
+    // returning.
     {
-        std::printf("[REGRESSION PIN] DeepSeek-R1-Distill-Qwen-1.5B-ov decode of a real native call (still open) ... ");
+        std::printf("[REGRESSION PIN] DeepSeek-R1-Distill-Qwen-1.5B-ov native call fails closed (fixed by task #11) ... ");
         ProbeOutcome outcome = run_probe(root + "DeepSeek-R1-Distill-Qwen-1.5B-ov\\chat_template.jinja");
         if (outcome.compile_status != VINOX_STATUS_OK) {
             std::printf("[ SKIP ] (compile did not succeed the way it did during triage)\n");
@@ -263,15 +266,16 @@ int main() {
             size_t written = 0;
             vinox_status dst = vinox_model_protocol_decode_tool_call(
                 &outcome.contract, raw_native.c_str(), canonical_buf, sizeof(canonical_buf), &written);
-            bool looks_like_valid_json_tool_call =
-                (dst == VINOX_STATUS_OK) &&
-                std::string(canonical_buf).find("\"tool\"") != std::string::npos &&
-                std::string(canonical_buf).find("get_weather") != std::string::npos;
-            if (looks_like_valid_json_tool_call) {
-                std::printf("[ CHANGED ] decode now produces a clean canonical call -- update this pin, gap is fixed\n");
+            bool silently_passed_through_garbage =
+                (dst == VINOX_STATUS_OK) && std::string(canonical_buf).find("\"tool\"") == std::string::npos;
+            if (silently_passed_through_garbage) {
+                std::printf("[ REGRESSED ] decode silently returned non-JSON envelope text as OK again\n");
                 return 1;
+            } else if (dst == VINOX_STATUS_FINAL_OUTPUT_INVALID) {
+                std::printf("[ PASS ] (fails closed on the unparseable native envelope -- do not regress)\n");
             } else {
-                std::printf("[ PASS ] (still returns non-JSON envelope text as triaged, status=%d -- fix pending, tracked separately)\n", (int)dst);
+                std::printf("[ CHANGED ] decode status is %d, neither the original bug nor the expected fail-closed fix -- update this pin\n", (int)dst);
+                return 1;
             }
         }
     }

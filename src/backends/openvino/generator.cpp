@@ -811,11 +811,23 @@ vinox_status vinox_model_protocol_decode_tool_call(
     std::string call_marker = contract->tool_call_marker ? contract->tool_call_marker : "";
     std::string end_marker = contract->tool_end_marker ? contract->tool_end_marker : "";
 
+    // Tracks whether `decoded` was carved out from a genuine, located envelope
+    // boundary (a real open/close marker pair, or a "call:{...}" match) as
+    // opposed to a bare pass-through of the raw output because no envelope
+    // could be located at all. A located envelope whose *contents* still
+    // don't parse as the expected shape is a real format mismatch and must
+    // fail closed (task #11); an un-located envelope legitimately might just
+    // be a non-tool-call conversational response, which the CANONICAL_JSON
+    // callers are expected to handle by trying to parse and accepting "not a
+    // tool call" -- that lenience is intentional and untouched here.
+    bool decoded_from_located_envelope = false;
+
     if (!call_marker.empty() && !end_marker.empty() && call_marker != end_marker) {
         size_t call_pos = raw.find(call_marker);
         size_t end_pos = (call_pos != std::string::npos) ? raw.find(end_marker, call_pos + call_marker.length()) : std::string::npos;
         if (call_pos != std::string::npos && end_pos != std::string::npos && end_pos > call_pos) {
             decoded = raw.substr(call_pos + call_marker.length(), end_pos - (call_pos + call_marker.length()));
+            decoded_from_located_envelope = true;
         } else if (contract->tool_format == VINOX_TOOL_FORMAT_NATIVE_TEMPLATE) {
             last_error = "Malformed model-native tool call envelope";
             return VINOX_STATUS_FINAL_OUTPUT_INVALID;
@@ -827,6 +839,7 @@ vinox_status vinox_model_protocol_decode_tool_call(
         size_t end_pos = raw.find("</tool_call>");
         if (call_pos != std::string::npos && end_pos != std::string::npos && end_pos > call_pos) {
             decoded = raw.substr(call_pos + 11, end_pos - (call_pos + 11));
+            decoded_from_located_envelope = true;
         } else {
             size_t c_pos = raw.find("call:");
             if (c_pos != std::string::npos) {
@@ -836,6 +849,7 @@ vinox_status vinox_model_protocol_decode_tool_call(
                     std::string name = raw.substr(c_pos + 5, brace_pos - (c_pos + 5));
                     std::string args = raw.substr(brace_pos, end_brace - brace_pos + 1);
                     decoded = "{\"tool\":\"" + name + "\",\"arguments\":" + args + "}";
+                    decoded_from_located_envelope = true;
                 } else {
                     last_error = "Malformed model-native call: syntax";
                     return VINOX_STATUS_FINAL_OUTPUT_INVALID;
@@ -857,7 +871,12 @@ vinox_status vinox_model_protocol_decode_tool_call(
 
     try {
         auto j = nlohmann::json::parse(decoded);
-        if (j.is_object()) {
+        if (!j.is_object()) {
+            if (decoded_from_located_envelope) {
+                last_error = "Malformed model-native call: envelope contents are not a JSON object";
+                return VINOX_STATUS_FINAL_OUTPUT_INVALID;
+            }
+        } else {
             nlohmann::json canonical;
             if (j.contains("tool") && j["tool"].is_string()) {
                 canonical["tool"] = j["tool"];
@@ -878,8 +897,18 @@ vinox_status vinox_model_protocol_decode_tool_call(
             }
             decoded = canonical.dump();
         }
-    } catch (...) {
-        // Retain original string if non-JSON
+    } catch (const std::exception&) {
+        // A located envelope whose contents fail to parse as JSON at all is a
+        // real format mismatch (task #11: e.g. DeepSeek's native envelope has
+        // a non-JSON name/sep + markdown-fence inner shape) -- fail closed
+        // rather than silently returning the raw, un-parsed envelope text as
+        // though it were a successfully decoded canonical call. Only retain
+        // the original string when no envelope was ever located at all (the
+        // CANONICAL_JSON "maybe not a tool call" pass-through case).
+        if (decoded_from_located_envelope) {
+            last_error = "Malformed model-native call: envelope contents are not valid JSON";
+            return VINOX_STATUS_FINAL_OUTPUT_INVALID;
+        }
     }
 
     if (decoded.length() >= canonical_buf_size) {
