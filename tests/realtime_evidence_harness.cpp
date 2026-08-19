@@ -150,7 +150,11 @@ EvidenceResult run_model_package_evidence(const ModelPackageSpec& spec, size_t i
     vinox_generation_options gen_opts{};
     vinox_generation_options_from_contract(&contract, &gen_opts);
     gen_opts.prompt = rendered_prompt;
-    gen_opts.max_new_tokens = 16;
+    // 16 tokens wasn't enough to let a model finish a tool-call JSON payload
+    // (or even a short reasoning preamble) before generation was cut off,
+    // producing truncated/unparseable output that looked like a decode
+    // failure rather than what it actually was: not enough budget to finish.
+    gen_opts.max_new_tokens = 64;
     gen_opts.temperature = 0.1f;
 
     DualChannelStreamContext stream_ctx;
@@ -348,6 +352,24 @@ int main() {
             "C:\\ai\\models\\OpenVINO\\Phi-4-mini-instruct-ov",
             "Calculate 15 * 4 using calculator tool",
             true
+        },
+        // Non-reasoning baseline fixtures (2026-08-19): the set above is
+        // dominated by DeepSeek-R1-Distill/Thinking variants (5 of 7 declare
+        // or live-emit reasoning); only E and G are reasoning_mode=NONE, and
+        // both have their own confounding issues (tag-less native output,
+        // token-budget truncation). These two add clean, known-good
+        // non-thinking data points instead of more reasoning-model edge cases.
+        {
+            "Qwen2.5-1B-Instruct-fp16-test-ov (Non-Reasoning Positive Control)",
+            "C:\\ai\\models\\OpenVINO\\Qwen2.5-1B-Instruct-fp16-test-ov",
+            "Calculate 15 * 4 using calculator tool",
+            true
+        },
+        {
+            "Qwen2.5-Coder-0.5B-fp16-test-ov (Non-Reasoning, Smallest/Fastest)",
+            "C:\\ai\\models\\OpenVINO\\Qwen2.5-Coder-0.5B-fp16-test-ov",
+            "Calculate 15 * 4",
+            false
         }
     };
 
