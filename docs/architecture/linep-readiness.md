@@ -39,14 +39,14 @@ VINOX Core / Serving / Agent / Tools
 
 A future implementation may use a package/artifact name such as `vinox_transport_linep` for the optional adapter.
 
-**Definitions:**
+Definitions:
 
 - **LiNeP plugin / adapter**: owns protocol/session integration, identity mapping, capability exchange, cancellation mapping, transport evidence, connection lifecycle, and the bridge between VINOX canonical envelopes and LiNeP.
-- **LiNeP wire/codec component**: owns serialization/deserialization, framing, fragmentation/reassembly, and wire representation as required by LiNeP. This component is distinct from LiNeP-SL.
-- **LiNeP-SL Security Layer**: owns the LiNeP-specific security contract and security metadata/processing required by LiNeP-SL. It must not become a VINOX governance engine and must not bypass local authorization, policy, or resource governance.
+- **LiNeP Core (wire/codec & transport)**: owns serialization/deserialization, framing, fragmentation/reassembly, basic capability handshakes, and **SL0/SL1 security levels** (SL0 local/unencrypted IPC, SL1 symmetric token/PSK framing authentication).
+- **LiNeP-SL Security Layer (SL2+)**: owns advanced security contracts and security metadata, including **SL2 (mTLS), SL3 (TPM 2.0 hardware attestation), and SL4 (zero-trust proof-of-execution)**. It must not become a VINOX governance engine and must not bypass local authorization, policy, or resource governance.
 - **VINOX Core**: remains unaware of LiNeP frame formats, session headers, connection APIs, codec implementation details, or LiNeP-SL internals.
 
-**Invariant**: LiNeP may extend transport reach, and LiNeP-SL may secure that transport, but neither may become a second execution engine, governance layer, scheduler authority, or business-logic implementation.
+**Invariant**: LiNeP Core (SL0/SL1) handles base transport, framing, and capability negotiation. LiNeP-SL (SL2+) extends transport reach with hardware enclaves and mTLS, but neither may become a second execution engine, governance layer, scheduler authority, or business-logic implementation.
 
 ---
 
@@ -154,9 +154,9 @@ Adapters for:
 1. **Local CLI**: Formats envelopes for stdout or structured `--json`.
 2. **HTTP/SSE (Phase 9)**: Maps envelopes to `text/event-stream` SSE events and OpenAI DTOs.
 3. **MCP (Phase 6)**: Maps envelopes to JSON-RPC 2.0 notifications/responses.
-4. **LiNeP (Future, optional plugin)**: Maps canonical envelopes to LiNeP protocol operations.
-5. **LiNeP wire/codec (inside/below LiNeP plugin)**: Encodes/decodes wire representation and fragmentation without owning VINOX execution semantics.
-6. **LiNeP-SL Security Layer (optional LiNeP security component)**: Secures LiNeP communication while remaining separate from VINOX execution/governance semantics.
+4. **LiNeP Adapter (`vinox_transport_linep`)**: Maps canonical envelopes to LiNeP protocol operations.
+5. **LiNeP Core (SL0/SL1)**: Encodes/decodes wire representation, fragmentation, and capabilities negotiation supporting SL0 (local/plaintext IPC) and SL1 (token/PSK framing auth) without owning VINOX execution semantics.
+6. **LiNeP-SL Security Layer (SL2+)**: Secures LiNeP communication for SL2 (mTLS), SL3 (TPM 2.0 hardware attestation), and SL4 (zero-trust proof-of-execution) while remaining separate from VINOX execution/governance semantics.
 
 **Invariant**: LiNeP/LiNeP-SL support remains optional and introduces no hard build or runtime dependency into VINOX Core, CLI, Server, GUI, Tool, or Agent binaries.
 

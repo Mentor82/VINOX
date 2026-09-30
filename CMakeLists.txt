@@ -79,6 +79,7 @@ if(VINOX_OPENVINO_SDK_ROOT)
 
     add_library(vinox_openvino SHARED
         src/backends/openvino/generator.cpp
+        src/backends/openvino/embedding.cpp
         src/backends/openvino/minja_template_runtime.cpp
     )
     add_library(vinox::openvino ALIAS vinox_openvino)
@@ -245,6 +246,67 @@ else()
     target_compile_options(vinox_agent PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+add_library(vinox_plugins SHARED
+    src/core/plugins.cpp
+)
+add_library(vinox::plugins ALIAS vinox_plugins)
+set_target_properties(vinox_plugins PROPERTIES EXPORT_NAME plugins)
+
+target_link_libraries(vinox_plugins PRIVATE vinox::core vinox::storage nlohmann_json::nlohmann_json)
+if(TARGET vinox_openvino)
+    target_link_libraries(vinox_plugins PRIVATE vinox::openvino)
+endif()
+target_compile_definitions(vinox_plugins PRIVATE VINOX_BUILD_SHARED)
+target_include_directories(vinox_plugins
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+# Standalone Dynamic Tool Plugins
+foreach(plug_name time math fs retrieval)
+    add_library(vinox_plugin_${plug_name} SHARED
+        src/plugins/${plug_name}/plugin_${plug_name}.cpp
+    )
+    target_link_libraries(vinox_plugin_${plug_name} PRIVATE vinox::plugins vinox::core)
+    target_compile_definitions(vinox_plugin_${plug_name} PRIVATE VINOX_BUILD_SHARED)
+    target_include_directories(vinox_plugin_${plug_name}
+        PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+    )
+    if(MSVC)
+        target_compile_options(vinox_plugin_${plug_name} PRIVATE /W4 /permissive- /EHsc)
+    else()
+        target_compile_options(vinox_plugin_${plug_name} PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_custom_command(TARGET vinox_plugin_${plug_name} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:vinox_plugin_${plug_name}>/plugins
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:vinox_plugin_${plug_name}> $<TARGET_FILE_DIR:vinox_plugin_${plug_name}>/plugins/
+    )
+endforeach()
+
+add_library(vinox_transport_linep SHARED
+    src/transport/vinox_transport_linep.cpp
+)
+add_library(vinox::transport_linep ALIAS vinox_transport_linep)
+set_target_properties(vinox_transport_linep PROPERTIES EXPORT_NAME transport_linep)
+
+target_link_libraries(vinox_transport_linep PRIVATE vinox::core nlohmann_json::nlohmann_json)
+if(TARGET vinox_openvino)
+    target_link_libraries(vinox_transport_linep PRIVATE vinox::openvino)
+endif()
+target_compile_definitions(vinox_transport_linep PRIVATE VINOX_BUILD_SHARED)
+target_include_directories(vinox_transport_linep
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+if(MSVC)
+    target_compile_options(vinox_transport_linep PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(vinox_transport_linep PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 add_executable(vinox_sandbox_worker
     src/sandbox/worker_main.cpp
 )
@@ -268,7 +330,7 @@ endif()
 add_executable(vinox_cli
     src/cli/main.cpp
 )
-target_link_libraries(vinox_cli PRIVATE vinox::core vinox::serving vinox::storage vinox::agent nlohmann_json::nlohmann_json)
+target_link_libraries(vinox_cli PRIVATE vinox::core vinox::serving vinox::storage vinox::agent vinox::plugins nlohmann_json::nlohmann_json)
 if(TARGET vinox_openvino)
     target_link_libraries(vinox_cli PRIVATE vinox::openvino)
 endif()
@@ -277,6 +339,59 @@ if(MSVC)
     target_compile_options(vinox_cli PRIVATE /W4 /permissive- /EHsc)
 else()
     target_compile_options(vinox_cli PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_executable(vinox_server
+    src/server/main.cpp
+    src/server/http_server.cpp
+    src/server/openai_handlers.cpp
+    src/server/agent_handlers.cpp
+)
+target_include_directories(vinox_server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(vinox_server PRIVATE vinox::core vinox::serving vinox::storage vinox::agent vinox::plugins nlohmann_json::nlohmann_json spdlog::spdlog)
+if(TARGET vinox_openvino)
+    target_link_libraries(vinox_server PRIVATE vinox::openvino)
+endif()
+if(WIN32)
+    target_link_libraries(vinox_server PRIVATE ws2_32)
+endif()
+set_target_properties(vinox_server PROPERTIES OUTPUT_NAME "vinox-server")
+if(MSVC)
+    target_compile_options(vinox_server PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(vinox_server PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+find_package(Qt6 COMPONENTS Core Gui Qml Quick QuickControls2 QUIET)
+
+if(TARGET Qt6::Core AND TARGET Qt6::Quick)
+    add_executable(vinox_gui
+        src/gui/main.cpp
+        src/gui/local_backend.cpp
+        src/gui/remote_backend.cpp
+        src/gui/gui_bridge.cpp
+        src/gui/viewmodels/chat_viewmodel.cpp
+        src/gui/viewmodels/plan_viewmodel.cpp
+        src/gui/viewmodels/agent_viewmodel.cpp
+        src/gui/viewmodels/storage_viewmodel.cpp
+        src/gui/viewmodels/diff_viewmodel.cpp
+    )
+    target_include_directories(vinox_gui PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(vinox_gui PRIVATE vinox::core vinox::serving vinox::storage vinox::agent nlohmann_json::nlohmann_json spdlog::spdlog)
+    if(TARGET vinox_openvino)
+        target_link_libraries(vinox_gui PRIVATE vinox::openvino)
+    endif()
+    if(WIN32)
+        target_link_libraries(vinox_gui PRIVATE ws2_32 ole32 shell32)
+    endif()
+    target_compile_definitions(vinox_gui PRIVATE VINOX_WITH_QT=1)
+    target_link_libraries(vinox_gui PRIVATE Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2)
+    set_target_properties(vinox_gui PROPERTIES OUTPUT_NAME "vinox-gui")
+    if(MSVC)
+        target_compile_options(vinox_gui PRIVATE /W4 /permissive- /EHsc)
+    else()
+        target_compile_options(vinox_gui PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
 endif()
 
 if(BUILD_TESTING)
@@ -346,6 +461,11 @@ if(BUILD_TESTING)
     add_dependencies(vinox_cli_process_smoke vinox_cli vinox_sandbox_worker)
     add_test(NAME cli_process_smoke COMMAND vinox_cli_process_smoke)
 
+    add_executable(vinox_linep_transport_smoke tests/linep_transport_smoke.cpp)
+    target_include_directories(vinox_linep_transport_smoke PRIVATE include)
+    target_link_libraries(vinox_linep_transport_smoke PRIVATE vinox::transport_linep vinox::core)
+    add_test(NAME linep_transport_smoke COMMAND vinox_linep_transport_smoke)
+
     add_test(NAME audit_smoke COMMAND vinox_cli --audit)
     if(WIN32 AND VINOX_OPENVINO_SDK_ROOT)
         set_tests_properties(audit_smoke cli_process_smoke PROPERTIES ENVIRONMENT
@@ -387,22 +507,118 @@ if(BUILD_TESTING)
         target_link_libraries(vinox_minja_template_runtime_smoke PRIVATE nlohmann_json::nlohmann_json)
         add_test(NAME minja_template_runtime_smoke COMMAND vinox_minja_template_runtime_smoke)
 
+        add_executable(vinox_nvme_cache_smoke tests/nvme_cache_smoke.cpp)
+        target_link_libraries(vinox_nvme_cache_smoke PRIVATE vinox::openvino vinox::core)
+        add_test(NAME nvme_cache_smoke COMMAND vinox_nvme_cache_smoke)
+
+        add_executable(vinox_nvme_mmap_cache_benchmark tests/nvme_mmap_cache_benchmark.cpp)
+        target_link_libraries(vinox_nvme_mmap_cache_benchmark PRIVATE vinox::openvino vinox::core psapi)
+
         add_executable(vinox_qwen2_5_eval_smoke tests/qwen2_5_eval_smoke.cpp)
         target_link_libraries(vinox_qwen2_5_eval_smoke PRIVATE vinox::core vinox::openvino vinox::serving vinox::storage nlohmann_json::nlohmann_json)
         file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/tests/corpus DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/tests)
         add_test(NAME qwen2_5_eval_smoke COMMAND vinox_qwen2_5_eval_smoke)
 
+        file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/schemas DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+        add_executable(vinox_server_smoke
+            tests/server_smoke.cpp
+            src/server/http_server.cpp
+            src/server/openai_handlers.cpp
+            src/server/agent_handlers.cpp
+        )
+        target_include_directories(vinox_server_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        target_link_libraries(vinox_server_smoke PRIVATE vinox::core vinox::serving vinox::storage vinox::agent vinox::plugins nlohmann_json::nlohmann_json spdlog::spdlog)
+        if(TARGET vinox_openvino)
+            target_link_libraries(vinox_server_smoke PRIVATE vinox::openvino)
+        endif()
+        if(WIN32)
+            target_link_libraries(vinox_server_smoke PRIVATE ws2_32)
+        endif()
+        add_test(NAME server_smoke COMMAND vinox_server_smoke)
+        add_test(NAME server_help_smoke COMMAND vinox_server --help)
+
+        add_executable(vinox_gui_viewmodel_smoke
+            tests/gui_viewmodel_smoke.cpp
+            src/gui/local_backend.cpp
+            src/gui/remote_backend.cpp
+            src/gui/viewmodels/chat_viewmodel.cpp
+            src/gui/viewmodels/plan_viewmodel.cpp
+            src/gui/viewmodels/agent_viewmodel.cpp
+            src/gui/viewmodels/storage_viewmodel.cpp
+            src/gui/viewmodels/diff_viewmodel.cpp
+        )
+        target_include_directories(vinox_gui_viewmodel_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        target_link_libraries(vinox_gui_viewmodel_smoke PRIVATE vinox::core vinox::serving vinox::storage vinox::agent vinox::plugins nlohmann_json::nlohmann_json spdlog::spdlog)
+        if(TARGET vinox_openvino)
+            target_link_libraries(vinox_gui_viewmodel_smoke PRIVATE vinox::openvino)
+        endif()
+        if(WIN32)
+            target_link_libraries(vinox_gui_viewmodel_smoke PRIVATE ws2_32)
+        endif()
+        add_test(NAME gui_viewmodel_smoke COMMAND vinox_gui_viewmodel_smoke)
+
+        add_executable(vinox_plugins_smoke tests/plugins_smoke.cpp)
+        target_link_libraries(vinox_plugins_smoke PRIVATE vinox::core vinox::storage vinox::plugins nlohmann_json::nlohmann_json)
+        add_test(NAME plugins_smoke COMMAND vinox_plugins_smoke)
+
+        add_executable(vinox_embedding_smoke tests/embedding_smoke.cpp)
+        target_link_libraries(vinox_embedding_smoke PRIVATE vinox::core vinox::openvino)
+        add_test(NAME embedding_smoke COMMAND vinox_embedding_smoke)
+
         if(WIN32 AND VINOX_OPENVINO_SDK_ROOT)
-            set_tests_properties(openvino_abi_smoke reasoning_channel_smoke model_protocol_compiler_smoke qwen2_5_eval_smoke cli_process_smoke template_protocol_evidence_probe realtime_evidence_harness PROPERTIES ENVIRONMENT
-                "PATH=C:/ai/openvino_genai_2026.2.1/openvino_genai_windows_2026.2.1.0_x86_64/runtime/bin/intel64/Release\\\;C:/ai/openvino_genai_2026.2.1/openvino_genai_windows_2026.2.1.0_x86_64/runtime/3rdparty/tbb/bin\\\;${VINOX_OPENVINO_SDK_ROOT}/runtime/bin/intel64/$<CONFIG>\\\;${VINOX_OPENVINO_SDK_ROOT}/runtime/3rdparty/tbb/bin\\\;$ENV{PATH}"
+            set_tests_properties(openvino_abi_smoke reasoning_channel_smoke model_protocol_compiler_smoke qwen2_5_eval_smoke cli_process_smoke template_protocol_evidence_probe realtime_evidence_harness nvme_cache_smoke server_smoke server_help_smoke gui_viewmodel_smoke plugins_smoke embedding_smoke PROPERTIES ENVIRONMENT
+                "PATH=${VINOX_OPENVINO_SDK_ROOT}/runtime/bin/intel64/Release\\\;${VINOX_OPENVINO_SDK_ROOT}/runtime/bin/intel64/Debug\\\;${VINOX_OPENVINO_SDK_ROOT}/runtime/3rdparty/tbb/bin\\\;${VINOX_OPENVINO_SDK_ROOT}/runtime/bin/intel64/$<CONFIG>\\\;$ENV{PATH}"
             )
+            set_tests_properties(realtime_evidence_harness PROPERTIES TIMEOUT 2400)
         endif()
         set_tests_properties(qwen2_5_eval_smoke PROPERTIES SKIP_RETURN_CODE 77)
     endif()
 endif()
 
+# ==============================================================================
+# Standalone Distribution: Automatic Bundling of all Runtime Dependencies
+# ==============================================================================
+if(WIN32)
+    # If Qt6 MinGW is installed on Windows, automatically build the Qt Quick GUI and deploy Qt runtime
+    if(EXISTS "C:/Qt/6.10.1/mingw_64/bin/qmake.exe")
+        add_custom_target(vinox_qt_gui_build ALL
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/gui-qt6"
+            COMMAND ${CMAKE_COMMAND} -G Ninja -S "${CMAKE_SOURCE_DIR}/src/gui" -B "${CMAKE_BINARY_DIR}/gui-qt6" -DCMAKE_CXX_COMPILER="C:/Qt/Tools/mingw1310_64/bin/g++.exe" -DCMAKE_C_COMPILER="C:/Qt/Tools/mingw1310_64/bin/gcc.exe" -DCMAKE_PREFIX_PATH="C:/Qt/6.10.1/mingw_64"
+            COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}/gui-qt6"
+            COMMAND "C:/Qt/6.10.1/mingw_64/bin/windeployqt.exe" --qmldir "${CMAKE_SOURCE_DIR}/src/gui/qml" "${CMAKE_BINARY_DIR}/gui-qt6/vinox-gui.exe"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_BINARY_DIR}/gui-qt6/vinox-gui.exe" "${CMAKE_CURRENT_BINARY_DIR}/vinox-gui.exe"
+            COMMENT "Building native Qt Quick Desktop GUI and deploying Qt runtime"
+        )
+        add_dependencies(vinox_qt_gui_build vinox_core vinox_serving vinox_storage vinox_agent vinox_openvino)
+    endif()
+
+    add_custom_target(vinox_bundle_runtime_dlls ALL
+        COMMAND ${CMAKE_COMMAND} -DDEST="${CMAKE_CURRENT_BINARY_DIR}" -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/bundle_runtime_dlls.cmake"
+        COMMENT "Bundling all standalone runtime DLLs into build directory"
+    )
+    add_dependencies(vinox_cli vinox_bundle_runtime_dlls)
+    add_dependencies(vinox_server vinox_bundle_runtime_dlls)
+    if(TARGET vinox_gui)
+        add_dependencies(vinox_gui vinox_bundle_runtime_dlls)
+    endif()
+    if(TARGET vinox_qt_gui_build)
+        add_dependencies(vinox_bundle_runtime_dlls vinox_qt_gui_build)
+    endif()
+
+    install(CODE "
+        file(TO_CMAKE_PATH \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}\" _dest)
+        string(REPLACE \"\\\"\" \"\" _dest \"\${_dest}\")
+        execute_process(COMMAND \"${CMAKE_COMMAND}\" -DDEST=\${_dest} -P \"${CMAKE_CURRENT_SOURCE_DIR}/cmake/bundle_runtime_dlls.cmake\")
+    ")
+endif()
+
+set(VINOX_INSTALL_TARGETS vinox_core vinox_serving vinox_storage vinox_agent vinox_plugins vinox_sandbox_worker vinox_mcp_server vinox_cli vinox_server)
+if(TARGET vinox_gui)
+    list(APPEND VINOX_INSTALL_TARGETS vinox_gui)
+endif()
+
 install(
-    TARGETS vinox_core vinox_serving vinox_storage vinox_cli
+    TARGETS ${VINOX_INSTALL_TARGETS}
     EXPORT vinoxTargets
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}

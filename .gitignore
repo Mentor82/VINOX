@@ -1,7 +1,33 @@
 /out/
+/build/
 /.cache/
 /.vs/
 /.vscode/ipch/
 *.user
 *.suo
 *.VC.db
+
+# Build artifacts & temporary files
+*.obj
+*.exe
+*.lib
+*.dll
+*.pdb
+*.exp
+*.ilk
+
+# Database and runtime state
+*.db
+*.db-shm
+*.db-wal
+*.log
+test_session.txt
+qwen2_5_eval_results.json
+
+# Cache directories & benchmarks
+/cache/
+/vcpkg_installed/
+.*_overlay/
+.*_target/
+.cli_target_workspace/
+
