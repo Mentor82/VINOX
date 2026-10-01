@@ -29,13 +29,13 @@ int run_cli_process_with_input(const std::string& cli_args, const std::string& i
     char abs_vcpkg_rel[MAX_PATH] = {0};
     GetFullPathNameA("out\\windows-msvc-debug\\vcpkg_installed\\x64-windows\\bin", MAX_PATH, abs_vcpkg_rel, NULL);
 
-    std::string ov_genai_dbg = "C:\\ai\\openvino_genai_2026.2.1\\openvino_genai_windows_2026.2.1.0_x86_64\\runtime\\bin\\intel64\\Debug";
-    std::string ov_genai_rel = "C:\\ai\\openvino_genai_2026.2.1\\openvino_genai_windows_2026.2.1.0_x86_64\\runtime\\bin\\intel64\\Release";
-    std::string ov_genai_tbb = "C:\\ai\\openvino_genai_2026.2.1\\openvino_genai_windows_2026.2.1.0_x86_64\\runtime\\3rdparty\\tbb\\bin";
-
-    std::string ov_sdk = "C:\\ai\\openvino_sdk\\openvino_2024.6.0";
+    std::string ov_sdk = "C:\\ai\\openvino_genai_2026.3.0\\openvino_genai_windows_2026.3.0.0_x86_64";
     const char* env_ov = std::getenv("VINOX_OPENVINO_SDK_ROOT");
     if (env_ov && strlen(env_ov) > 0) ov_sdk = env_ov;
+
+    std::string ov_genai_dbg = ov_sdk + "\\runtime\\bin\\intel64\\Debug";
+    std::string ov_genai_rel = ov_sdk + "\\runtime\\bin\\intel64\\Release";
+    std::string ov_genai_tbb = ov_sdk + "\\runtime\\3rdparty\\tbb\\bin";
 
     std::string ov_bin = ov_sdk + "\\runtime\\bin\\intel64\\Debug";
     std::string ov_tbb = ov_sdk + "\\runtime\\3rdparty\\tbb\\bin";
@@ -138,13 +138,13 @@ int test_target_mutation_after_review_in_persistent_process() {
     char abs_vcpkg_rel[MAX_PATH] = {0};
     GetFullPathNameA("out\\windows-msvc-debug\\vcpkg_installed\\x64-windows\\bin", MAX_PATH, abs_vcpkg_rel, NULL);
 
-    std::string ov_genai_dbg = "C:\\ai\\openvino_genai_2026.2.1\\openvino_genai_windows_2026.2.1.0_x86_64\\runtime\\bin\\intel64\\Debug";
-    std::string ov_genai_rel = "C:\\ai\\openvino_genai_2026.2.1\\openvino_genai_windows_2026.2.1.0_x86_64\\runtime\\bin\\intel64\\Release";
-    std::string ov_genai_tbb = "C:\\ai\\openvino_genai_2026.2.1\\openvino_genai_windows_2026.2.1.0_x86_64\\runtime\\3rdparty\\tbb\\bin";
-
-    std::string ov_sdk = "C:\\ai\\openvino_sdk\\openvino_2024.6.0";
+    std::string ov_sdk = "C:\\ai\\openvino_genai_2026.3.0\\openvino_genai_windows_2026.3.0.0_x86_64";
     const char* env_ov = std::getenv("VINOX_OPENVINO_SDK_ROOT");
     if (env_ov && strlen(env_ov) > 0) ov_sdk = env_ov;
+
+    std::string ov_genai_dbg = ov_sdk + "\\runtime\\bin\\intel64\\Debug";
+    std::string ov_genai_rel = ov_sdk + "\\runtime\\bin\\intel64\\Release";
+    std::string ov_genai_tbb = ov_sdk + "\\runtime\\3rdparty\\tbb\\bin";
 
     std::string ov_bin = ov_sdk + "\\runtime\\bin\\intel64\\Debug";
     std::string ov_tbb = ov_sdk + "\\runtime\\3rdparty\\tbb\\bin";
