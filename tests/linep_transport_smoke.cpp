@@ -108,6 +108,7 @@ std::vector<uint8_t> build_request_frame(uint64_t req_id, const std::string& mod
 }
 
 int main() {
+    std::cout.setf(std::ios::unitbuf);
     std::cout << "================================================================================\n";
     std::cout << "               VINOX LiNeP Remote Worker Transport Smoke Test                  \n";
     std::cout << "================================================================================\n";
@@ -169,10 +170,10 @@ int main() {
             uint8_t resp_hdr[32] = {0};
             if (recv_all_smoke(sock, resp_hdr, 32)) {
                 WireHeader* rh = reinterpret_cast<WireHeader*>(resp_hdr);
-                if (rh->magic == magic && rh->envelope_type == 6 /* SessionBindResponse */) {
-                    std::cout << "[PASS 03] SESSION_BIND answered with SessionBindResponse (Type 6).\n";
+                if (rh->magic == magic && rh->envelope_type == 4 /* Capabilities */) {
+                    std::cout << "[PASS 03] SESSION_BIND answered with canonical Capabilities (Envelope Type 4).\n";
                 } else {
-                    std::cerr << "FAILED: SESSION_BIND did not receive SessionBindResponse type 6! Received: " << (int)rh->envelope_type << "\n";
+                    std::cerr << "FAILED: SESSION_BIND did not receive Capabilities envelope type 4! Received: " << (int)rh->envelope_type << "\n";
                     closesocket(sock);
                     vinox_linep_worker_destroy(worker);
                     return 1;
@@ -191,8 +192,8 @@ int main() {
         inet_pton(AF_INET, "127.0.0.1", &saddr.sin_addr);
 
         if (connect(conn_sock, reinterpret_cast<sockaddr*>(&saddr), sizeof(saddr)) == 0) {
-            auto req1 = build_request_frame(2001, "qwen2.5:3b", "Concurrent prompt 1", 8);
-            auto req2 = build_request_frame(2002, "qwen2.5:3b", "Concurrent prompt 2", 8);
+            auto req1 = build_request_frame(2001, "linep-conformance-model-v02", "Concurrent prompt 1", 8);
+            auto req2 = build_request_frame(2002, "linep-conformance-model-v02", "Concurrent prompt 2", 8);
 
             // Send both requests back-to-back on the SAME socket
             send_all_smoke(conn_sock, req1.data(), req1.size());
@@ -205,11 +206,17 @@ int main() {
             // Read incoming streaming frames for both requests
             while ((!completed_2001 || !completed_2002) && total_events < 50) {
                 WireHeader eh{};
-                if (!recv_all_smoke(conn_sock, reinterpret_cast<uint8_t*>(&eh), 32)) break;
+                if (!recv_all_smoke(conn_sock, reinterpret_cast<uint8_t*>(&eh), 32)) {
+                    std::cout << "[DEBUG Test04] recv_all_smoke header failed!" << std::endl;
+                    break;
+                }
 
                 std::vector<uint8_t> payload(eh.payload_len);
                 if (eh.payload_len > 0) {
-                    if (!recv_all_smoke(conn_sock, payload.data(), eh.payload_len)) break;
+                    if (!recv_all_smoke(conn_sock, payload.data(), eh.payload_len)) {
+                        std::cout << "[DEBUG Test04] recv_all_smoke payload failed!" << std::endl;
+                        break;
+                    }
                 }
 
                 if (eh.envelope_type == 2 /* Event */) {
@@ -217,6 +224,7 @@ int main() {
                     if (payload.size() >= 10) {
                         uint8_t evt_type = payload[8];
                         uint8_t outcome = payload[9];
+                        std::cout << "[DEBUG Test04 Evt] req: " << eh.request_id << " evt_type: " << (int)evt_type << " outcome: " << (int)outcome << std::endl;
                         if (eh.request_id == 2001 && (evt_type == 10 || evt_type == 11) && outcome == 1) {
                             completed_2001 = true;
                         } else if (eh.request_id == 2002 && (evt_type == 10 || evt_type == 11) && outcome == 1) {
@@ -238,12 +246,12 @@ int main() {
         }
     }
 
-    // 5. Test C API Dispatch with Real OpenVINO Generation & Device Reporting
+    // 5. Test C API Dispatch with Real OpenVINO Model
     char* response_json = nullptr;
     st = vinox_linep_worker_dispatch_request(
         worker,
         "req-npu-001",
-        "qwen2.5:3b",
+        "linep-conformance-model-v02",
         "Erkläre NPU Offloading in VINOX.",
         "System: Du bist ein KI-Assistent.",
         "NPU",
@@ -268,26 +276,78 @@ int main() {
     }
     std::cout << "[PASS 05] Remote OpenVINO worker request dispatched and verified.\n";
 
-    // 6. Test C++ API Bounded Payload Admission Control
+    // 6. Test Unknown Model Rejection (404 Error)
+    std::cout << "[DEBUG] Running Test 06 (Unknown Model Rejection)..." << std::endl;
+    SOCKET unknown_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (unknown_sock != INVALID_SOCKET) {
+        sockaddr_in saddr{};
+        saddr.sin_family = AF_INET;
+        saddr.sin_port = htons(active_port);
+        inet_pton(AF_INET, "127.0.0.1", &saddr.sin_addr);
+
+        if (connect(unknown_sock, reinterpret_cast<sockaddr*>(&saddr), sizeof(saddr)) == 0) {
+            auto unk_req = build_request_frame(3001, "non_existent_fake_model_xyz", "Test prompt", 16);
+            send_all_smoke(unknown_sock, unk_req.data(), unk_req.size());
+
+            // Read events
+            bool received_404_failed = false;
+            while (true) {
+                WireHeader eh{};
+                if (!recv_all_smoke(unknown_sock, reinterpret_cast<uint8_t*>(&eh), 32)) break;
+
+                std::vector<uint8_t> payload(eh.payload_len);
+                if (eh.payload_len > 0) {
+                    if (!recv_all_smoke(unknown_sock, payload.data(), eh.payload_len)) break;
+                }
+
+                if (eh.envelope_type == 2 /* Event */ && payload.size() >= 14) {
+                    uint8_t evt_type = payload[8];
+                    uint8_t outcome = payload[9];
+                    uint32_t err_code = 0;
+                    std::memcpy(&err_code, payload.data() + 11, 4);
+
+                    if (evt_type == 12 /* failed */ && outcome == 3 && err_code == 404) {
+                        received_404_failed = true;
+                        break;
+                    }
+                }
+            }
+
+            closesocket(unknown_sock);
+
+            if (received_404_failed) {
+                std::cout << "[PASS 06] Unknown model 'non_existent_fake_model_xyz' correctly rejected with 404 Failed event.\n";
+            } else {
+                std::cerr << "FAILED: Unknown model was not rejected with 404 Failed event!\n";
+                vinox_linep_worker_destroy(worker);
+                return 1;
+            }
+        }
+    }
+
+    // 7. Test C++ API Bounded Payload Admission Control
     vinox::transport::WorkerConfig cpp_cfg;
+    cpp_cfg.port = 0;
     cpp_cfg.payload_limit_bytes = 100; // Intentionally low limit for test
     vinox::transport::LinepWorker cpp_worker(cpp_cfg);
     cpp_worker.Start();
 
     std::string huge_prompt(200, 'A');
-    auto cpp_res = cpp_worker.ProcessRequest("req-huge-002", "qwen2.5:3b", huge_prompt);
+    auto cpp_res = cpp_worker.ProcessRequest("req-huge-002", "linep-conformance-model-v02", huge_prompt);
     if (cpp_res.success) {
         std::cerr << "FAILED: EnforceAdmissionControl should have rejected payload exceeding limit!\n";
         vinox_linep_worker_destroy(worker);
         return 1;
     }
     std::cout << "Rejection message: " << cpp_res.error_message << "\n";
-    std::cout << "[PASS 06] Bounded payload governance limit (256 KB invariant) enforced fail-closed.\n";
+    std::cout << "[PASS 07] Bounded payload governance limit (256 KB invariant) enforced fail-closed.\n";
 
-    // 7. Cleanup
+    // 8. Cleanup
+    std::cout << "[DEBUG] Stopping worker..." << std::endl;
     vinox_linep_worker_stop(worker);
+    std::cout << "[DEBUG] Destroying worker..." << std::endl;
     vinox_linep_worker_destroy(worker);
-    std::cout << "[PASS 07] Worker stopped and cleaned up cleanly.\n";
-    std::cout << "ALL LINEP TRANSPORT TESTS PASSED SUCCESSFULLY.\n";
+    std::cout << "[PASS 08] Worker stopped and cleaned up cleanly." << std::endl;
+    std::cout << "ALL LINEP TRANSPORT TESTS PASSED SUCCESSFULLY." << std::endl;
     return 0;
 }

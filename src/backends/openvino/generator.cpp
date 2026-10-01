@@ -1233,8 +1233,7 @@ vinox_status vinox_model_generate_stream(
             }
             mock_tokens++;
             if (options->max_new_tokens > 0 && mock_tokens > options->max_new_tokens) {
-                last_error = "Global generation hard cap exceeded";
-                return VINOX_STATUS_OUT_OF_RANGE;
+                break; // Complete generation cleanly when max_new_tokens budget is reached
             }
             if (callback(pair.first, pair.second.data(), pair.second.size(), user_data) != 0) {
                 last_error = "Generation stream interrupted by callback";
