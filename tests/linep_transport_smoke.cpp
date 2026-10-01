@@ -81,9 +81,9 @@ void append_str_u32(std::vector<uint8_t>& buf, const std::string& s) {
     buf.insert(buf.end(), s.begin(), s.end());
 }
 
-std::vector<uint8_t> build_request_frame(uint64_t req_id, const std::string& model, const std::string& prompt, uint32_t max_tokens = 16) {
+std::vector<uint8_t> build_request_frame(uint64_t req_id, const std::string& model, const std::string& prompt, uint32_t max_tokens = 16, uint8_t profile = 1) {
     std::vector<uint8_t> payload;
-    append_u8(payload, 1); // profile = generate
+    append_u8(payload, profile); // 1 = generate, 2 = chat, 3 = embed
     append_str_u16(payload, model);
     append_str_u32(payload, prompt);
     append_u32(payload, max_tokens);
@@ -156,29 +156,49 @@ int main() {
         inet_pton(AF_INET, "127.0.0.1", &saddr.sin_addr);
 
         if (connect(sock, reinterpret_cast<sockaddr*>(&saddr), sizeof(saddr)) == 0) {
-            // 1. Send plain SL0 SESSION_BIND (flags = 0x00)
+            // 1. Send plain SL0 SESSION_BIND (flags = 0x00). Per LiNeP V0.2, an
+            // unsigned bind on an SL0 worker gets NO reply (never a Capabilities
+            // frame). Verify that by then sending an explicit Capabilities request
+            // (Envelope Type 4) on the same connection: if the bind had wrongly
+            // replied too, this would be the SECOND frame received, with the wrong
+            // request_id, and the check below would fail.
             uint8_t bind_hdr[32] = {0};
             uint32_t magic = 0x504E4C32;
             std::memcpy(bind_hdr, &magic, 4);
             bind_hdr[4] = 0; bind_hdr[5] = 2;
             bind_hdr[6] = 5; // SessionBind
             bind_hdr[7] = 0x00; // Plain SL0 (No Auth Extension)
-            uint64_t req_id = 999;
-            std::memcpy(bind_hdr + 8, &req_id, 8);
-
+            uint64_t bind_req_id = 999;
+            std::memcpy(bind_hdr + 8, &bind_req_id, 8);
             send_all_smoke(sock, bind_hdr, sizeof(bind_hdr));
+
+            uint8_t caps_hdr[32] = {0};
+            std::memcpy(caps_hdr, &magic, 4);
+            caps_hdr[4] = 0; caps_hdr[5] = 2;
+            caps_hdr[6] = 4; // Capabilities
+            caps_hdr[7] = 0x00;
+            uint64_t caps_req_id = 1001;
+            std::memcpy(caps_hdr + 8, &caps_req_id, 8);
+            send_all_smoke(sock, caps_hdr, sizeof(caps_hdr));
 
             uint8_t resp_hdr[32] = {0};
             if (recv_all_smoke(sock, resp_hdr, 32)) {
                 WireHeader* rh = reinterpret_cast<WireHeader*>(resp_hdr);
-                if (rh->magic == magic && rh->envelope_type == 4 /* Capabilities */) {
-                    std::cout << "[PASS 03] SESSION_BIND answered with canonical Capabilities (Envelope Type 4).\n";
+                uint64_t resp_req_id = 0;
+                std::memcpy(&resp_req_id, resp_hdr + 8, 8);
+                if (rh->magic == magic && rh->envelope_type == 4 /* Capabilities */ && resp_req_id == caps_req_id) {
+                    std::cout << "[PASS 03] SESSION_BIND got no reply; the following Capabilities request answered correctly (Envelope Type 4).\n";
                 } else {
-                    std::cerr << "FAILED: SESSION_BIND did not receive Capabilities envelope type 4! Received: " << (int)rh->envelope_type << "\n";
+                    std::cerr << "FAILED: expected only the Capabilities reply (req_id " << caps_req_id << ")! Received envelope_type=" << (int)rh->envelope_type << " req_id=" << resp_req_id << "\n";
                     closesocket(sock);
                     vinox_linep_worker_destroy(worker);
                     return 1;
                 }
+            } else {
+                std::cerr << "FAILED: no Capabilities reply received after SESSION_BIND.\n";
+                closesocket(sock);
+                vinox_linep_worker_destroy(worker);
+                return 1;
             }
             closesocket(sock);
         }
@@ -216,6 +236,52 @@ int main() {
                     }
                 }
                 closesocket(sl1_sock);
+            }
+        }
+
+        // 3c. Embed profile fails closed (501) when no linep.served_embedding_model
+        // is configured, instead of returning a fabricated vector.
+        SOCKET embed_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (embed_sock != INVALID_SOCKET) {
+            sockaddr_in saddr{};
+            saddr.sin_family = AF_INET;
+            saddr.sin_port = htons(active_port);
+            inet_pton(AF_INET, "127.0.0.1", &saddr.sin_addr);
+
+            if (connect(embed_sock, reinterpret_cast<sockaddr*>(&saddr), sizeof(saddr)) == 0) {
+                auto embed_req = build_request_frame(1500, "unconfigured-embedding-model", "test text", 0, 3 /* embed */);
+                send_all_smoke(embed_sock, embed_req.data(), embed_req.size());
+
+                bool received_501_failed = false;
+                while (true) {
+                    WireHeader eh{};
+                    if (!recv_all_smoke(embed_sock, reinterpret_cast<uint8_t*>(&eh), 32)) break;
+
+                    std::vector<uint8_t> payload(eh.payload_len);
+                    if (eh.payload_len > 0) {
+                        if (!recv_all_smoke(embed_sock, payload.data(), eh.payload_len)) break;
+                    }
+
+                    if (eh.envelope_type == 2 /* Event */ && payload.size() >= 14) {
+                        uint8_t evt_type = payload[8];
+                        uint8_t outcome = payload[9];
+                        uint32_t err_code = 0;
+                        std::memcpy(&err_code, payload.data() + 11, 4);
+                        if (evt_type == 12 /* failed */ && outcome == 3 && err_code == 501) {
+                            received_501_failed = true;
+                            break;
+                        }
+                    }
+                }
+                closesocket(embed_sock);
+
+                if (received_501_failed) {
+                    std::cout << "[PASS 03c] Embed profile correctly failed closed (501) with no embedding model configured (no fabricated vector).\n";
+                } else {
+                    std::cerr << "FAILED: embed profile did not fail closed with 501 when unconfigured!\n";
+                    vinox_linep_worker_destroy(worker);
+                    return 1;
+                }
             }
         }
     }

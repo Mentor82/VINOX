@@ -1,6 +1,9 @@
 #include "vinox/linep.h"
 #include "vinox/linep.hpp"
 #include "vinox/openvino.h"
+#include "vinox/embedding.h"
+#include "vinox/embedding.hpp"
+#include "vinox/serving.hpp"
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -203,6 +206,28 @@ bool recv_all(SOCKET fd, uint8_t* buf, size_t len) {
     return true;
 }
 
+// Real embedding vector plus its provenance, attached to a type-7 (embedding_result)
+// event. There is no fake/default state: a caller only passes this when it holds an
+// actual OpenVINO-computed vector.
+struct EmbeddingResultData {
+    std::string space_id;
+    std::string model_id;
+    std::string version;
+    uint32_t dim{0};
+    bool l2_normalized{false};
+    bool cosine_metric{true};
+    std::vector<float> vector;
+};
+
+// error.category per the LiNeP V0.2 wire contract: 0 = none, 1 = transient
+// (safe to retry, e.g. busy), 2 = permanent (client/server error, retrying
+// as-is will not help).
+uint8_t ErrorCategoryForCode(uint32_t code) {
+    if (code == 0) return 0;
+    if (code == 503) return 1; // busy: transient, retry later
+    return 2;
+}
+
 } // anonymous namespace
 
 struct ActiveSession {
@@ -239,6 +264,10 @@ struct LinepWorker::Impl {
     std::thread listener_thread;
     std::mutex sessions_mutex;
     std::unordered_map<uint64_t, std::shared_ptr<ActiveSession>> active_sessions;
+
+    std::mutex embedding_mutex;
+    std::unique_ptr<vinox::embedding::EmbeddingEngine> embedding_engine;
+    std::string embedding_engine_model_path; // path the cached engine was loaded from
 
     explicit Impl(const WorkerConfig& cfg) : config(cfg), active_port(cfg.port) {
 #ifdef _WIN32
@@ -368,61 +397,80 @@ struct LinepWorker::Impl {
         return roots;
     }
 
-    bool IsLoadableLlmDirectory(const fs::path& dir_path) {
+    // What the host operator has explicitly released for LiNeP, read from the
+    // "linep" section of config.json. An absent/empty list means nothing is
+    // released: the worker must advertise and serve nothing by default
+    // (ADR 0004 §8 - the local host keeps authority over what leaves it).
+    struct LinepServeConfig {
+        std::vector<std::string> served_models;
+        std::string served_embedding_model;
+    };
+
+    LinepServeConfig ReadLinepServeConfig() {
+        LinepServeConfig out;
         std::error_code ec;
-        if (!fs::is_directory(dir_path, ec)) return false;
-
-        std::string filename = dir_path.filename().string();
-        if (filename.empty() || filename[0] == '.') return false;
-
-        static const std::unordered_set<std::string> ignored_dirs = {
-            "venv", "venvs", "src", "build", "out", "scratch", "sandbox",
-            "trainingdata", "cache", "packaging", "examples", "docs", "cmake", "gui", "thirdparty"
+        fs::path cfg_candidates[] = {
+            fs::path("config.json"),
+            fs::path("C:/ai/openvino/config.json")
         };
 
-        std::string lower_fn = filename;
-        std::transform(lower_fn.begin(), lower_fn.end(), lower_fn.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        if (ignored_dirs.count(lower_fn)) return false;
-
-        // Exclude embedding, TTS, whisper, speech, audio models
-        if (lower_fn.find("bge") != std::string::npos ||
-            lower_fn.find("embed") != std::string::npos ||
-            lower_fn.find("tts") != std::string::npos ||
-            lower_fn.find("whisper") != std::string::npos ||
-            lower_fn.find("speech") != std::string::npos ||
-            lower_fn.find("audio") != std::string::npos ||
-            lower_fn.find("bark") != std::string::npos) {
-            return false;
+        for (const auto& cp : cfg_candidates) {
+            if (!fs::exists(cp, ec)) continue;
+            std::ifstream f(cp);
+            if (!f.is_open()) continue;
+            try {
+                nlohmann::json j;
+                f >> j;
+                if (j.contains("linep") && j["linep"].is_object()) {
+                    const auto& linep_cfg = j["linep"];
+                    if (linep_cfg.contains("served_models") && linep_cfg["served_models"].is_array()) {
+                        for (const auto& entry : linep_cfg["served_models"]) {
+                            if (entry.is_string()) out.served_models.push_back(entry.get<std::string>());
+                        }
+                    }
+                    if (linep_cfg.contains("served_embedding_model") && linep_cfg["served_embedding_model"].is_string()) {
+                        out.served_embedding_model = linep_cfg["served_embedding_model"].get<std::string>();
+                    }
+                }
+                break; // first config.json found wins, regardless of content
+            } catch (...) {}
         }
+        return out;
+    }
 
-        // Require presence of LLM OpenVINO artifacts
-        bool has_llm = fs::exists(dir_path / "openvino_model.xml", ec) ||
-                       fs::exists(dir_path / "openvino_language_model.xml", ec) ||
-                       fs::exists(dir_path / "config.json", ec) ||
-                       fs::exists(dir_path / "manifest.json", ec);
+    // The VINOX model registry is the single authority for "is this directory an
+    // actually loadable OpenVINO LLM pipeline" (same scan used by CLI/server).
+    // Intersected with the explicit linep.served_models allowlist: a model is
+    // only served when both the host operator and the registry agree it is real.
+    std::vector<vinox::serving::ModelInfo> ScanServedModelRegistry() {
+        std::vector<vinox::serving::ModelInfo> result;
+        auto serve_cfg = ReadLinepServeConfig();
+        if (serve_cfg.served_models.empty()) return result;
 
-        return has_llm;
+        std::unordered_set<std::string> served_set(serve_cfg.served_models.begin(), serve_cfg.served_models.end());
+
+        try {
+            vinox::serving::ModelRegistry registry;
+            for (const auto& root : GetConfiguredSearchRoots()) {
+                try {
+                    registry.scan(root.string());
+                } catch (...) { /* best effort: keep scanning remaining roots */ }
+            }
+            size_t n = registry.count();
+            for (size_t i = 0; i < n; ++i) {
+                auto info = registry.get_info(i);
+                if (served_set.count(info.model_id)) {
+                    result.push_back(info);
+                }
+            }
+        } catch (...) {}
+        return result;
     }
 
     std::vector<std::string> GetAvailableLocalModels() {
         std::vector<std::string> models;
-        std::error_code ec;
-        auto search_roots = GetConfiguredSearchRoots();
-
-        for (const auto& root : search_roots) {
-            if (fs::exists(root, ec) && fs::is_directory(root, ec)) {
-                for (const auto& entry : fs::directory_iterator(root, ec)) {
-                    if (ec) break;
-                    if (entry.is_directory(ec)) {
-                        if (IsLoadableLlmDirectory(entry.path())) {
-                            std::string name = entry.path().filename().string();
-                            if (std::find(models.begin(), models.end(), name) == models.end()) {
-                                models.push_back(name);
-                            }
-                        }
-                    }
-                }
-            }
+        for (const auto& m : ScanServedModelRegistry()) {
+            models.push_back(m.model_id);
         }
 
         if (config.allow_mock_models) {
@@ -431,6 +479,39 @@ struct LinepWorker::Impl {
             }
         }
         return models;
+    }
+
+    // Lazily loads (once per worker lifetime) the embedding model explicitly
+    // released via linep.served_embedding_model. Returns NOT_FOUND if that
+    // model isn't configured or isn't present on disk; never falls back to a
+    // different model.
+    vinox_status EnsureEmbeddingEngineLoaded(const std::string& model_id) {
+        std::lock_guard<std::mutex> lock(embedding_mutex);
+        if (embedding_engine && embedding_engine->is_valid()) {
+            return VINOX_STATUS_OK;
+        }
+
+        std::error_code ec;
+        std::string model_path;
+        for (const auto& root : GetConfiguredSearchRoots()) {
+            fs::path candidate = root / model_id;
+            if (fs::exists(candidate, ec) && fs::is_directory(candidate, ec)) {
+                model_path = candidate.string();
+                break;
+            }
+        }
+        if (model_path.empty()) {
+            return VINOX_STATUS_NOT_FOUND;
+        }
+
+        auto engine = std::make_unique<vinox::embedding::EmbeddingEngine>();
+        vinox_status st = engine->load(model_path, "CPU");
+        if (st != VINOX_STATUS_OK) {
+            return st;
+        }
+        embedding_engine = std::move(engine);
+        embedding_engine_model_path = model_path;
+        return VINOX_STATUS_OK;
     }
 
     vinox_status StartServer() {
@@ -554,54 +635,42 @@ struct LinepWorker::Impl {
             write_string_u16(payload, m);
         }
 
-        // 5. supported_embedding_spaces (only report if a real embedding model exists)
-        bool has_embedding_model = false;
-        std::string emb_model_name;
-        std::error_code ec;
+        // 5. supported_embedding_spaces (only report when linep.served_embedding_model
+        // names a model that is actually present and successfully loads)
+        std::string served_embedding_model = ReadLinepServeConfig().served_embedding_model;
+        vinox_embedding_info emb_info{};
+        bool have_emb_info = false;
+        char emb_pool[512] = {0};
 
-        fs::path emb_search_paths[] = {
-            fs::path("C:/ai/models/OpenVINO"),
-            fs::path("models")
-        };
-
-        for (const auto& sp : emb_search_paths) {
-            if (fs::exists(sp, ec) && fs::is_directory(sp, ec)) {
-                for (const auto& entry : fs::directory_iterator(sp, ec)) {
-                    if (ec) break;
-                    std::string fname = entry.path().filename().string();
-                    if (fname.find("bge") != std::string::npos || fname.find("embed") != std::string::npos) {
-                        has_embedding_model = true;
-                        emb_model_name = fname;
-                        break;
-                    }
-                }
-            }
-            if (has_embedding_model) break;
+        if (!served_embedding_model.empty() && EnsureEmbeddingEngineLoaded(served_embedding_model) == VINOX_STATUS_OK) {
+            std::lock_guard<std::mutex> lock(embedding_mutex);
+            emb_info.struct_size = sizeof(emb_info);
+            have_emb_info = (vinox_embedding_get_info(embedding_engine->get(), &emb_info, emb_pool, sizeof(emb_pool)) == VINOX_STATUS_OK);
         }
 
-        if (has_embedding_model) {
+        if (have_emb_info) {
             write_u16(payload, 1);
-            write_string_u16(payload, "text-embedding-3-small");
-            write_string_u16(payload, emb_model_name);
+            write_string_u16(payload, emb_info.space_id ? emb_info.space_id : served_embedding_model);
+            write_string_u16(payload, emb_info.model_id ? emb_info.model_id : served_embedding_model);
             write_string_u16(payload, "v1");
-            write_u32(payload, 768);
-            write_u8(payload, 1); // l2 normalization
+            write_u32(payload, static_cast<uint32_t>(emb_info.dimension));
+            write_u8(payload, emb_info.normalization == VINOX_EMBEDDING_NORM_L2 ? 1 : 0);
             write_u8(payload, 1); // cosine metric
         } else {
-            // Report 0 embedding spaces when no real embedding model is available
+            // Report 0 embedding spaces when no real embedding model is configured/available
             write_u16(payload, 0);
         }
 
         SendWireEnvelope(conn, 4 /* capabilities */, req_id, 0, 0, payload);
     }
 
-    void SendEvent(std::shared_ptr<ClientConnection> conn, uint64_t req_id, uint64_t exec_id, uint32_t out_id, uint64_t event_seq, uint8_t event_type, const std::string& evt_payload, uint8_t outcome = 0, uint32_t err_code = 0, const std::string& err_msg = "") {
+    void SendEvent(std::shared_ptr<ClientConnection> conn, uint64_t req_id, uint64_t exec_id, uint32_t out_id, uint64_t event_seq, uint8_t event_type, const std::string& evt_payload, uint8_t outcome = 0, uint32_t err_code = 0, const std::string& err_msg = "", const EmbeddingResultData* embedding = nullptr) {
         std::vector<uint8_t> payload;
 
         write_u64(payload, event_seq);          // u64 event_seq
         write_u8(payload, event_type);          // u8 event_type
         write_u8(payload, outcome);             // u8 outcome
-        write_u8(payload, err_code ? 2 : 0);    // u8 error.category
+        write_u8(payload, ErrorCategoryForCode(err_code)); // u8 error.category
         write_u32(payload, err_code);           // u32 error.code
         write_string_u16(payload, err_msg);      // u16 str error.message
         write_string_u16(payload, "");           // u16 str error.backend_diagnostic
@@ -609,18 +678,17 @@ struct LinepWorker::Impl {
         uint64_t now_us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
         write_u64(payload, now_us);              // u64 timestamp_us
 
-        if (event_type == 7 /* embedding_result */) {
-            write_string_u16(payload, "text-embedding-3-small");
-            write_string_u16(payload, "bge-m3");
-            write_string_u16(payload, "v1");
-            write_u32(payload, 768); // 768 dimensions
-            write_u8(payload, 1);    // l2
-            write_u8(payload, 1);    // cosine
-            write_u32(payload, 768);
+        if (event_type == 7 /* embedding_result */ && embedding != nullptr) {
+            write_string_u16(payload, embedding->space_id);
+            write_string_u16(payload, embedding->model_id);
+            write_string_u16(payload, embedding->version);
+            write_u32(payload, embedding->dim);
+            write_u8(payload, embedding->l2_normalized ? 1 : 0);
+            write_u8(payload, embedding->cosine_metric ? 1 : 0);
+            write_u32(payload, static_cast<uint32_t>(embedding->vector.size()));
 
-            float val = 1.0f / std::sqrt(768.0f);
-            for (int i = 0; i < 768; ++i) {
-                write_float(payload, val);
+            for (float v : embedding->vector) {
+                write_float(payload, v);
             }
         }
 
@@ -665,44 +733,59 @@ struct LinepWorker::Impl {
         uint64_t seq = 1;
 
         if (profile_val == 3 /* embed */) {
-            std::string emb_model_dir;
-            bool has_real_embedding = false;
-            std::error_code ec;
-            auto search_roots = GetConfiguredSearchRoots();
+            std::string served_embedding_model = ReadLinepServeConfig().served_embedding_model;
+            vinox_status load_st = served_embedding_model.empty()
+                ? VINOX_STATUS_NOT_FOUND
+                : EnsureEmbeddingEngineLoaded(served_embedding_model);
 
-            for (const auto& root : search_roots) {
-                if (fs::exists(root, ec) && fs::is_directory(root, ec)) {
-                    for (const auto& entry : fs::directory_iterator(root, ec)) {
-                        if (ec) break;
-                        std::string fname = entry.path().filename().string();
-                        std::string lower_fname = fname;
-                        std::transform(lower_fname.begin(), lower_fname.end(), lower_fname.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                        if (lower_fname.find("bge") != std::string::npos || lower_fname.find("embed") != std::string::npos) {
-                            has_real_embedding = true;
-                            emb_model_dir = entry.path().string();
-                            break;
-                        }
-                    }
+            if (load_st == VINOX_STATUS_OK) {
+                std::string text = request_payload.empty() ? " " : request_payload;
+                std::vector<float> vec;
+                vinox_status gen_st;
+                {
+                    std::lock_guard<std::mutex> lock(embedding_mutex);
+                    gen_st = embedding_engine->generate(text, vec);
                 }
-                if (has_real_embedding) break;
-            }
 
-            if (has_real_embedding || config.allow_mock_models) {
-                SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 7 /* embedding_result */, "");
-                SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 10 /* completed */, "", 1 /* completed */, 200, "");
+                if (gen_st == VINOX_STATUS_OK) {
+                    vinox_embedding_info info{};
+                    char pool[512] = {0};
+                    bool have_info;
+                    {
+                        std::lock_guard<std::mutex> lock(embedding_mutex);
+                        info.struct_size = sizeof(info);
+                        have_info = (vinox_embedding_get_info(embedding_engine->get(), &info, pool, sizeof(pool)) == VINOX_STATUS_OK);
+                    }
+
+                    EmbeddingResultData emb;
+                    emb.space_id = (have_info && info.space_id) ? info.space_id : served_embedding_model;
+                    emb.model_id = (have_info && info.model_id) ? info.model_id : served_embedding_model;
+                    emb.version = "v1";
+                    emb.dim = static_cast<uint32_t>(vec.size());
+                    emb.l2_normalized = have_info && (info.normalization == VINOX_EMBEDDING_NORM_L2);
+                    emb.cosine_metric = true;
+                    emb.vector = std::move(vec);
+
+                    SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 7 /* embedding_result */, "", 0, 0, "", &emb);
+                    SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 10 /* completed */, "", 1 /* completed */, 200, "");
+                } else {
+                    std::string err_msg = vinox_embedding_last_error();
+                    if (err_msg.empty()) err_msg = "Embedding generation failed";
+                    SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 12 /* failed */, "", 3 /* failed */, 500, err_msg);
+                }
             } else {
-                SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 12 /* failed */, "", 3 /* failed */, 501, "No embedding model available on host worker");
+                SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 12 /* failed */, "", 3 /* failed */, 501, "No embedding model configured/available on host worker");
             }
         } else {
-            // 1. Locate local OpenVINO model directory across configured search roots
+            // 1. Resolve the model against the registry, restricted to what the host
+            // operator explicitly released for LiNeP (linep.served_models). A model
+            // present on disk but not in that allowlist is treated the same as a
+            // model that does not exist (404 below) - the host, not a directory
+            // scan, decides what LiNeP can reach (ADR 0004 §8).
             std::string model_path;
-            std::error_code ec;
-            auto search_roots = GetConfiguredSearchRoots();
-
-            for (const auto& root : search_roots) {
-                fs::path candidate = root / session->model_id;
-                if (fs::exists(candidate, ec) && fs::is_directory(candidate, ec)) {
-                    model_path = candidate.string();
+            for (const auto& m : ScanServedModelRegistry()) {
+                if (m.model_id == session->model_id) {
+                    model_path = m.local_path;
                     break;
                 }
             }
@@ -828,18 +911,20 @@ struct LinepWorker::Impl {
                 break;
             }
             case 5: { // SessionBind
-                bool auth_valid = true;
-                if (config.security_level >= VINOX_LINEP_SL1_TOKEN) {
-                    if (!has_auth_ext) {
-                        auth_valid = false;
-                    }
+                // Per LiNeP V0.2: an unsigned bind gets no reply, and a signed bind
+                // gets a signed SESSION_BIND confirmation - never a CAPABILITIES
+                // frame. A client that wants capabilities sends envelope type 4
+                // separately (handled above), independent of bind state.
+                if (config.security_level == VINOX_LINEP_SL0_LOCAL) {
+                    // has_auth_ext is already rejected at the connection level above
+                    // when running SL0, so a bind that reaches here is a plain,
+                    // unsigned SL0 bind: silently accepted, no reply.
+                    break;
                 }
-                if (auth_valid) {
-                    // Respond with canonical Capabilities (Envelope Type 4)
-                    SendCapabilitiesResponse(conn, hdr.request_id);
-                } else {
-                    SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, 1, 12 /* failed */, "", 3 /* failed */, 401, "SL1 token authentication required");
-                }
+                // SL1+ would need a verified MAC to answer with a signed bind
+                // confirmation; this worker does not implement that verification,
+                // so it fails closed rather than claim trust it cannot back up.
+                SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, 1, 12 /* failed */, "", 3 /* failed */, 401, "SL1+ SessionBind authentication is not implemented on this worker; run it at SL0");
                 break;
             }
             case 1: { // Request

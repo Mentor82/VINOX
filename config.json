@@ -26,5 +26,9 @@
     "database_path": "vinox.db",
     "wal_mode": true,
     "vector_dimensions": 1024
+  },
+  "linep": {
+    "served_models": [],
+    "served_embedding_model": ""
   }
 }

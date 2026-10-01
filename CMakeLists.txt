@@ -291,7 +291,7 @@ add_library(vinox_transport_linep SHARED
 add_library(vinox::transport_linep ALIAS vinox_transport_linep)
 set_target_properties(vinox_transport_linep PROPERTIES EXPORT_NAME transport_linep)
 
-target_link_libraries(vinox_transport_linep PRIVATE vinox::core nlohmann_json::nlohmann_json)
+target_link_libraries(vinox_transport_linep PRIVATE vinox::core vinox::serving nlohmann_json::nlohmann_json)
 if(TARGET vinox_openvino)
     target_link_libraries(vinox_transport_linep PRIVATE vinox::openvino)
 endif()
