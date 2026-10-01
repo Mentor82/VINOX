@@ -1,0 +1,582 @@
+openapi: 3.1.0
+info:
+  title: VINOX Server API
+  version: 0.1.0
+  description: OpenAI-compatible REST & SSE server providing GenAI inference, storage, tools, MCP, and agent runtimes powered by OpenVINO.
+servers:
+  - url: http://127.0.0.1:8080
+    description: Default local loopback server
+
+paths:
+  /health/live:
+    get:
+      summary: Liveness Probe
+      operationId: getLiveness
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /health/ready:
+    get:
+      summary: Readiness Probe
+      operationId: getReadiness
+      responses:
+        '200':
+          description: Server and backend models are ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ready
+                  model_loaded:
+                    type: boolean
+                  storage_ready:
+                    type: boolean
+        '503':
+          description: Server not ready or draining
+
+  /metrics:
+    get:
+      summary: Prometheus Metrics
+      operationId: getMetrics
+      responses:
+        '200':
+          description: Prometheus metrics
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /v1/models:
+    get:
+      summary: List Models
+      operationId: listModels
+      responses:
+        '200':
+          description: List of available and loaded models
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    type: string
+                    example: list
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        object:
+                          type: string
+                          example: model
+                        created:
+                          type: integer
+                        owned_by:
+                          type: string
+                          example: vinox
+
+  /api/models/{id}/load:
+    post:
+      summary: Load Model
+      operationId: loadModel
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Model loaded successfully
+        '404':
+          description: Model manifest not found
+
+  /api/models/{id}/unload:
+    post:
+      summary: Unload Model
+      operationId: unloadModel
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Model unloaded successfully
+
+  /v1/chat/completions:
+    post:
+      summary: Create Chat Completion
+      operationId: createChatCompletion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - model
+                - messages
+              properties:
+                model:
+                  type: string
+                messages:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - role
+                    properties:
+                      role:
+                        type: string
+                        enum: [system, user, assistant, tool]
+                      content:
+                        type: string
+                      name:
+                        type: string
+                      tool_call_id:
+                        type: string
+                      tool_calls:
+                        type: array
+                        items:
+                          type: object
+                temperature:
+                  type: number
+                  default: 0.7
+                top_p:
+                  type: number
+                  default: 0.9
+                top_k:
+                  type: integer
+                  default: 50
+                max_tokens:
+                  type: integer
+                  default: 128
+                stream:
+                  type: boolean
+                  default: false
+                tools:
+                  type: array
+                  items:
+                    type: object
+                tool_choice:
+                  type: [string, object]
+                response_format:
+                  type: object
+                stop:
+                  type: [string, array]
+                seed:
+                  type: integer
+      responses:
+        '200':
+          description: Chat completion response or SSE stream
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  object:
+                    type: string
+                    example: chat.completion
+                  created:
+                    type: integer
+                  model:
+                    type: string
+                  choices:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        index:
+                          type: integer
+                        message:
+                          type: object
+                        finish_reason:
+                          type: string
+                  usage:
+                    type: object
+                    properties:
+                      prompt_tokens:
+                        type: integer
+                      completion_tokens:
+                        type: integer
+                      total_tokens:
+                        type: integer
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE chunks prefixed with "data: " terminating with "data: [DONE]"
+
+  /v1/completions:
+    post:
+      summary: Create Legacy Completion
+      operationId: createCompletion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - model
+                - prompt
+              properties:
+                model:
+                  type: string
+                prompt:
+                  type: string
+                max_tokens:
+                  type: integer
+                  default: 128
+                temperature:
+                  type: number
+                  default: 0.7
+                stream:
+                  type: boolean
+                  default: false
+      responses:
+        '200':
+          description: Completion response
+
+  /v1/embeddings:
+    post:
+      summary: Create Text Embeddings
+      operationId: createEmbeddings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - model
+                - input
+              properties:
+                model:
+                  type: string
+                input:
+                  oneOf:
+                    - type: string
+                    - type: array
+                      items:
+                        type: string
+      responses:
+        '200':
+          description: Embedding response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    type: string
+                    example: list
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        object:
+                          type: string
+                          example: embedding
+                        index:
+                          type: integer
+                        embedding:
+                          type: array
+                          items:
+                            type: number
+                  model:
+                    type: string
+                  usage:
+                    type: object
+
+  /tokenize:
+    post:
+      summary: Tokenize Text
+      operationId: tokenizeText
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - text
+              properties:
+                text:
+                  type: string
+      responses:
+        '200':
+          description: Token tokens and count
+
+  /detokenize:
+    post:
+      summary: Detokenize Tokens
+      operationId: detokenizeTokens
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - tokens
+              properties:
+                tokens:
+                  type: array
+                  items:
+                    type: integer
+      responses:
+        '200':
+          description: Reconstructed text
+
+  /v1/conversations:
+    get:
+      summary: List Conversations
+      operationId: listConversations
+      responses:
+        '200':
+          description: List of stored conversations
+    post:
+      summary: Create Conversation
+      operationId: createConversation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+      responses:
+        '200':
+          description: Created conversation details
+
+  /v1/search:
+    post:
+      summary: Hybrid Retrieval Search
+      operationId: hybridSearch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - query
+              properties:
+                query:
+                  type: string
+                alpha:
+                  type: number
+                  default: 0.5
+                limit:
+                  type: integer
+                  default: 5
+                embedding:
+                  type: array
+                  items:
+                    type: number
+      responses:
+        '200':
+          description: Ranked search results with scores and citations
+
+  /v1/relations:
+    get:
+      summary: Query Relations
+      operationId: queryRelations
+      parameters:
+        - name: source_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: max_depth
+          in: query
+          schema:
+            type: integer
+            default: 2
+      responses:
+        '200':
+          description: Graph relations and paths
+    post:
+      summary: Create Relation
+      operationId: createRelation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - source_id
+                - target_id
+                - type
+              properties:
+                source_id:
+                  type: string
+                target_id:
+                  type: string
+                type:
+                  type: string
+      responses:
+        '200':
+          description: Relation created successfully
+
+  /v1/plans:
+    post:
+      summary: Create Agent Plan
+      operationId: createPlan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - task
+              properties:
+                task:
+                  type: string
+      responses:
+        '200':
+          description: Plan draft created with plan_hash
+
+  /v1/plans/{id}:
+    get:
+      summary: Get Plan
+      operationId: getPlan
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Plan details
+
+  /v1/plans/{id}/approve:
+    post:
+      summary: Approve Plan
+      operationId: approvePlan
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - plan_hash
+              properties:
+                plan_hash:
+                  type: string
+      responses:
+        '200':
+          description: Plan approved
+
+  /v1/agent/runs:
+    post:
+      summary: Start Agent Run
+      operationId: startAgentRun
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - plan_id
+                - plan_hash
+              properties:
+                plan_id:
+                  type: string
+                plan_hash:
+                  type: string
+                workspace_dir:
+                  type: string
+      responses:
+        '200':
+          description: Agent run started
+
+  /v1/agent/runs/{id}:
+    get:
+      summary: Get Agent Run Status
+      operationId: getAgentRun
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Agent run status, steps, and artifacts
+
+  /v1/agent/runs/{id}/cancel:
+    post:
+      summary: Cancel Agent Run
+      operationId: cancelAgentRun
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Agent run cancelled
+
+  /v1/agent/runs/{id}/events:
+    get:
+      summary: Stream Agent Run Events
+      operationId: streamAgentEvents
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: SSE event stream of Action and Observation events
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
+  /openapi.yaml:
+    get:
+      summary: Get OpenAPI 3.1 Spec
+      operationId: getOpenApiSpec
+      responses:
+        '200':
+          description: YAML schema definition
+          content:
+            application/yaml:
+              schema:
+                type: string
