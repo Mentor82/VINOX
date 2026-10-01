@@ -1212,18 +1212,18 @@ vinox_status vinox_model_generate_stream(
 
     if (model->is_mock) {
         model->cancel_requested.store(false);
-        std::vector<std::pair<vinox_stream_channel, std::string>> mock_chunks = {
-            {VINOX_STREAM_CHANNEL_REASONING, "<think>Analyzing prompt on OpenVINO accelerator.</think>"},
-            {VINOX_STREAM_CHANNEL_FINAL, "The "},
-            {VINOX_STREAM_CHANNEL_FINAL, "OpenVINO "},
-            {VINOX_STREAM_CHANNEL_FINAL, "LiNeP "},
-            {VINOX_STREAM_CHANNEL_FINAL, "remote "},
-            {VINOX_STREAM_CHANNEL_FINAL, "worker "},
-            {VINOX_STREAM_CHANNEL_FINAL, "executed "},
-            {VINOX_STREAM_CHANNEL_FINAL, "the "},
-            {VINOX_STREAM_CHANNEL_FINAL, "request "},
-            {VINOX_STREAM_CHANNEL_FINAL, "successfully."}
-        };
+        std::vector<std::pair<vinox_stream_channel, std::string>> mock_chunks;
+        // Only emit a reasoning chunk when the caller actually enabled reasoning;
+        // with reasoning_mode == NONE every emitted chunk must be on the FINAL
+        // channel (Issue #19 contract), never a fabricated reasoning delta.
+        if (rmode != VINOX_REASONING_NONE) {
+            mock_chunks.push_back({VINOX_STREAM_CHANNEL_REASONING, "<think>Analyzing prompt on OpenVINO accelerator.</think>"});
+        }
+        for (const auto& chunk : std::vector<std::string>{
+                "The ", "OpenVINO ", "LiNeP ", "remote ", "worker ",
+                "executed ", "the ", "request ", "successfully."}) {
+            mock_chunks.push_back({VINOX_STREAM_CHANNEL_FINAL, chunk});
+        }
         uint64_t mock_tokens = 0;
         for (const auto& pair : mock_chunks) {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
