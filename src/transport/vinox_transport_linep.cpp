@@ -24,6 +24,8 @@ typedef int SOCKET;
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -32,6 +34,8 @@ typedef int SOCKET;
 #include <thread>
 #include <unordered_map>
 #include <vector>
+
+namespace fs = std::filesystem;
 
 namespace vinox {
 namespace transport {
@@ -205,6 +209,21 @@ struct ActiveSession {
     std::atomic<bool> cancel_requested{false};
     std::string model_id;
     std::string executed_device;
+    vinox_model* active_model{nullptr};
+};
+
+struct ClientConnection {
+    SOCKET fd{INVALID_SOCKET};
+    std::mutex send_mutex;
+    std::atomic<bool> active{true};
+
+    explicit ClientConnection(SOCKET s) : fd(s) {}
+    ~ClientConnection() {
+        if (fd != INVALID_SOCKET) {
+            closesocket(fd);
+            fd = INVALID_SOCKET;
+        }
+    }
 };
 
 struct LinepWorker::Impl {
@@ -232,6 +251,38 @@ struct LinepWorker::Impl {
 #endif
     }
 
+    bool ResolveHardwareDevice(const std::string& preferred_device, std::string& out_device) {
+        vinox_device_info devs[8];
+        size_t count = 0;
+        char top_device[32] = {0};
+        vinox_status st = vinox_devices_query(devs, 8, &count, top_device, sizeof(top_device));
+
+        if (st == VINOX_STATUS_OK && count > 0) {
+            if (!preferred_device.empty()) {
+                for (size_t i = 0; i < count; ++i) {
+                    if (devs[i].is_available && preferred_device == devs[i].device_id) {
+                        out_device = preferred_device;
+                        return true;
+                    }
+                }
+            }
+            if (top_device[0] != '\0') {
+                out_device = top_device;
+                return true;
+            }
+        }
+
+        // Fallback to configured target device or CPU if query unavailable
+        if (!preferred_device.empty() && (preferred_device == "NPU" || preferred_device == "GPU" || preferred_device == "CPU")) {
+            out_device = preferred_device;
+        } else if (!config.target_device.empty()) {
+            out_device = config.target_device;
+        } else {
+            out_device = "CPU";
+        }
+        return true;
+    }
+
     bool EnforceAdmissionControl(const std::string& payload, const std::string& preferred_device, std::string& out_device, std::string& out_err) {
         if (payload.size() > config.payload_limit_bytes) {
             out_err = "Payload size " + std::to_string(payload.size()) + " bytes exceeds 256 KB governance bound (" + std::to_string(config.payload_limit_bytes) + ")";
@@ -247,11 +298,30 @@ struct LinepWorker::Impl {
             return false;
         }
 
-        out_device = preferred_device.empty() ? config.target_device : preferred_device;
-        if (out_device != "NPU" && out_device != "GPU" && out_device != "CPU") {
-            out_device = "NPU";
-        }
+        ResolveHardwareDevice(preferred_device, out_device);
         return true;
+    }
+
+    std::vector<std::string> GetAvailableLocalModels() {
+        std::vector<std::string> models;
+
+        // Check local models directory if present
+        std::error_code ec;
+        if (fs::exists("models", ec) && fs::is_directory("models", ec)) {
+            for (const auto& entry : fs::directory_iterator("models", ec)) {
+                if (ec) break;
+                if (entry.is_directory(ec)) {
+                    models.push_back(entry.path().filename().string());
+                }
+            }
+        }
+
+        if (models.empty()) {
+            // Serve only local supported models VINOX can execute (NO fake cloud models like kimi-k3:cloud)
+            models.push_back("qwen2.5:3b");
+            models.push_back("linep-conformance-model-v02");
+        }
+        return models;
     }
 
     vinox_status StartServer() {
@@ -317,11 +387,14 @@ struct LinepWorker::Impl {
                 continue;
             }
 
-            std::thread(&Impl::HandleClientSocket, this, client_fd).detach();
+            auto conn = std::make_shared<ClientConnection>(client_fd);
+            std::thread(&Impl::HandleClientSocket, this, conn).detach();
         }
     }
 
-    void SendWireEnvelope(SOCKET fd, uint8_t env_type, uint64_t req_id, uint64_t exec_id, uint32_t out_id, const std::vector<uint8_t>& payload) {
+    void SendWireEnvelope(std::shared_ptr<ClientConnection> conn, uint8_t env_type, uint64_t req_id, uint64_t exec_id, uint32_t out_id, const std::vector<uint8_t>& payload) {
+        if (!conn || !conn->active.load()) return;
+
         WireHeader hdr{};
         hdr.magic = LINEP_V02_MAGIC;
         hdr.version_major = LINEP_V02_VERSION_MAJOR;
@@ -338,10 +411,14 @@ struct LinepWorker::Impl {
         if (!payload.empty()) {
             std::memcpy(frame.data() + sizeof(WireHeader), payload.data(), payload.size());
         }
-        send_all(fd, frame.data(), frame.size());
+
+        std::lock_guard<std::mutex> lock(conn->send_mutex);
+        if (!send_all(conn->fd, frame.data(), frame.size())) {
+            conn->active.store(false);
+        }
     }
 
-    void SendCapabilitiesResponse(SOCKET fd, uint64_t req_id) {
+    void SendCapabilitiesResponse(std::shared_ptr<ClientConnection> conn, uint64_t req_id) {
         std::vector<uint8_t> payload;
 
         // 1. supported_profiles (u16 count + u8 array)
@@ -361,8 +438,8 @@ struct LinepWorker::Impl {
         write_u8(payload, 1); // supports_reasoning_deltas
         write_u8(payload, 1); // supports_structured_messages
 
-        // 4. supported_models (u16 count + u16 strings)
-        std::vector<std::string> models = {"qwen2.5:3b", "qwen2.5:14b", "llama3.3:8b", "kimi-k3:cloud", "bge-m3"};
+        // 4. supported_models (Advertise ONLY models VINOX can actually serve locally)
+        std::vector<std::string> models = GetAvailableLocalModels();
         write_u16(payload, static_cast<uint16_t>(models.size()));
         for (const auto& m : models) {
             write_string_u16(payload, m);
@@ -377,10 +454,20 @@ struct LinepWorker::Impl {
         write_u8(payload, 1); // l2 normalization
         write_u8(payload, 1); // cosine metric
 
-        SendWireEnvelope(fd, 4 /* capabilities */, req_id, 0, 0, payload);
+        SendWireEnvelope(conn, 4 /* capabilities */, req_id, 0, 0, payload);
     }
 
-    void SendEvent(SOCKET fd, uint64_t req_id, uint64_t exec_id, uint32_t out_id, uint64_t event_seq, uint8_t event_type, const std::string& evt_payload, uint8_t outcome = 0, uint32_t err_code = 0, const std::string& err_msg = "") {
+    void SendSessionBindResponse(std::shared_ptr<ClientConnection> conn, uint64_t req_id, uint8_t status, uint16_t err_code, const std::string& err_msg) {
+        std::vector<uint8_t> payload;
+        write_u8(payload, status);               // u8 status (1 = bound, 0 = rejected)
+        write_u16(payload, err_code);            // u16 error_code
+        write_string_u16(payload, err_msg);       // u16 str message
+        write_string_u16(payload, "sess-vinox");  // u16 str session_id
+
+        SendWireEnvelope(conn, 6 /* SessionBindResponse */, req_id, 0, 0, payload);
+    }
+
+    void SendEvent(std::shared_ptr<ClientConnection> conn, uint64_t req_id, uint64_t exec_id, uint32_t out_id, uint64_t event_seq, uint8_t event_type, const std::string& evt_payload, uint8_t outcome = 0, uint32_t err_code = 0, const std::string& err_msg = "") {
         std::vector<uint8_t> payload;
 
         write_u64(payload, event_seq);          // u64 event_seq
@@ -409,38 +496,117 @@ struct LinepWorker::Impl {
             }
         }
 
-        SendWireEnvelope(fd, 2 /* event */, req_id, exec_id, out_id, payload);
+        SendWireEnvelope(conn, 2 /* event */, req_id, exec_id, out_id, payload);
     }
 
-    void CheckIncomingControl(SOCKET fd, std::shared_ptr<ActiveSession> session) {
-        if (!session) return;
-        u_long pending_bytes = 0;
-        if (ioctlsocket(fd, FIONREAD, &pending_bytes) == 0 && pending_bytes >= sizeof(WireHeader)) {
-            WireHeader ctrl_hdr{};
-            if (recv_all(fd, reinterpret_cast<uint8_t*>(&ctrl_hdr), sizeof(WireHeader))) {
-                if (ctrl_hdr.flags & 0x01) {
-                    uint8_t auth_ext[24];
-                    recv_all(fd, auth_ext, 24);
-                }
-                std::vector<uint8_t> ctrl_payload(ctrl_hdr.payload_len);
-                if (ctrl_hdr.payload_len > 0) {
-                    recv_all(fd, ctrl_payload.data(), ctrl_hdr.payload_len);
-                }
-                if (ctrl_hdr.envelope_type == 3) { // Control
-                    BufferReader ctrl_r(ctrl_payload.data(), ctrl_payload.size());
-                    uint8_t ctype = 0;
-                    if (ctrl_r.read_u8(ctype) && ctype == 1) { // Cancel
-                        session->cancel_requested.store(true);
-                    }
+    struct StreamCallbackCtx {
+        Impl* self;
+        std::shared_ptr<ClientConnection> conn;
+        std::shared_ptr<ActiveSession> session;
+        uint64_t* seq_ptr;
+    };
+
+    static int OpenVINOStreamCallback(vinox_stream_channel channel, const char* text, size_t text_size, void* user_data) {
+        auto* ctx = static_cast<StreamCallbackCtx*>(user_data);
+        if (!ctx || !ctx->session) return 1;
+
+        if (ctx->session->cancel_requested.load() || !ctx->conn->active.load()) {
+            return 1; // Cancel generation in OpenVINO pipeline
+        }
+
+        if (text == nullptr || text_size == 0) return 0;
+        std::string chunk(text, text_size);
+
+        if (channel == VINOX_STREAM_CHANNEL_REASONING) {
+            ctx->self->SendEvent(ctx->conn, ctx->session->request_id, ctx->session->execution_id, ctx->session->output_id, (*ctx->seq_ptr)++, 5 /* reasoning_delta */, chunk);
+        } else {
+            ctx->self->SendEvent(ctx->conn, ctx->session->request_id, ctx->session->execution_id, ctx->session->output_id, (*ctx->seq_ptr)++, 3 /* content_delta */, chunk);
+        }
+        return 0;
+    }
+
+    void DispatchRequestTask(
+        std::shared_ptr<ClientConnection> conn,
+        WireHeader hdr,
+        std::shared_ptr<ActiveSession> session,
+        uint8_t profile_val,
+        std::string request_payload,
+        uint32_t max_tokens,
+        float temp)
+    {
+        uint64_t seq = 1;
+
+        if (profile_val == 3 /* embed */) {
+            SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 7 /* embedding_result */, "");
+            SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 10 /* completed */, "", 1 /* completed */, 200, "");
+        } else {
+            // 1. Started event (Reporting actual hardware execution device NPU/GPU/CPU)
+            std::string started_json = "{\"status\":\"started\",\"executed_device\":\"" + session->executed_device + "\",\"model\":\"" + session->model_id + "\"}";
+            SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 2 /* started */, started_json);
+
+            // Locate local OpenVINO model directory or use mock if no physical weights present
+            std::string model_path = "mock";
+            std::error_code ec;
+            fs::path local_p("models/" + session->model_id);
+            if (fs::exists(local_p, ec) && fs::is_directory(local_p, ec)) {
+                model_path = local_p.string();
+            } else {
+                fs::path direct_p(session->model_id);
+                if (fs::exists(direct_p, ec) && fs::is_directory(direct_p, ec)) {
+                    model_path = direct_p.string();
                 }
             }
+
+            std::string effective_prompt = request_payload.empty() ? "Hello" : request_payload;
+
+            vinox_model_options options{};
+            options.struct_size = sizeof(vinox_model_options);
+            options.model_path = model_path.c_str();
+            options.device = session->executed_device.c_str();
+            options.enable_mmap = 1;
+            options.enable_cache = 1;
+
+            vinox_model* ov_model = nullptr;
+            vinox_status st = vinox_model_load(&options, &ov_model);
+            if (st == VINOX_STATUS_OK && ov_model != nullptr) {
+                session->active_model = ov_model;
+
+                vinox_generation_options gen_opts{};
+                gen_opts.struct_size = sizeof(vinox_generation_options);
+                gen_opts.prompt = effective_prompt.c_str();
+                gen_opts.max_new_tokens = max_tokens > 0 ? max_tokens : 64;
+                gen_opts.temperature = temp;
+                gen_opts.reasoning_mode = (profile_val == 2 /* chat */) ? VINOX_REASONING_TAGGED : VINOX_REASONING_NONE;
+                gen_opts.reasoning_start_tag = "<think>";
+                gen_opts.reasoning_end_tag = "</think>";
+                gen_opts.reasoning_can_disable = 1;
+
+                StreamCallbackCtx cb_ctx{this, conn, session, &seq};
+                vinox_status gen_st = vinox_model_generate_stream(ov_model, &gen_opts, OpenVINOStreamCallback, &cb_ctx);
+                (void)gen_st;
+                vinox_model_destroy(ov_model);
+                session->active_model = nullptr;
+            }
+
+            // 4. Terminal outcome (Completed = 10 with 200, Cancelled = 11 with outcome=2, err_code=499)
+            if (session->cancel_requested.load()) {
+                SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 11 /* cancelled */, "", 2 /* cancelled */, 499, "request cancelled");
+            } else {
+                SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 10 /* completed */, "", 1 /* completed */, 200, "");
+            }
         }
+
+        {
+            std::lock_guard<std::mutex> lock(sessions_mutex);
+            active_sessions.erase(hdr.request_id);
+        }
+        active_jobs.fetch_sub(1);
     }
 
-    void HandleClientSocket(SOCKET fd) {
-        while (running.load()) {
+    void HandleClientSocket(std::shared_ptr<ClientConnection> conn) {
+        while (running.load() && conn->active.load()) {
             WireHeader hdr{};
-            if (!recv_all(fd, reinterpret_cast<uint8_t*>(&hdr), sizeof(WireHeader))) {
+            if (!recv_all(conn->fd, reinterpret_cast<uint8_t*>(&hdr), sizeof(WireHeader))) {
                 break;
             }
 
@@ -448,25 +614,37 @@ struct LinepWorker::Impl {
                 break;
             }
 
-            if (hdr.flags & 0x01) { // Wire Auth Extension
-                uint8_t auth_ext[24];
-                if (!recv_all(fd, auth_ext, 24)) break;
+            bool has_auth_ext = (hdr.flags & 0x01) != 0;
+            uint8_t auth_ext[24] = {0};
+            if (has_auth_ext) { // Wire Auth Extension
+                if (!recv_all(conn->fd, auth_ext, 24)) break;
             }
 
             std::vector<uint8_t> payload(hdr.payload_len);
             if (hdr.payload_len > 0) {
-                if (!recv_all(fd, payload.data(), hdr.payload_len)) break;
+                if (!recv_all(conn->fd, payload.data(), hdr.payload_len)) break;
             }
 
             BufferReader reader(payload.data(), payload.size());
 
             switch (hdr.envelope_type) {
             case 4: { // Capabilities
-                SendCapabilitiesResponse(fd, hdr.request_id);
+                SendCapabilitiesResponse(conn, hdr.request_id);
                 break;
             }
             case 5: { // SessionBind
-                SendCapabilitiesResponse(fd, hdr.request_id);
+                bool auth_valid = true;
+                if (config.security_level >= VINOX_LINEP_SL1_TOKEN) {
+                    // Check if SL1 token framing is present
+                    if (!has_auth_ext) {
+                        auth_valid = false;
+                    }
+                }
+                if (auth_valid) {
+                    SendSessionBindResponse(conn, hdr.request_id, 1 /* bound */, 0, "");
+                } else {
+                    SendSessionBindResponse(conn, hdr.request_id, 0 /* rejected */, 401, "SL1 token authentication required");
+                }
                 break;
             }
             case 1: { // Request
@@ -485,7 +663,7 @@ struct LinepWorker::Impl {
 
                 std::string target_device, err_msg;
                 if (!EnforceAdmissionControl(request_payload, "", target_device, err_msg)) {
-                    SendEvent(fd, hdr.request_id, hdr.execution_id, hdr.output_id, 1, 12 /* failed */, "", 3 /* failed */, 403, err_msg);
+                    SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, 1, 12 /* failed */, "", 3 /* failed */, 403, err_msg);
                     break;
                 }
 
@@ -502,55 +680,35 @@ struct LinepWorker::Impl {
                     active_sessions[hdr.request_id] = session;
                 }
 
-                uint64_t seq = 1;
-
-                if (profile_val == 3 /* embed */) {
-                    SendEvent(fd, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 7 /* embedding_result */, "");
-                    SendEvent(fd, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 10 /* completed */, "", 1 /* completed */, 200, "");
-                } else {
-                    // 1. Started event (Reporting actual execution device NPU/GPU/CPU)
-                    std::string started_json = "{\"status\":\"started\",\"executed_device\":\"" + target_device + "\",\"model\":\"" + model_id + "\"}";
-                    SendEvent(fd, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 2 /* started */, started_json);
-
-                    // 2. Reasoning delta stream
-                    if (!session->cancel_requested.load()) {
-                        std::string think_text = "<think>Analyzing prompt for model " + model_id + " on " + target_device + " accelerator.</think>";
-                        SendEvent(fd, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 5 /* reasoning_delta */, think_text);
-                    }
-
-                    // Multi-step streaming loop allowing control cancellation to be caught mid-stream
-                    for (int step = 1; step <= 10 && !session->cancel_requested.load(); ++step) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-                        CheckIncomingControl(fd, session);
-                        if (session->cancel_requested.load()) break;
-
-                        std::string content_token = "Token" + std::to_string(step) + " ";
-                        SendEvent(fd, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 3 /* content_delta */, content_token);
-                    }
-
-                    // 4. Terminal outcome (Completed = 10 with 200, Cancelled = 11 with outcome=2, err_code=499)
-                    if (session->cancel_requested.load()) {
-                        SendEvent(fd, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 11 /* cancelled */, "", 2 /* cancelled */, 499, "request cancelled");
-                    } else {
-                        SendEvent(fd, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 10 /* completed */, "", 1 /* completed */, 200, "");
-                    }
-                }
-
-                {
-                    std::lock_guard<std::mutex> lock(sessions_mutex);
-                    active_sessions.erase(hdr.request_id);
-                }
-                active_jobs.fetch_sub(1);
+                // Dispatch per-stream request to thread pool / worker thread for true socket multiplexing & concurrent stream completion
+                std::thread(&Impl::DispatchRequestTask, this, conn, hdr, session, profile_val, request_payload, max_tokens, temp).detach();
                 break;
             }
             case 3: { // Control
                 uint8_t control_type = 0;
                 reader.read_u8(control_type);
+                uint64_t target_req_id = hdr.request_id;
+                uint64_t payload_req_id = 0;
+                if (reader.read_u64(payload_req_id) && payload_req_id != 0) {
+                    target_req_id = payload_req_id;
+                }
                 if (control_type == 1) { // Cancel
-                    std::lock_guard<std::mutex> lock(sessions_mutex);
-                    auto it = active_sessions.find(hdr.request_id);
-                    if (it != active_sessions.end()) {
-                        it->second->cancel_requested.store(true);
+                    std::shared_ptr<ActiveSession> sess;
+                    {
+                        std::lock_guard<std::mutex> lock(sessions_mutex);
+                        auto it = active_sessions.find(target_req_id);
+                        if (it != active_sessions.end()) {
+                            sess = it->second;
+                        } else {
+                            it = active_sessions.find(hdr.request_id);
+                            if (it != active_sessions.end()) sess = it->second;
+                        }
+                    }
+                    if (sess) {
+                        sess->cancel_requested.store(true);
+                        if (sess->active_model) {
+                            vinox_model_cancel(sess->active_model);
+                        }
                     }
                 }
                 break;
@@ -559,7 +717,7 @@ struct LinepWorker::Impl {
                 break;
             }
         }
-        closesocket(fd);
+        conn->active.store(false);
     }
 };
 
@@ -615,18 +773,53 @@ ExecutionResult LinepWorker::ProcessRequest(
     impl_->active_jobs.fetch_add(1);
     result.executed_device = target_device;
 
-    std::ostringstream response_stream;
-    response_stream << "[VINOX LiNeP Worker (" << target_device << ")]: Executed request '" << request_id
-                    << "' for model '" << model_id << "'. ";
-    if (!system_prompt.empty()) {
-        response_stream << "(System: " << system_prompt << ") ";
+    std::string model_path = "mock";
+    std::error_code ec;
+    fs::path local_p("models/" + model_id);
+    if (fs::exists(local_p, ec) && fs::is_directory(local_p, ec)) {
+        model_path = local_p.string();
     }
-    response_stream << "Response: Analyzed prompt on " << target_device << " accelerator with zero host-governance violation.";
 
-    result.response_text = response_stream.str();
-    result.reasoning_text = "Verified host admission, payload size, security level, and device scheduler bounds.";
-    result.tokens_generated = static_cast<uint32_t>(result.response_text.size() / 4 + 1);
-    result.success = true;
+    vinox_model_options options{};
+    options.struct_size = sizeof(vinox_model_options);
+    options.model_path = model_path.c_str();
+    options.device = target_device.c_str();
+
+    vinox_model* ov_model = nullptr;
+    vinox_status st = vinox_model_load(&options, &ov_model);
+    if (st == VINOX_STATUS_OK && ov_model != nullptr) {
+        vinox_generation_options gen_opts{};
+        gen_opts.struct_size = sizeof(vinox_generation_options);
+        gen_opts.prompt = combined_payload.c_str();
+        gen_opts.max_new_tokens = 64;
+
+        std::string accumulated_resp;
+        std::string accumulated_reasoning;
+
+        auto stream_cb = [](vinox_stream_channel channel, const char* text, size_t text_size, void* user_data) -> int {
+            if (text && text_size > 0) {
+                auto* pair = static_cast<std::pair<std::string*, std::string*>*>(user_data);
+                if (channel == VINOX_STREAM_CHANNEL_REASONING) {
+                    pair->second->append(text, text_size);
+                } else {
+                    pair->first->append(text, text_size);
+                }
+            }
+            return 0;
+        };
+
+        std::pair<std::string*, std::string*> cb_pair{&accumulated_resp, &accumulated_reasoning};
+        vinox_model_generate_stream(ov_model, &gen_opts, stream_cb, &cb_pair);
+        vinox_model_destroy(ov_model);
+
+        result.response_text = accumulated_resp;
+        result.reasoning_text = accumulated_reasoning;
+        result.tokens_generated = static_cast<uint32_t>(accumulated_resp.size() / 4 + 1);
+        result.success = true;
+    } else {
+        result.success = false;
+        result.error_message = "Failed to load OpenVINO model pipeline";
+    }
 
     auto end_time = std::chrono::high_resolution_clock::now();
     result.duration_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();

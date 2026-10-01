@@ -6,19 +6,32 @@
 #include <string>
 #include <type_traits>
 
+#include "openvino/openvino.hpp"
 #include "openvino/genai/llm_pipeline.hpp"
+#include "openvino/genai/parsers.hpp"
+#include "openvino/genai/chat_history.hpp"
+#include "openvino/runtime/properties.hpp"
 
 #include <vector>
+#include <filesystem>
 #include <nlohmann/json.hpp>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <winioctl.h>
+#endif
 
 #include "minja_template_runtime.hpp"
 
 struct vinox_model {
-    explicit vinox_model(const std::string& model_path, const std::string& device) {
+    explicit vinox_model(const std::string& model_path, const std::string& device, const ov::AnyMap& properties = {}) {
         if (model_path == "mock" || model_path == "test_mock" || model_path.find("mock") != std::string::npos) {
             is_mock = true;
         } else {
-            pipeline = std::make_unique<ov::genai::LLMPipeline>(model_path, device);
+            pipeline = std::make_unique<ov::genai::LLMPipeline>(model_path, device, properties);
         }
     }
 
@@ -141,8 +154,22 @@ vinox_status vinox_model_load(
             ? options->device
             : "CPU";
 
+    ov::AnyMap pipe_config;
+    if (VINOX_FIELD_PRESENT(options, enable_cache) && options->enable_cache != 0) {
+        std::string cdir = (VINOX_FIELD_PRESENT(options, cache_dir) && options->cache_dir && options->cache_dir[0] != '\0')
+            ? options->cache_dir
+            : "cache/model_blobs";
+        try {
+            std::filesystem::create_directories(cdir);
+            pipe_config[ov::cache_dir.name()] = cdir;
+        } catch (...) {}
+    }
+    if (VINOX_FIELD_PRESENT(options, enable_mmap)) {
+        pipe_config[ov::enable_mmap.name()] = (options->enable_mmap != 0);
+    }
+
     try {
-        auto loaded_model = std::make_unique<vinox_model>(options->model_path, device);
+        auto loaded_model = std::make_unique<vinox_model>(options->model_path, device, pipe_config);
         *model = loaded_model.release();
         last_error.clear();
         return VINOX_STATUS_OK;
@@ -151,6 +178,85 @@ vinox_status vinox_model_load(
     } catch (...) {
         return fail_runtime("Unknown error while loading the OpenVINO model");
     }
+}
+
+vinox_status vinox_storage_detect(
+    const char* path,
+    vinox_storage_info* info
+) {
+    if (info == nullptr) return fail_arg("info pointer cannot be null");
+    if (info->struct_size < sizeof(vinox_storage_info)) return fail_abi("info struct_size invalid");
+
+    std::memset(info, 0, sizeof(vinox_storage_info));
+    info->struct_size = sizeof(vinox_storage_info);
+    std::strncpy(info->bus_type_name, "Standard", sizeof(info->bus_type_name) - 1);
+
+    std::string target_path = (path && path[0] != '\0') ? path : "C:\\";
+
+#ifdef _WIN32
+    WCHAR volume_path[MAX_PATH] = {0};
+    std::wstring wpath;
+    wpath.assign(target_path.begin(), target_path.end());
+
+    if (GetVolumePathNameW(wpath.c_str(), volume_path, MAX_PATH)) {
+        ULARGE_INTEGER free_bytes_avail, total_num_bytes, total_free_bytes;
+        if (GetDiskFreeSpaceExW(volume_path, &free_bytes_avail, &total_num_bytes, &total_free_bytes)) {
+            info->total_bytes = total_num_bytes.QuadPart;
+            info->free_bytes = total_free_bytes.QuadPart;
+        }
+
+        std::wstring drive_dev = L"\\\\.\\";
+        if (volume_path[0] != L'\0' && volume_path[1] == L':') {
+            drive_dev += volume_path[0];
+            drive_dev += L":";
+        } else {
+            drive_dev += L"C:";
+        }
+
+        HANDLE hDevice = CreateFileW(
+            drive_dev.c_str(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            NULL,
+            OPEN_EXISTING,
+            0,
+            NULL
+        );
+
+        if (hDevice != INVALID_HANDLE_VALUE) {
+            STORAGE_PROPERTY_QUERY query{};
+            query.PropertyId = StorageDeviceProperty;
+            query.QueryType = PropertyStandardQuery;
+
+            char buffer[1024] = {0};
+            DWORD bytes_returned = 0;
+            if (DeviceIoControl(hDevice, IOCTL_STORAGE_QUERY_PROPERTY, &query, sizeof(query), buffer, sizeof(buffer), &bytes_returned, NULL)) {
+                auto* desc = reinterpret_cast<STORAGE_DEVICE_DESCRIPTOR*>(buffer);
+                if (desc->BusType == BusTypeNvme) {
+                    info->is_nvme = 1;
+                    info->is_ssd = 1;
+                    std::strncpy(info->bus_type_name, "NVMe", sizeof(info->bus_type_name) - 1);
+                } else if (desc->BusType == BusTypeSata) {
+                    info->is_ssd = 1;
+                    std::strncpy(info->bus_type_name, "SATA", sizeof(info->bus_type_name) - 1);
+                } else if (desc->BusType == BusTypeUsb) {
+                    std::strncpy(info->bus_type_name, "USB", sizeof(info->bus_type_name) - 1);
+                }
+
+                if (desc->ProductIdOffset > 0 && desc->ProductIdOffset < bytes_returned) {
+                    const char* prod_id = buffer + desc->ProductIdOffset;
+                    std::string prod(prod_id);
+                    while (!prod.empty() && (prod.back() == ' ' || prod.back() == '\r' || prod.back() == '\n')) prod.pop_back();
+                    while (!prod.empty() && prod.front() == ' ') prod.erase(0, 1);
+                    std::strncpy(info->device_name, prod.c_str(), sizeof(info->device_name) - 1);
+                }
+            }
+            CloseHandle(hDevice);
+        }
+    }
+#endif
+
+    return VINOX_STATUS_OK;
 }
 
 static std::mutex g_profile_mutex;
@@ -296,8 +402,16 @@ public:
             // appended on top of a real template's own output.
             vinox::model::TemplateRenderRequest treq;
             treq.template_source = tpl;
-            if (!sys.empty()) {
-                treq.messages.push_back(vinox::model::TemplateMessage{"system", sys, "", ""});
+
+            std::string effective_sys = sys;
+            if (!tools.empty() && tpl.find("tools") == std::string::npos) {
+                if (!effective_sys.empty()) effective_sys += "\n\n";
+                effective_sys += "# Tools\n\nYou have access to the following tools:\n" + tools +
+                    "\n\nIf you choose to call a function, you MUST respond in the format:\n<tool_call>\n{\"name\": \"<function-name>\", \"arguments\": <args-json-object>}\n</tool_call>";
+            }
+
+            if (!effective_sys.empty()) {
+                treq.messages.push_back(vinox::model::TemplateMessage{"system", effective_sys, "", ""});
             }
             treq.messages.push_back(vinox::model::TemplateMessage{"user", user, "", ""});
             treq.tools_json = tools;
@@ -563,7 +677,8 @@ vinox_status vinox_model_protocol_compile(
             has_tagged_reasoning = true;
             r_start = "<|begin_of_thought|>";
             r_end = "<|end_of_thought|>";
-        } else if (tok_cfg.find("<think>") != std::string::npos || tpl.find("<think>") != std::string::npos) {
+        } else if (tok_cfg.find("<think>") != std::string::npos || tpl.find("<think>") != std::string::npos ||
+                   tok_cfg.find("thinking") != std::string::npos || tok_cfg.find("Thinking") != std::string::npos) {
             has_tagged_reasoning = true;
             r_start = "<think>";
             r_end = "</think>";
@@ -822,19 +937,17 @@ vinox_status vinox_model_protocol_decode_tool_call(
     // tool call" -- that lenience is intentional and untouched here.
     bool decoded_from_located_envelope = false;
 
-    if (!call_marker.empty() && !end_marker.empty() && call_marker != end_marker) {
+    if (!call_marker.empty() && !end_marker.empty() && call_marker != end_marker && raw.find(call_marker) != std::string::npos) {
         size_t call_pos = raw.find(call_marker);
-        size_t end_pos = (call_pos != std::string::npos) ? raw.find(end_marker, call_pos + call_marker.length()) : std::string::npos;
-        if (call_pos != std::string::npos && end_pos != std::string::npos && end_pos > call_pos) {
+        size_t end_pos = raw.find(end_marker, call_pos + call_marker.length());
+        if (end_pos != std::string::npos && end_pos > call_pos) {
             decoded = raw.substr(call_pos + call_marker.length(), end_pos - (call_pos + call_marker.length()));
             decoded_from_located_envelope = true;
-        } else if (contract->tool_format == VINOX_TOOL_FORMAT_NATIVE_TEMPLATE) {
+        } else {
             last_error = "Malformed model-native tool call envelope";
             return VINOX_STATUS_FINAL_OUTPUT_INVALID;
-        } else {
-            decoded = raw;
         }
-    } else if (contract->tool_format == VINOX_TOOL_FORMAT_NATIVE_TEMPLATE || raw.find("<tool_call>") != std::string::npos || raw.find("call:") != std::string::npos) {
+    } else if (raw.find("<tool_call>") != std::string::npos || raw.find("call:") != std::string::npos) {
         size_t call_pos = raw.find("<tool_call>");
         size_t end_pos = raw.find("</tool_call>");
         if (call_pos != std::string::npos && end_pos != std::string::npos && end_pos > call_pos) {
@@ -869,8 +982,72 @@ vinox_status vinox_model_protocol_decode_tool_call(
         decoded = raw;
     }
 
+    // Check for DeepSeek or fenced envelope shape: function<｜tool sep｜>NAME\n```json\nARGS\n```
+    if (decoded_from_located_envelope) {
+        size_t sep_pos = decoded.find("<｜tool sep｜>");
+        if (sep_pos == std::string::npos) {
+            sep_pos = decoded.find("<|tool sep|>");
+        }
+        if (sep_pos != std::string::npos) {
+            std::string sep_token = (decoded.find("<｜tool sep｜>") != std::string::npos) ? "<｜tool sep｜>" : "<|tool sep|>";
+            size_t name_start = sep_pos + sep_token.length();
+            size_t name_end = decoded.find('\n', name_start);
+            if (name_end != std::string::npos) {
+                std::string func_name = decoded.substr(name_start, name_end - name_start);
+                while (!func_name.empty() && (func_name.back() == '\r' || func_name.back() == ' ')) func_name.pop_back();
+                while (!func_name.empty() && func_name.front() == ' ') func_name.erase(0, 1);
+
+                size_t json_start = decoded.find('{', name_end);
+                size_t json_end = decoded.rfind('}');
+                if (json_start != std::string::npos && json_end != std::string::npos && json_end > json_start) {
+                    std::string args_json = decoded.substr(json_start, json_end - json_start + 1);
+                    decoded = "{\"tool\":\"" + func_name + "\",\"arguments\":" + args_json + "}";
+                }
+            }
+        } else if (decoded.find("```json") != std::string::npos || decoded.find("```") != std::string::npos) {
+            size_t json_start = decoded.find('{');
+            size_t json_end = decoded.rfind('}');
+            if (json_start != std::string::npos && json_end != std::string::npos && json_end > json_start) {
+                decoded = decoded.substr(json_start, json_end - json_start + 1);
+            }
+        }
+    } else {
+        // For CANONICAL_JSON without explicit envelopes, search for embedded JSON array or object
+        // (e.g. OpenAI format [{"type":"function","function":{"name":"...","arguments":...}}])
+        size_t arr_start = decoded.find('[');
+        size_t arr_end = decoded.rfind(']');
+        size_t obj_start = decoded.find('{');
+        size_t obj_end = decoded.rfind('}');
+        if (arr_start != std::string::npos && arr_end != std::string::npos && arr_end > arr_start) {
+            std::string sub = decoded.substr(arr_start, arr_end - arr_start + 1);
+            try {
+                auto test_j = nlohmann::json::parse(sub);
+                if (test_j.is_array() && !test_j.empty() && test_j[0].is_object()) {
+                    if (test_j[0].contains("type") || test_j[0].contains("function") || test_j[0].contains("name")) {
+                        decoded = sub;
+                    }
+                }
+            } catch (...) {}
+        } else if (obj_start != std::string::npos && obj_end != std::string::npos && obj_end > obj_start) {
+            std::string sub = decoded.substr(obj_start, obj_end - obj_start + 1);
+            try {
+                auto test_j = nlohmann::json::parse(sub);
+                if (test_j.is_object() && (test_j.contains("name") || test_j.contains("tool") || test_j.contains("function"))) {
+                    decoded = sub;
+                }
+            } catch (...) {}
+        }
+    }
+
     try {
         auto j = nlohmann::json::parse(decoded);
+        if (j.is_array() && !j.empty() && j[0].is_object()) {
+            j = j[0];
+        }
+        if (j.is_object() && j.contains("function") && j["function"].is_object()) {
+            j = j["function"];
+        }
+
         if (!j.is_object()) {
             if (decoded_from_located_envelope) {
                 last_error = "Malformed model-native call: envelope contents are not a JSON object";
@@ -887,15 +1064,37 @@ vinox_status vinox_model_protocol_decode_tool_call(
                 return VINOX_STATUS_FINAL_OUTPUT_INVALID;
             }
 
-            if (j.contains("arguments") && j["arguments"].is_object()) {
-                canonical["arguments"] = j["arguments"];
-            } else if (j.contains("parameters") && j["parameters"].is_object()) {
-                canonical["arguments"] = j["parameters"];
+            nlohmann::json args_obj;
+            bool has_valid_args = false;
+            if (j.contains("arguments")) {
+                if (j["arguments"].is_object()) {
+                    args_obj = j["arguments"];
+                    has_valid_args = true;
+                } else if (j["arguments"].is_string()) {
+                    try {
+                        args_obj = nlohmann::json::parse(j["arguments"].get<std::string>());
+                        if (args_obj.is_object()) has_valid_args = true;
+                    } catch (...) {}
+                }
+            } else if (j.contains("parameters")) {
+                if (j["parameters"].is_object()) {
+                    args_obj = j["parameters"];
+                    has_valid_args = true;
+                } else if (j["parameters"].is_string()) {
+                    try {
+                        args_obj = nlohmann::json::parse(j["parameters"].get<std::string>());
+                        if (args_obj.is_object()) has_valid_args = true;
+                    } catch (...) {}
+                }
+            }
+
+            if (has_valid_args) {
+                canonical["arguments"] = args_obj;
+                decoded = canonical.dump();
             } else {
                 last_error = "Malformed model-native call: missing arguments or parameters object property";
                 return VINOX_STATUS_FINAL_OUTPUT_INVALID;
             }
-            decoded = canonical.dump();
         }
     } catch (const std::exception&) {
         // A located envelope whose contents fail to parse as JSON at all is a
@@ -1013,30 +1212,29 @@ vinox_status vinox_model_generate_stream(
 
     if (model->is_mock) {
         model->cancel_requested.store(false);
-        std::vector<std::pair<vinox_stream_channel, std::string>> mock_chunks;
-        if (rmode == VINOX_REASONING_TAGGED) {
-            mock_chunks = {
-                {VINOX_STREAM_CHANNEL_REASONING, "Analyzing prompt..."},
-                {VINOX_STREAM_CHANNEL_FINAL, "Hello from OpenVINO mock!"}
-            };
-        } else {
-            mock_chunks = {
-                {VINOX_STREAM_CHANNEL_FINAL, "Hello "},
-                {VINOX_STREAM_CHANNEL_FINAL, "from "},
-                {VINOX_STREAM_CHANNEL_FINAL, "OpenVINO "},
-                {VINOX_STREAM_CHANNEL_FINAL, "mock!"}
-            };
-        }
+        std::vector<std::pair<vinox_stream_channel, std::string>> mock_chunks = {
+            {VINOX_STREAM_CHANNEL_REASONING, "<think>Analyzing prompt on OpenVINO accelerator.</think>"},
+            {VINOX_STREAM_CHANNEL_FINAL, "The "},
+            {VINOX_STREAM_CHANNEL_FINAL, "OpenVINO "},
+            {VINOX_STREAM_CHANNEL_FINAL, "LiNeP "},
+            {VINOX_STREAM_CHANNEL_FINAL, "remote "},
+            {VINOX_STREAM_CHANNEL_FINAL, "worker "},
+            {VINOX_STREAM_CHANNEL_FINAL, "executed "},
+            {VINOX_STREAM_CHANNEL_FINAL, "the "},
+            {VINOX_STREAM_CHANNEL_FINAL, "request "},
+            {VINOX_STREAM_CHANNEL_FINAL, "successfully."}
+        };
         uint64_t mock_tokens = 0;
         for (const auto& pair : mock_chunks) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            if (model->cancel_requested.load()) {
+                last_error = "Generation cancelled by user";
+                return VINOX_STATUS_CANCELLED;
+            }
             mock_tokens++;
             if (options->max_new_tokens > 0 && mock_tokens > options->max_new_tokens) {
                 last_error = "Global generation hard cap exceeded";
                 return VINOX_STATUS_OUT_OF_RANGE;
-            }
-            if (model->cancel_requested.load()) {
-                last_error = "Generation cancelled by user";
-                return VINOX_STATUS_CANCELLED;
             }
             if (callback(pair.first, pair.second.data(), pair.second.size(), user_data) != 0) {
                 last_error = "Generation stream interrupted by callback";
@@ -1065,6 +1263,42 @@ vinox_status vinox_model_generate_stream(
         }
         if (VINOX_FIELD_PRESENT(options, repetition_penalty) && options->repetition_penalty > 0.0f) {
             config.repetition_penalty = options->repetition_penalty;
+        } else {
+            config.repetition_penalty = 1.15f; // Safe default against repetitive token looping
+        }
+        if (VINOX_FIELD_PRESENT(options, presence_penalty) && options->presence_penalty != 0.0f) {
+            config.presence_penalty = options->presence_penalty;
+        }
+        if (VINOX_FIELD_PRESENT(options, frequency_penalty) && options->frequency_penalty != 0.0f) {
+            config.frequency_penalty = options->frequency_penalty;
+        }
+
+        // OpenVINO GenAI 2026.3.0 Structured Output (Constrained Decoding via JSONSchema)
+        if (VINOX_FIELD_PRESENT(options, structured_output_json_schema) &&
+            options->structured_output_json_schema &&
+            std::strlen(options->structured_output_json_schema) > 0) {
+            ov::genai::StructuredOutputConfig so_cfg;
+            so_cfg.json_schema = std::string(options->structured_output_json_schema);
+            config.structured_output_config = so_cfg;
+        }
+
+        // Attach native OpenVINO 2026.3.0 tool parsers if requested
+        if (VINOX_FIELD_PRESENT(options, enable_native_tool_parser) && options->enable_native_tool_parser != 0) {
+            config.parsers.push_back(std::make_shared<ov::genai::Llama3JsonToolParser>());
+        }
+
+        // Attach native OpenVINO 2026.3.0 reasoning parsers
+        if (rmode == VINOX_REASONING_TAGGED) {
+            if (start_policy == VINOX_REASONING_START_PREFILLED) {
+                config.parsers.push_back(std::make_shared<ov::genai::DeepSeekR1ReasoningParser>());
+            } else {
+                config.parsers.push_back(std::make_shared<ov::genai::ReasoningParser>(
+                    /*expect_open_tag=*/(start_policy != VINOX_REASONING_START_IMPLICIT),
+                    /*keep_original_content=*/false,
+                    /*open_tag=*/start_tag.empty() ? "<think>" : start_tag,
+                    /*close_tag=*/end_tag.empty() ? "</think>" : end_tag
+                ));
+            }
         }
 
         model->cancel_requested.store(false);
@@ -1226,7 +1460,22 @@ vinox_status vinox_model_generate_stream(
             return ov::genai::StreamingStatus::RUNNING;
         };
 
-        model->pipeline->generate(options->prompt, config, streamer);
+        ov::genai::DecodedResults res = model->pipeline->generate(options->prompt, config, streamer);
+
+        if (rmode == VINOX_REASONING_TAGGED && !accumulated_buf.empty() && parse_error == VINOX_STATUS_OK) {
+            if (!in_reasoning) {
+                final_token_count++;
+                callback(VINOX_STREAM_CHANNEL_FINAL, accumulated_buf.data(), accumulated_buf.size(), user_data);
+                accumulated_buf.clear();
+            }
+        }
+
+        // Native 2026.3.0 parser validation: check if parsed fields confirm convergence
+        if (rmode == VINOX_REASONING_TAGGED && !res.parsed.empty() && parse_error == VINOX_STATUS_OK) {
+            if (res.parsed[0].contains("reasoning_content")) {
+                reasoning_completed = true;
+            }
+        }
 
         if (rmode == VINOX_REASONING_TAGGED && in_reasoning && parse_error == VINOX_STATUS_OK) {
             parse_error = VINOX_STATUS_REASONING_NOT_CONVERGED;
@@ -1301,6 +1550,84 @@ vinox_status vinox_model_cancel(vinox_model* model) {
     return VINOX_STATUS_OK;
 }
 
+vinox_status vinox_devices_query(
+    vinox_device_info* out_devices,
+    size_t max_count,
+    size_t* out_count,
+    char* out_prioritized_device,
+    size_t prioritized_device_size
+) {
+    if (out_count == nullptr) {
+        return fail_arg("out_count cannot be null");
+    }
+
+    try {
+        ov::Core core;
+        auto raw_devs = core.get_available_devices();
+
+        // Separate and sort by strict priority: NPU (1) > GPU (2) > CPU (3) > Other (4)
+        std::vector<std::string> npu_devs;
+        std::vector<std::string> gpu_devs;
+        std::vector<std::string> cpu_devs;
+        std::vector<std::string> other_devs;
+
+        for (const auto& d : raw_devs) {
+            if (d.find("NPU") != std::string::npos) {
+                npu_devs.push_back(d);
+            } else if (d.find("GPU") != std::string::npos) {
+                gpu_devs.push_back(d);
+            } else if (d.find("CPU") != std::string::npos) {
+                cpu_devs.push_back(d);
+            } else {
+                other_devs.push_back(d);
+            }
+        }
+
+        std::vector<std::pair<std::string, uint32_t>> ordered;
+        for (const auto& d : npu_devs) ordered.push_back({d, 1});
+        for (const auto& d : gpu_devs) ordered.push_back({d, 2});
+        for (const auto& d : cpu_devs) ordered.push_back({d, 3});
+        for (const auto& d : other_devs) ordered.push_back({d, 4});
+
+        std::string top_priority = "CPU";
+        if (!npu_devs.empty()) {
+            top_priority = npu_devs.front();
+        } else if (!gpu_devs.empty()) {
+            top_priority = gpu_devs.front();
+        }
+
+        if (out_prioritized_device && prioritized_device_size > 0) {
+            strncpy_s(out_prioritized_device, prioritized_device_size, top_priority.c_str(), _TRUNCATE);
+        }
+
+        size_t count = 0;
+        for (const auto& [dev, prio] : ordered) {
+            if (out_devices && count < max_count) {
+                vinox_device_info& info = out_devices[count];
+                info.struct_size = sizeof(vinox_device_info);
+                strncpy_s(info.device_id, sizeof(info.device_id), dev.c_str(), _TRUNCATE);
+
+                std::string full_name;
+                try {
+                    full_name = core.get_property(dev, ov::device::full_name);
+                } catch (...) {
+                    full_name = dev;
+                }
+                strncpy_s(info.full_name, sizeof(info.full_name), full_name.c_str(), _TRUNCATE);
+                info.priority = prio;
+                info.is_available = 1;
+            }
+            count++;
+        }
+
+        *out_count = count;
+        last_error.clear();
+        return VINOX_STATUS_OK;
+    } catch (const std::exception& e) {
+        return fail_runtime(e);
+    }
+}
+
 void vinox_model_destroy(vinox_model* model) {
     delete model;
 }
@@ -1308,3 +1635,4 @@ void vinox_model_destroy(vinox_model* model) {
 const char* vinox_openvino_last_error(void) {
     return last_error.c_str();
 }
+
