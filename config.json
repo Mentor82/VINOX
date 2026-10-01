@@ -29,6 +29,7 @@
   },
   "linep": {
     "served_models": [],
-    "served_embedding_model": ""
+    "served_embedding_model": "",
+    "embedding_device": "CPU"
   }
 }

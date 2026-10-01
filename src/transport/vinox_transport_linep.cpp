@@ -268,6 +268,7 @@ struct LinepWorker::Impl {
     std::mutex embedding_mutex;
     std::unique_ptr<vinox::embedding::EmbeddingEngine> embedding_engine;
     std::string embedding_engine_model_path; // path the cached engine was loaded from
+    std::thread embedding_preload_thread;
 
     explicit Impl(const WorkerConfig& cfg) : config(cfg), active_port(cfg.port) {
 #ifdef _WIN32
@@ -404,6 +405,7 @@ struct LinepWorker::Impl {
     struct LinepServeConfig {
         std::vector<std::string> served_models;
         std::string served_embedding_model;
+        std::string embedding_device = "CPU";
     };
 
     LinepServeConfig ReadLinepServeConfig() {
@@ -430,6 +432,9 @@ struct LinepWorker::Impl {
                     }
                     if (linep_cfg.contains("served_embedding_model") && linep_cfg["served_embedding_model"].is_string()) {
                         out.served_embedding_model = linep_cfg["served_embedding_model"].get<std::string>();
+                    }
+                    if (linep_cfg.contains("embedding_device") && linep_cfg["embedding_device"].is_string()) {
+                        out.embedding_device = linep_cfg["embedding_device"].get<std::string>();
                     }
                 }
                 break; // first config.json found wins, regardless of content
@@ -504,8 +509,9 @@ struct LinepWorker::Impl {
             return VINOX_STATUS_NOT_FOUND;
         }
 
+        std::string device = ReadLinepServeConfig().embedding_device;
         auto engine = std::make_unique<vinox::embedding::EmbeddingEngine>();
-        vinox_status st = engine->load(model_path, "CPU");
+        vinox_status st = engine->load(model_path, device);
         if (st != VINOX_STATUS_OK) {
             return st;
         }
@@ -550,6 +556,16 @@ struct LinepWorker::Impl {
 
         running.store(true);
         listener_thread = std::thread(&Impl::AcceptLoop, this);
+
+        // Preload the released embedding model off the accept path so the first
+        // RUNTIME_CAPABILITIES request never pays a cold OpenVINO compile (which
+        // can take tens of seconds) and a router with a short readiness timeout
+        // does not see the worker as unavailable right after start.
+        std::string served_embedding_model = ReadLinepServeConfig().served_embedding_model;
+        if (!served_embedding_model.empty()) {
+            embedding_preload_thread = std::thread(&Impl::EnsureEmbeddingEngineLoaded, this, served_embedding_model);
+        }
+
         return VINOX_STATUS_OK;
     }
 
@@ -563,6 +579,9 @@ struct LinepWorker::Impl {
 
         if (listener_thread.joinable()) {
             listener_thread.join();
+        }
+        if (embedding_preload_thread.joinable()) {
+            embedding_preload_thread.join();
         }
     }
 
@@ -635,18 +654,26 @@ struct LinepWorker::Impl {
             write_string_u16(payload, m);
         }
 
-        // 5. supported_embedding_spaces (only report when linep.served_embedding_model
-        // names a model that is actually present and successfully loads)
-        std::string served_embedding_model = ReadLinepServeConfig().served_embedding_model;
+        // 5. supported_embedding_spaces (only report once the model named by
+        // linep.served_embedding_model has actually finished loading). This must
+        // never block: the engine is preloaded from Start() on its own thread, and
+        // Capabilities only reports what is already warm. A cold/in-flight load
+        // (or none configured) reports 0 spaces rather than stall the caller -
+        // a router with a short capabilities timeout must see the worker as
+        // reachable immediately after start, even while the embedding model is
+        // still compiling in the background.
         vinox_embedding_info emb_info{};
         bool have_emb_info = false;
         char emb_pool[512] = {0};
 
-        if (!served_embedding_model.empty() && EnsureEmbeddingEngineLoaded(served_embedding_model) == VINOX_STATUS_OK) {
-            std::lock_guard<std::mutex> lock(embedding_mutex);
-            emb_info.struct_size = sizeof(emb_info);
-            have_emb_info = (vinox_embedding_get_info(embedding_engine->get(), &emb_info, emb_pool, sizeof(emb_pool)) == VINOX_STATUS_OK);
+        {
+            std::unique_lock<std::mutex> lock(embedding_mutex, std::try_to_lock);
+            if (lock.owns_lock() && embedding_engine && embedding_engine->is_valid()) {
+                emb_info.struct_size = sizeof(emb_info);
+                have_emb_info = (vinox_embedding_get_info(embedding_engine->get(), &emb_info, emb_pool, sizeof(emb_pool)) == VINOX_STATUS_OK);
+            }
         }
+        std::string served_embedding_model = have_emb_info ? ReadLinepServeConfig().served_embedding_model : std::string();
 
         if (have_emb_info) {
             write_u16(payload, 1);
@@ -893,14 +920,19 @@ struct LinepWorker::Impl {
                 if (!recv_all(conn->fd, auth_ext, 24)) break;
             }
 
-            if (config.security_level == VINOX_LINEP_SL0_LOCAL && has_auth_ext) {
-                SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, 1, 12 /* failed */, "", 3 /* failed */, 400, "Worker running in SL0 plain mode; auth extension frames rejected");
-                break;
-            }
-
+            // Always drain the rest of the frame off the socket before replying or
+            // closing, even when the frame will be rejected below. Otherwise the
+            // client's still-unread payload bytes make Windows send a TCP RST on
+            // close instead of a clean shutdown, which can drop our own reply
+            // (observed live as WinError 10054 on the client side).
             std::vector<uint8_t> payload(hdr.payload_len);
             if (hdr.payload_len > 0) {
                 if (!recv_all(conn->fd, payload.data(), hdr.payload_len)) break;
+            }
+
+            if (config.security_level == VINOX_LINEP_SL0_LOCAL && has_auth_ext) {
+                SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, 1, 12 /* failed */, "", 3 /* failed */, 400, "Worker running in SL0 plain mode; auth extension frames rejected");
+                break;
             }
 
             BufferReader reader(payload.data(), payload.size());
