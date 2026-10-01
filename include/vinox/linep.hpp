@@ -13,11 +13,12 @@ namespace transport {
 struct WorkerConfig {
     std::string server_address = "127.0.0.1";
     uint16_t port = 52425;
-    vinox_linep_security_level security_level = VINOX_LINEP_SL1_TOKEN;
+    vinox_linep_security_level security_level = VINOX_LINEP_SL0_LOCAL;
     vinox_linep_host_profile host_profile = VINOX_LINEP_PROFILE_BALANCED;
     std::string target_device = "NPU";
     uint32_t max_concurrent_jobs = 4;
     uint32_t payload_limit_bytes = 262144; // 256 KB governance payload bound
+    bool allow_mock_models = false;
 };
 
 struct ExecutionResult {

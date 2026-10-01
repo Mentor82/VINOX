@@ -11,6 +11,7 @@ int main() {
     vinox_linep_worker_config cfg;
     vinox_linep_worker_config_init(&cfg);
     cfg.port = 52425;
+    cfg.allow_mock_models = 1;
 
     vinox_linep_worker* worker = nullptr;
     if (vinox_linep_worker_create(&cfg, &worker) != VINOX_STATUS_OK) {

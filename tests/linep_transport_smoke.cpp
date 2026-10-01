@@ -121,14 +121,15 @@ int main() {
         return 1;
     }
 
-    if (cfg.security_level != VINOX_LINEP_SL1_TOKEN || cfg.host_profile != VINOX_LINEP_PROFILE_BALANCED) {
+    if (cfg.security_level != VINOX_LINEP_SL0_LOCAL || cfg.host_profile != VINOX_LINEP_PROFILE_BALANCED) {
         std::cerr << "FAILED: Default config mismatch!\n";
         return 1;
     }
-    std::cout << "[PASS 01] Default config initialized (SL1_TOKEN, PROFILE_BALANCED, target device=" << cfg.target_device << ").\n";
+    std::cout << "[PASS 01] Default config initialized (SL0_LOCAL, PROFILE_BALANCED, target device=" << cfg.target_device << ").\n";
 
     // 2. Create Worker Instance with Port 0 (Ephemeral Port)
     cfg.port = 0;
+    cfg.allow_mock_models = 1;
     vinox_linep_worker* worker = nullptr;
     st = vinox_linep_worker_create(&cfg, &worker);
     if (st != VINOX_STATUS_OK || worker == nullptr) {
@@ -155,13 +156,13 @@ int main() {
         inet_pton(AF_INET, "127.0.0.1", &saddr.sin_addr);
 
         if (connect(sock, reinterpret_cast<sockaddr*>(&saddr), sizeof(saddr)) == 0) {
-            // Send SESSION_BIND with SL1 Auth Framing (flags = 0x01)
-            uint8_t bind_hdr[32 + 24] = {0};
+            // 1. Send plain SL0 SESSION_BIND (flags = 0x00)
+            uint8_t bind_hdr[32] = {0};
             uint32_t magic = 0x504E4C32;
             std::memcpy(bind_hdr, &magic, 4);
             bind_hdr[4] = 0; bind_hdr[5] = 2;
             bind_hdr[6] = 5; // SessionBind
-            bind_hdr[7] = 0x01; // Auth Extension Flag
+            bind_hdr[7] = 0x00; // Plain SL0 (No Auth Extension)
             uint64_t req_id = 999;
             std::memcpy(bind_hdr + 8, &req_id, 8);
 
@@ -180,6 +181,42 @@ int main() {
                 }
             }
             closesocket(sock);
+        }
+
+        // 3b. Verify SL1 Auth Flag Rejection on SL0 Worker
+        SOCKET sl1_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (sl1_sock != INVALID_SOCKET) {
+            sockaddr_in saddr{};
+            saddr.sin_family = AF_INET;
+            saddr.sin_port = htons(active_port);
+            inet_pton(AF_INET, "127.0.0.1", &saddr.sin_addr);
+
+            if (connect(sl1_sock, reinterpret_cast<sockaddr*>(&saddr), sizeof(saddr)) == 0) {
+                uint8_t sl1_hdr[32 + 24] = {0};
+                uint32_t magic = 0x504E4C32;
+                std::memcpy(sl1_hdr, &magic, 4);
+                sl1_hdr[4] = 0; sl1_hdr[5] = 2;
+                sl1_hdr[6] = 5; // SessionBind
+                sl1_hdr[7] = 0x01; // Auth Extension Flag set
+                uint64_t req_id = 1000;
+                std::memcpy(sl1_hdr + 8, &req_id, 8);
+
+                send_all_smoke(sl1_sock, sl1_hdr, sizeof(sl1_hdr));
+
+                uint8_t resp_hdr[32] = {0};
+                if (recv_all_smoke(sl1_sock, resp_hdr, 32)) {
+                    WireHeader* rh = reinterpret_cast<WireHeader*>(resp_hdr);
+                    if (rh->magic == magic && rh->envelope_type == 2 /* Event error */) {
+                        std::cout << "[PASS 03b] SL1-flagged frame correctly rejected on SL0 plain worker.\n";
+                    } else {
+                        std::cerr << "FAILED: SL1-flagged frame was not rejected with Event error! Received: " << (int)rh->envelope_type << "\n";
+                        closesocket(sl1_sock);
+                        vinox_linep_worker_destroy(worker);
+                        return 1;
+                    }
+                }
+                closesocket(sl1_sock);
+            }
         }
     }
 

@@ -34,7 +34,9 @@ typedef int SOCKET;
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
+#include <nlohmann/json.hpp>
 
 namespace fs = std::filesystem;
 
@@ -284,9 +286,10 @@ struct LinepWorker::Impl {
         return true;
     }
 
-    bool EnforceAdmissionControl(const std::string& payload, const std::string& preferred_device, std::string& out_device, std::string& out_err) {
+    bool EnforceAdmissionControl(const std::string& payload, const std::string& preferred_device, std::string& out_device, std::string& out_err, uint32_t& out_code) {
         if (payload.size() > config.payload_limit_bytes) {
             out_err = "Payload size " + std::to_string(payload.size()) + " bytes exceeds 256 KB governance bound (" + std::to_string(config.payload_limit_bytes) + ")";
+            out_code = 413;
             return false;
         }
 
@@ -295,41 +298,137 @@ struct LinepWorker::Impl {
             limit = 1;
         }
         if (active_jobs.load() >= limit) {
-            out_err = "Host worker admission control rejected request: active jobs (" + std::to_string(active_jobs.load()) + ") reached limit (" + std::to_string(limit) + ") for profile";
+            out_err = "busy: worker max capacity reached (active jobs: " + std::to_string(active_jobs.load()) + "/" + std::to_string(limit) + ")";
+            out_code = 503;
             return false;
         }
 
+        out_code = 200;
         ResolveHardwareDevice(preferred_device, out_device);
         return true;
+    }
+
+    std::vector<fs::path> GetConfiguredSearchRoots() {
+        std::vector<fs::path> roots;
+        std::error_code ec;
+
+        // 1. Check config.json for configured model path
+        fs::path cfg_candidates[] = {
+            fs::path("config.json"),
+            fs::path("C:/ai/openvino/config.json")
+        };
+
+        for (const auto& cp : cfg_candidates) {
+            if (fs::exists(cp, ec)) {
+                std::ifstream f(cp);
+                if (f.is_open()) {
+                    try {
+                        nlohmann::json j;
+                        f >> j;
+                        std::string path_str;
+                        if (j.contains("models_directory") && j["models_directory"].is_string()) {
+                            path_str = j["models_directory"].get<std::string>();
+                        } else if (j.contains("models_path") && j["models_path"].is_string()) {
+                            path_str = j["models_path"].get<std::string>();
+                        } else if (j.contains("runtime") && j["runtime"].is_object()) {
+                            if (j["runtime"].contains("models_directory") && j["runtime"]["models_directory"].is_string()) {
+                                path_str = j["runtime"]["models_directory"].get<std::string>();
+                            } else if (j["runtime"].contains("models_path") && j["runtime"]["models_path"].is_string()) {
+                                path_str = j["runtime"]["models_path"].get<std::string>();
+                            }
+                        }
+
+                        if (!path_str.empty()) {
+                            fs::path configured_p(path_str);
+                            if (fs::exists(configured_p, ec) && fs::is_directory(configured_p, ec)) {
+                                roots.push_back(configured_p);
+                                break;
+                            }
+                        }
+                    } catch (...) {}
+                }
+            }
+        }
+
+        // 2. Default fallback roots
+        fs::path default_ai("C:/ai/models/OpenVINO");
+        if (std::find(roots.begin(), roots.end(), default_ai) == roots.end()) {
+            if (fs::exists(default_ai, ec) && fs::is_directory(default_ai, ec)) {
+                roots.push_back(default_ai);
+            }
+        }
+
+        fs::path default_local("models");
+        if (std::find(roots.begin(), roots.end(), default_local) == roots.end()) {
+            if (fs::exists(default_local, ec) && fs::is_directory(default_local, ec)) {
+                roots.push_back(default_local);
+            }
+        }
+
+        return roots;
+    }
+
+    bool IsLoadableLlmDirectory(const fs::path& dir_path) {
+        std::error_code ec;
+        if (!fs::is_directory(dir_path, ec)) return false;
+
+        std::string filename = dir_path.filename().string();
+        if (filename.empty() || filename[0] == '.') return false;
+
+        static const std::unordered_set<std::string> ignored_dirs = {
+            "venv", "venvs", "src", "build", "out", "scratch", "sandbox",
+            "trainingdata", "cache", "packaging", "examples", "docs", "cmake", "gui", "thirdparty"
+        };
+
+        std::string lower_fn = filename;
+        std::transform(lower_fn.begin(), lower_fn.end(), lower_fn.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (ignored_dirs.count(lower_fn)) return false;
+
+        // Exclude embedding, TTS, whisper, speech, audio models
+        if (lower_fn.find("bge") != std::string::npos ||
+            lower_fn.find("embed") != std::string::npos ||
+            lower_fn.find("tts") != std::string::npos ||
+            lower_fn.find("whisper") != std::string::npos ||
+            lower_fn.find("speech") != std::string::npos ||
+            lower_fn.find("audio") != std::string::npos ||
+            lower_fn.find("bark") != std::string::npos) {
+            return false;
+        }
+
+        // Require presence of LLM OpenVINO artifacts
+        bool has_llm = fs::exists(dir_path / "openvino_model.xml", ec) ||
+                       fs::exists(dir_path / "openvino_language_model.xml", ec) ||
+                       fs::exists(dir_path / "config.json", ec) ||
+                       fs::exists(dir_path / "manifest.json", ec);
+
+        return has_llm;
     }
 
     std::vector<std::string> GetAvailableLocalModels() {
         std::vector<std::string> models;
         std::error_code ec;
-
-        fs::path search_roots[] = {
-            fs::path("C:/ai/models/OpenVINO"),
-            fs::path("models")
-        };
+        auto search_roots = GetConfiguredSearchRoots();
 
         for (const auto& root : search_roots) {
             if (fs::exists(root, ec) && fs::is_directory(root, ec)) {
                 for (const auto& entry : fs::directory_iterator(root, ec)) {
                     if (ec) break;
                     if (entry.is_directory(ec)) {
-                        std::string name = entry.path().filename().string();
-                        if (std::find(models.begin(), models.end(), name) == models.end()) {
-                            models.push_back(name);
+                        if (IsLoadableLlmDirectory(entry.path())) {
+                            std::string name = entry.path().filename().string();
+                            if (std::find(models.begin(), models.end(), name) == models.end()) {
+                                models.push_back(name);
+                            }
                         }
                     }
                 }
             }
         }
 
-        if (models.empty()) {
-            // Serve only local supported models VINOX can execute (NO fake cloud models like kimi-k3:cloud)
-            models.push_back("qwen2.5:3b");
-            models.push_back("linep-conformance-model-v02");
+        if (config.allow_mock_models) {
+            if (std::find(models.begin(), models.end(), "linep-conformance-model-v02") == models.end()) {
+                models.insert(models.begin(), "linep-conformance-model-v02");
+            }
         }
         return models;
     }
@@ -566,32 +665,50 @@ struct LinepWorker::Impl {
         uint64_t seq = 1;
 
         if (profile_val == 3 /* embed */) {
-            SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 7 /* embedding_result */, "");
-            SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 10 /* completed */, "", 1 /* completed */, 200, "");
-        } else {
-            // 1. Started event (Reporting actual hardware execution device NPU/GPU/CPU)
-            std::string started_json = "{\"status\":\"started\",\"executed_device\":\"" + session->executed_device + "\",\"model\":\"" + session->model_id + "\"}";
-            SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 2 /* started */, started_json);
+            std::string emb_model_dir;
+            bool has_real_embedding = false;
+            std::error_code ec;
+            auto search_roots = GetConfiguredSearchRoots();
 
-            // Locate local OpenVINO model directory across search roots
+            for (const auto& root : search_roots) {
+                if (fs::exists(root, ec) && fs::is_directory(root, ec)) {
+                    for (const auto& entry : fs::directory_iterator(root, ec)) {
+                        if (ec) break;
+                        std::string fname = entry.path().filename().string();
+                        std::string lower_fname = fname;
+                        std::transform(lower_fname.begin(), lower_fname.end(), lower_fname.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                        if (lower_fname.find("bge") != std::string::npos || lower_fname.find("embed") != std::string::npos) {
+                            has_real_embedding = true;
+                            emb_model_dir = entry.path().string();
+                            break;
+                        }
+                    }
+                }
+                if (has_real_embedding) break;
+            }
+
+            if (has_real_embedding || config.allow_mock_models) {
+                SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 7 /* embedding_result */, "");
+                SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 10 /* completed */, "", 1 /* completed */, 200, "");
+            } else {
+                SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 12 /* failed */, "", 3 /* failed */, 501, "No embedding model available on host worker");
+            }
+        } else {
+            // 1. Locate local OpenVINO model directory across configured search roots
             std::string model_path;
             std::error_code ec;
+            auto search_roots = GetConfiguredSearchRoots();
 
-            fs::path search_roots[] = {
-                fs::path("C:/ai/models/OpenVINO") / session->model_id,
-                fs::path("models") / session->model_id,
-                fs::path(session->model_id)
-            };
-
-            for (const auto& sp : search_roots) {
-                if (fs::exists(sp, ec) && fs::is_directory(sp, ec)) {
-                    model_path = sp.string();
+            for (const auto& root : search_roots) {
+                fs::path candidate = root / session->model_id;
+                if (fs::exists(candidate, ec) && fs::is_directory(candidate, ec)) {
+                    model_path = candidate.string();
                     break;
                 }
             }
 
-            // Support mock path ONLY if explicitly requested for conformance test harness
-            if (model_path.empty()) {
+            // Support mock path ONLY if explicitly allowed by configuration (e.g. conformance test harness)
+            if (model_path.empty() && config.allow_mock_models) {
                 if (session->model_id == "linep-conformance-model-v02" || session->model_id == "test_mock" || session->model_id == "mock") {
                     model_path = "mock";
                 }
@@ -622,7 +739,7 @@ struct LinepWorker::Impl {
             vinox_model* ov_model = nullptr;
             vinox_status st = vinox_model_load(&options, &ov_model);
 
-            // Report model loading failure as failed (Type 12) rather than completed (Type 10)
+            // Report model loading failure as failed (Type 12) before sending any started event
             if (st != VINOX_STATUS_OK || ov_model == nullptr) {
                 std::string err_msg = vinox_openvino_last_error();
                 if (err_msg.empty()) err_msg = "Failed to load OpenVINO model pipeline";
@@ -635,6 +752,10 @@ struct LinepWorker::Impl {
                 active_jobs.fetch_sub(1);
                 return;
             }
+
+            // 2. Model successfully loaded -> emit STARTED event now
+            std::string started_json = "{\"status\":\"started\",\"executed_device\":\"" + session->executed_device + "\",\"model\":\"" + session->model_id + "\"}";
+            SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 2 /* started */, started_json);
 
             session->active_model = ov_model;
 
@@ -650,11 +771,10 @@ struct LinepWorker::Impl {
 
             StreamCallbackCtx cb_ctx{this, conn, session, &seq};
             vinox_status gen_st = vinox_model_generate_stream(ov_model, &gen_opts, OpenVINOStreamCallback, &cb_ctx);
-
             vinox_model_destroy(ov_model);
             session->active_model = nullptr;
 
-            // 4. Terminal outcome (Completed = 10 with 200, Cancelled = 11 with outcome=2, err_code=499, Failed = 12 with 500)
+            // 3. Terminal outcome (Completed = 10 with 200, Cancelled = 11 with outcome=2, err_code=499, Failed = 12 with 500)
             if (session->cancel_requested.load()) {
                 SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 11 /* cancelled */, "", 2 /* cancelled */, 499, "request cancelled");
             } else if (gen_st != VINOX_STATUS_OK && gen_st != VINOX_STATUS_CANCELLED) {
@@ -688,6 +808,11 @@ struct LinepWorker::Impl {
             uint8_t auth_ext[24] = {0};
             if (has_auth_ext) { // Wire Auth Extension
                 if (!recv_all(conn->fd, auth_ext, 24)) break;
+            }
+
+            if (config.security_level == VINOX_LINEP_SL0_LOCAL && has_auth_ext) {
+                SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, 1, 12 /* failed */, "", 3 /* failed */, 400, "Worker running in SL0 plain mode; auth extension frames rejected");
+                break;
             }
 
             std::vector<uint8_t> payload(hdr.payload_len);
@@ -732,8 +857,9 @@ struct LinepWorker::Impl {
                 reader.read_u8(stream_req);
 
                 std::string target_device, err_msg;
-                if (!EnforceAdmissionControl(request_payload, "", target_device, err_msg)) {
-                    SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, 1, 12 /* failed */, "", 3 /* failed */, 403, err_msg);
+                uint32_t adm_code = 0;
+                if (!EnforceAdmissionControl(request_payload, "", target_device, err_msg, adm_code)) {
+                    SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, 1, 12 /* failed */, "", 3 /* failed */, adm_code, err_msg);
                     break;
                 }
 
@@ -833,8 +959,9 @@ ExecutionResult LinepWorker::ProcessRequest(
 
     std::string combined_payload = system_prompt + prompt;
     std::string target_device, err_msg;
+    uint32_t adm_code = 0;
 
-    if (!impl_->EnforceAdmissionControl(combined_payload, preferred_device, target_device, err_msg)) {
+    if (!impl_->EnforceAdmissionControl(combined_payload, preferred_device, target_device, err_msg, adm_code)) {
         result.success = false;
         result.error_message = err_msg;
         return result;
@@ -935,7 +1062,7 @@ vinox_status vinox_linep_worker_config_init(vinox_linep_worker_config* config) {
     config->struct_size = sizeof(vinox_linep_worker_config);
     config->server_address = "127.0.0.1";
     config->port = 52425;
-    config->security_level = VINOX_LINEP_SL1_TOKEN;
+    config->security_level = VINOX_LINEP_SL0_LOCAL;
     config->host_profile = VINOX_LINEP_PROFILE_BALANCED;
     config->target_device = "NPU";
     config->max_concurrent_jobs = 4;
@@ -957,6 +1084,7 @@ vinox_status vinox_linep_worker_create(
     if (config->target_device) cpp_config.target_device = config->target_device;
     if (config->max_concurrent_jobs > 0) cpp_config.max_concurrent_jobs = config->max_concurrent_jobs;
     if (config->payload_limit_bytes > 0) cpp_config.payload_limit_bytes = config->payload_limit_bytes;
+    cpp_config.allow_mock_models = (config->allow_mock_models != 0);
 
     auto worker_instance = std::make_unique<vinox_linep_worker>();
     worker_instance->cpp_worker = std::make_unique<vinox::transport::LinepWorker>(cpp_config);

@@ -34,6 +34,7 @@ typedef struct vinox_linep_worker_config {
     const char* target_device; /* "NPU", "GPU", "CPU" */
     uint32_t max_concurrent_jobs;
     uint32_t payload_limit_bytes;
+    uint8_t allow_mock_models;
 } vinox_linep_worker_config;
 
 typedef struct vinox_linep_worker vinox_linep_worker;
