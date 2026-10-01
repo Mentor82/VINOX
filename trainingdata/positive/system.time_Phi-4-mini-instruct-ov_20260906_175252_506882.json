@@ -1,0 +1,62 @@
+{
+  "id": "system.time_Phi-4-mini-instruct-ov_20260906_175252_506882",
+  "tool": "system.time",
+  "model": "Phi-4-mini-instruct-ov",
+  "label": "positive",
+  "notes": "ToolCall: True (Expected: True), Thinking: True",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "system.time",
+        "description": "Gibt die aktuelle Systemzeit und das Datum zurueck.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "timezone": {
+              "type": "string",
+              "description": "Die Zeitzone, z.B. Europe/Berlin oder UTC"
+            }
+          },
+          "required": [
+            "timezone"
+          ]
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a helpful assistant with access to tools. Always begin your response by thinking briefly inside <think>...</think> tags about which tool to call and which arguments are required. After closing </think>, invoke the appropriate tool."
+    },
+    {
+      "role": "user",
+      "content": "What time is it right now in Berlin?"
+    },
+    {
+      "role": "assistant",
+      "reasoning_content": "To get the current system time for Berlin, I will use the 'system.time' function with the timezone parameter set to \"Europe/Berlin\".",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"timezone\":\"Europe/Berlin\"}",
+            "name": "system.time"
+          },
+          "id": "call_6ef9bf01bdf7ce6e",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "{\"local_time\":\"2026-09-06T17:52:34+01:00\",\"timezone_offset_minutes\":60,\"unix_timestamp_seconds\":1788709954,\"utc_time\":\"2026-09-06T16:52:34Z\"}",
+      "name": "system.time",
+      "role": "tool",
+      "tool_call_id": "call_6ef9bf01bdf7ce6e"
+    },
+    {
+      "role": "assistant",
+      "content": "The current local time in Berlin (UTC+1) as of September 6th, 2023 at approximately 5:52 PM is displayed above.\n\nIf you need further assistance or another query related to this information, feel free to ask!"
+    }
+  ]
+}

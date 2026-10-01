@@ -1,0 +1,15 @@
+# Database Configuration for VINOX Sandbox
+connection:
+  driver: sqlite3
+  database_file: "sandbox/data/agent_state.db"
+  timeout_seconds: 30
+  journal_mode: "WAL"
+
+pool:
+  min_connections: 2
+  max_connections: 10
+  idle_timeout_seconds: 300
+
+security:
+  read_only_mode: false
+  enforce_foreign_keys: true

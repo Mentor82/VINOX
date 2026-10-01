@@ -1,0 +1,52 @@
+{
+  "id": "math.calculate_Qwen2.5-1.5B-Instruct-int4-ov_20260906_154145_442167",
+  "tool": "math.calculate",
+  "model": "Qwen2.5-1.5B-Instruct-int4-ov",
+  "label": "positive",
+  "notes": "ToolCall: True (Expected: True), Thinking: False",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "math.calculate",
+        "description": "Fuehrt mathematische Berechnungen durch und wertet arithmetische Ausdruecke aus.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "expression": {
+              "type": "string",
+              "description": "Der mathematische Ausdruck, z.B. '(24 * 15) / 3' oder 'sqrt(144) + 12'"
+            }
+          },
+          "required": [
+            "expression"
+          ]
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a helpful assistant with access to tools. Always begin your response by thinking briefly inside <think>...</think> tags about which tool to call and which arguments are required. After closing </think>, invoke the appropriate tool."
+    },
+    {
+      "role": "user",
+      "content": "Calculate (144 * 12) / 6. What is the exact result?"
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"expression\":\"(144 * 12) / 6\"}",
+            "name": "math.calculate"
+          },
+          "id": "call_4dd3a79209ef3361",
+          "type": "function"
+        }
+      ]
+    }
+  ]
+}

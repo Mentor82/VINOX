@@ -1,0 +1,163 @@
+{
+  "id": "fs.read_deepseek-r1-tokenfix-epoch2-int4-ov_20260907_082906_255070",
+  "tool": "fs.read",
+  "model": "deepseek-r1-tokenfix-epoch2-int4-ov",
+  "label": "positive",
+  "notes": "ToolCall: True (Expected: fs.read), Thinking: True",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "system.time",
+        "description": "Gibt die aktuelle Systemzeit und das Datum zurueck.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "timezone": {
+              "type": "string",
+              "description": "Die Zeitzone, z.B. Europe/Berlin oder UTC"
+            }
+          },
+          "required": [
+            "timezone"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "math.calculate",
+        "description": "Fuehrt mathematische Berechnungen durch und wertet arithmetische Ausdruecke aus (+, -, *, /, %, ^, sqrt, sin, cos, round).",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "expression": {
+              "type": "string",
+              "description": "Der mathematische Ausdruck, z.B. 'sqrt(12^2 + 16^2)' oder '5000 * ((1 + 0.045) ^ 10)'"
+            }
+          },
+          "required": [
+            "expression"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "fs.read",
+        "description": "Read file content within workspace sandbox (e.g. 'sandbox/config/app_settings.json', 'config.json')",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Path to the file to read"
+            }
+          },
+          "required": [
+            "path"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "fs.list",
+        "description": "List directory entries within workspace sandbox (e.g. 'sandbox/src', 'sandbox/data')",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Path to directory to list"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "fs.write",
+        "description": "Write file content within workspace sandbox",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Path to destination file"
+            },
+            "content": {
+              "type": "string",
+              "description": "Text content to write into the file"
+            }
+          },
+          "required": [
+            "path",
+            "content"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "vinox.search",
+        "description": "VINOX Hybrid Retrieval (BM25 + sqlite-vec Vector Search) across indexed documents",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "The natural language query or keywords to search for"
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Maximum number of documents to return"
+            }
+          },
+          "required": [
+            "query"
+          ]
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a helpful assistant with access to tools. Always begin your response by thinking briefly inside <think>...</think> tags about which tool to call and which arguments are required. After closing </think>, invoke the appropriate tool."
+    },
+    {
+      "role": "user",
+      "content": "Zeig mir den Inhalt des Python-Skripts 'sandbox/src/main.py'."
+    },
+    {
+      "role": "assistant",
+      "reasoning_content": "Der Benutzer möchte den Python-Quellcode 'sandbox/src/main.py' ansehen. Ich rufe 'fs.read' mit 'path': 'sandbox/src/main.py' auf.\n",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"path\":\"sandbox/src/main.py\"}",
+            "name": "fs.read"
+          },
+          "id": "call_5bf2f0e8a2e4f2c0",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "{\"bytes\":728,\"content\":\"#!/usr/bin/env python3\\r\\n\\\"\\\"\\\"\\r\\nVINOX Sandbox Microservice\\r\\nDemonstriert einen einfachen API-Endpunkt mit Health-Check und Rechenoperationen.\\r\\n\\\"\\\"\\\"\\r\\n\\r\\nimport sys\\r\\nfrom utils.math_helpers import calculate_growth_rate, compute_hypotenuse\\r\\n\\r\\ndef health_check():\\r\\n    return {\\\"status\\\": \\\"healthy\\\", \\\"service\\\": \\\"vinox-sandbox-worker\\\", \\\"version\\\": \\\"1.0.0\\\"}\\r\\n\\r\\ndef main():\\r\\n    print(\\\"Starte VINOX Sandbox Worker...\\\")\\r\\n    status = health_check()\\r\\n    print(f\\\"Status: {status}\\\")\\r\\n    \\r\\n    # Beispielberechnungen\\r\\n    hyp = compute_hypotenuse(12, 16)\\r\\n    print(f\\\"Test-Hypotenuse (12, 16): {hyp}\\\")\\r\\n    \\r\\n    growth = calculate_growth_rate(1000, 1500, 5)\\r\\n    print(f\\\"Wachstumsrate: {growth:.2f}%\\\")\\r\\n\\r\\nif __name__ == \\\"__main__\\\":\\r\\n    main()\\r\\n\",\"path\":\"sandbox/src/main.py\"}",
+      "name": "fs.read",
+      "role": "tool",
+      "tool_call_id": "call_5bf2f0e8a2e4f2c0"
+    },
+    {
+      "role": "assistant",
+      "content": "Ich soll den Inhalt von 'sandbox/src/main.py' lesen. Ich rufe 'fs.read' mit 'path': 'sandbox/src/main.py' auf.\n"
+    }
+  ]
+}

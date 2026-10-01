@@ -1,0 +1,66 @@
+{
+  "id": "vinox.document_ingest_Qwen2.5-1.5B-Instruct-int4-ov_20260906_173501_779293",
+  "tool": "vinox.document_ingest",
+  "model": "Qwen2.5-1.5B-Instruct-int4-ov",
+  "label": "positive",
+  "notes": "ToolCall: True (Expected: True), Thinking: False",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "vinox.document_ingest",
+        "description": "Ingest a new text document into VINOX storage and vector index",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string",
+              "description": "Title of the document"
+            },
+            "content": {
+              "type": "string",
+              "description": "Text body of the document to ingest"
+            }
+          },
+          "required": [
+            "title",
+            "content"
+          ]
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a helpful assistant with access to tools. Always begin your response by thinking briefly inside <think>...</think> tags about which tool to call and which arguments are required. After closing </think>, invoke the appropriate tool."
+    },
+    {
+      "role": "user",
+      "content": "Ingest a document titled 'ReleaseNotes' with the text 'VINOX 1.0 released with hybrid search.' into the database."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"content\":\"VINOX 1.0 released with hybrid search.\",\"title\":\"ReleaseNotes\"}",
+            "name": "vinox.document_ingest"
+          },
+          "id": "call_c7c4c9b61f7bb707",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "{\"bytes\":38,\"document_id\":\"6bf07049a7618faaf1d810b68f469d9c\",\"status\":\"ingested\",\"title\":\"ReleaseNotes\"}",
+      "name": "vinox.document_ingest",
+      "role": "tool",
+      "tool_call_id": "call_c7c4c9b61f7bb707"
+    },
+    {
+      "role": "assistant",
+      "content": "The document titled 'ReleaseNotes' has been successfully ingested into the database with ID `6bf07049a7618faaf1d810b68f469d9c`. The status is `ingested` indicating that it has been added to both the VINOX storage and the vector index. The title of the document is 'ReleaseNotes'."
+    }
+  ]
+}

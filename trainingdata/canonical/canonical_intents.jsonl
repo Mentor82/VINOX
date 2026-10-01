@@ -1,0 +1,27 @@
+{"intent_id": "time.get_current.berlin", "tool": "system.time", "arguments": {"timezone": "Europe/Berlin"}, "prompts_count": 7, "hard_negatives_count": 3}
+{"intent_id": "time.get_current.utc", "tool": "system.time", "arguments": {"timezone": "UTC"}, "prompts_count": 5, "hard_negatives_count": 1}
+{"intent_id": "math.calculate.arithmetic", "tool": "math.calculate", "arguments": {"expression": "(144 * 12) / 6"}, "prompts_count": 6, "hard_negatives_count": 3}
+{"intent_id": "math.calculate.hypotenuse_pythagoras", "tool": "math.calculate", "arguments": {"expression": "sqrt(12^2 + 16^2)"}, "prompts_count": 6, "hard_negatives_count": 3}
+{"intent_id": "math.calculate.kinetic_energy", "tool": "math.calculate", "arguments": {"expression": "0.5 * 1200 * (27.78 ^ 2)"}, "prompts_count": 6, "hard_negatives_count": 2}
+{"intent_id": "math.calculate.compound_interest", "tool": "math.calculate", "arguments": {"expression": "5000 * ((1 + 0.045) ^ 10)"}, "prompts_count": 6, "hard_negatives_count": 2}
+{"intent_id": "math.calculate.trigonometry_wave", "tool": "math.calculate", "arguments": {"expression": "round(sin(3.14159265 / 4) * 1000) / 1000"}, "prompts_count": 4, "hard_negatives_count": 1}
+{"intent_id": "math.calculate.sample_variance", "tool": "math.calculate", "arguments": {"expression": "((18 - 14)^2 + (12 - 14)^2 + (15 - 14)^2 + (11 - 14)^2) / 4"}, "prompts_count": 4, "hard_negatives_count": 1}
+{"intent_id": "math.calculate.mixed_commercial_fractions", "tool": "math.calculate", "arguments": {"expression": "((350.50 * 1.19) - (120 * 0.95)) / (24 + 1.5)"}, "prompts_count": 4, "hard_negatives_count": 1}
+{"intent_id": "fs.read.nested_source_cpp", "tool": "fs.read", "arguments": {"path": "src/server/agent_handlers.cpp"}, "prompts_count": 7, "hard_negatives_count": 3}
+{"intent_id": "fs.read.windows_backslash_normalization", "tool": "fs.read", "arguments": {"path": "src/plugins/math/plugin_math.cpp"}, "prompts_count": 4, "hard_negatives_count": 2}
+{"intent_id": "fs.read.nested_packaging_script", "tool": "fs.read", "arguments": {"path": "packaging/windows/installer.iss"}, "prompts_count": 4, "hard_negatives_count": 1}
+{"intent_id": "fs.list.deep_plugin_dir", "tool": "fs.list", "arguments": {"path": "src/plugins/time"}, "prompts_count": 6, "hard_negatives_count": 2}
+{"intent_id": "fs.list.nested_docs_dir", "tool": "fs.list", "arguments": {"path": "docs"}, "prompts_count": 4, "hard_negatives_count": 1}
+{"intent_id": "fs.write.nested_benchmark_report", "tool": "fs.write", "arguments": {"path": "out/reports/benchmark_summary.json", "content": "{\"status\":\"complete\",\"accuracy\":0.985,\"npu_accelerated\":true}"}, "prompts_count": 4, "hard_negatives_count": 2}
+{"intent_id": "fs.write.nested_audit_log", "tool": "fs.write", "arguments": {"path": "cache/logs/audit_2026.log", "content": "[2026-09-06T18:40:00Z] System integrity check verified."}, "prompts_count": 4, "hard_negatives_count": 1}
+{"intent_id": "fs.read.path_traversal_sanitized", "tool": "fs.read", "arguments": {"path": "config.json"}, "prompts_count": 4, "hard_negatives_count": 2}
+{"intent_id": "fs.read.sandbox_app_settings", "tool": "fs.read", "arguments": {"path": "sandbox/config/app_settings.json"}, "prompts_count": 6, "hard_negatives_count": 2}
+{"intent_id": "fs.read.sandbox_database_yaml", "tool": "fs.read", "arguments": {"path": "sandbox/config/database.yaml"}, "prompts_count": 4, "hard_negatives_count": 1}
+{"intent_id": "fs.read.sandbox_python_main", "tool": "fs.read", "arguments": {"path": "sandbox/src/main.py"}, "prompts_count": 4, "hard_negatives_count": 1}
+{"intent_id": "fs.read.sandbox_sales_csv", "tool": "fs.read", "arguments": {"path": "sandbox/data/sales_metrics.csv"}, "prompts_count": 4, "hard_negatives_count": 1}
+{"intent_id": "fs.list.sandbox_src", "tool": "fs.list", "arguments": {"path": "sandbox/src"}, "prompts_count": 4, "hard_negatives_count": 1}
+{"intent_id": "fs.write.sandbox_notes", "tool": "fs.write", "arguments": {"path": "sandbox/notes.txt", "content": "Sandbox test run passed with 100% precision."}, "prompts_count": 4, "hard_negatives_count": 1}
+{"intent_id": "retrieval.search.npu_config", "tool": "vinox.search", "arguments": {"query": "OpenVINO NPU acceleration configuration", "limit": 5}, "prompts_count": 6, "hard_negatives_count": 2}
+{"intent_id": "retrieval.search.sqlite_vec_architecture", "tool": "vinox.search", "arguments": {"query": "sqlite-vec BM25 hybrid ranking CTE graph", "limit": 10}, "prompts_count": 4, "hard_negatives_count": 1}
+{"intent_id": "retrieval.ingest.release_notes", "tool": "vinox.document_ingest", "arguments": {"title": "ReleaseNotes", "content": "VINOX 1.0 released with hybrid search."}, "prompts_count": 4, "hard_negatives_count": 1}
+{"intent_id": "retrieval.ingest.npu_guide", "tool": "vinox.document_ingest", "arguments": {"title": "NPU_Guide", "content": "Intel AI Boost NPU accelerates INT4, INT8, FP16 and Mixed Precision models."}, "prompts_count": 2, "hard_negatives_count": 1}

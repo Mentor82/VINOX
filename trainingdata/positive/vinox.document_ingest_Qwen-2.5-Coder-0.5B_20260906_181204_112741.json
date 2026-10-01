@@ -1,0 +1,66 @@
+{
+  "id": "vinox.document_ingest_Qwen-2.5-Coder-0.5B_20260906_181204_112741",
+  "tool": "vinox.document_ingest",
+  "model": "Qwen-2.5-Coder-0.5B",
+  "label": "positive",
+  "notes": "ToolCall: True (Expected: True), Thinking: False",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "vinox.document_ingest",
+        "description": "Ingest a new text document into VINOX storage and vector index",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string",
+              "description": "Title of the document"
+            },
+            "content": {
+              "type": "string",
+              "description": "Text body of the document to ingest"
+            }
+          },
+          "required": [
+            "title",
+            "content"
+          ]
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a helpful assistant with access to tools. Always begin your response by thinking briefly inside <think>...</think> tags about which tool to call and which arguments are required. After closing </think>, invoke the appropriate tool."
+    },
+    {
+      "role": "user",
+      "content": "Ingest a document titled 'ReleaseNotes' with the text 'VINOX 1.0 released with hybrid search.' into the database."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"content\":\"VINOX 1.0 released with hybrid search.\",\"title\":\"ReleaseNotes\"}",
+            "name": "vinox.document_ingest"
+          },
+          "id": "call_494fc3614efe93ca",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "{\"bytes\":38,\"document_id\":\"46f24d6d1e2eb595d6b76dd3c453206d\",\"status\":\"ingested\",\"title\":\"ReleaseNotes\"}",
+      "name": "vinox.document_ingest",
+      "role": "tool",
+      "tool_call_id": "call_494fc3614efe93ca"
+    },
+    {
+      "role": "assistant",
+      "content": "```json\n{\n    \"bytes\": 38,\n    \"document_id\": \"46f24d6d1e2eb595d6b76dd3c453206d\",\n    \"status\": \"ingested\",\n    \"title\": \"ReleaseNotes\"\n}\n```"
+    }
+  ]
+}

@@ -1,0 +1,61 @@
+{
+  "id": "system.time_Qwen-2.5-Coder-0.5B_20260906_181010_986204",
+  "tool": "system.time",
+  "model": "Qwen-2.5-Coder-0.5B",
+  "label": "positive",
+  "notes": "ToolCall: True (Expected: True), Thinking: False",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "system.time",
+        "description": "Gibt die aktuelle Systemzeit und das Datum zurueck.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "timezone": {
+              "type": "string",
+              "description": "Die Zeitzone, z.B. Europe/Berlin oder UTC"
+            }
+          },
+          "required": [
+            "timezone"
+          ]
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a helpful assistant with access to tools. Always begin your response by thinking briefly inside <think>...</think> tags about which tool to call and which arguments are required. After closing </think>, invoke the appropriate tool."
+    },
+    {
+      "role": "user",
+      "content": "What time is it right now in Berlin?"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"timezone\":\"Europe/Berlin\"}",
+            "name": "system.time"
+          },
+          "id": "call_d0fda092f945361d",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "{\"local_time\":\"2026-09-06T18:10:07+01:00\",\"timezone_offset_minutes\":60,\"unix_timestamp_seconds\":1788711007,\"utc_time\":\"2026-09-06T17:10:07Z\"}",
+      "name": "system.time",
+      "role": "tool",
+      "tool_call_id": "call_d0fda092f945361d"
+    },
+    {
+      "role": "assistant",
+      "content": "```json\n{\n    \"name\": \"system.time\",\n    \"arguments\": {\n        \"timezone\": \"UTC\"\n    }\n}\n```"
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "timestamp": "2026-09-06T18:10:54.665083",
+  "model_id": "Qwen-2.5-Coder-0.5B",
+  "tool_name": "fs.list",
+  "is_positive": true,
+  "evaluation_notes": "ToolCall: True (Expected: True), Thinking: False",
+  "input": {
+    "system_prompt": "You are a helpful assistant with access to tools. Always begin your response by thinking briefly inside <think>...</think> tags about which tool to call and which arguments are required. After closing </think>, invoke the appropriate tool.",
+    "user_prompt": "List the files and directories in the current folder.",
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "fs.list",
+          "description": "List directory entries within workspace sandbox",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Path to directory to list, e.g. '.' or 'src'"
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  "output": {
+    "finish_reason": "stop",
+    "reasoning_content": "",
+    "content": "```json\n[\n    {\n        \"name\": \"files\",\n        \"arguments\": [\n            {\n                \"file_path\": \"/home/user/documents/your_project/files.txt\",\n                \"is_directory\": false,\n                \"size\": 12345\n            },\n            {\n                \"file_path\": \"/home/user/projects/myproject/src/main.cpp\",\n                \"is_directory\": true,\n                \"size\": 12345\n            }\n        ]\n    }\n]\n```",
+    "tool_calls": [
+      {
+        "function": {
+          "arguments": "{\"path\":\".\"}",
+          "name": "fs.list"
+        },
+        "id": "call_574cf6835f01f90a",
+        "type": "function"
+      }
+    ]
+  }
+}

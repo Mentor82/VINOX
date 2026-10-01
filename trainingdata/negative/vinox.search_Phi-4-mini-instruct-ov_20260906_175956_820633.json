@@ -1,0 +1,47 @@
+{
+  "id": "vinox.search_Phi-4-mini-instruct-ov_20260906_175956_820633",
+  "tool": "vinox.search",
+  "model": "Phi-4-mini-instruct-ov",
+  "label": "negative",
+  "notes": "ToolCall: False (Expected: False), Thinking: True",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "vinox.search",
+        "description": "VINOX Hybrid Retrieval (BM25 + sqlite-vec Vector Search) across indexed documents and knowledge base",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "The natural language query or keywords to search for"
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Maximum number of documents to return"
+            }
+          },
+          "required": [
+            "query"
+          ]
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a helpful assistant with access to tools. Always begin your response by thinking briefly inside <think>...</think> tags about which tool to call and which arguments are required. After closing </think>, invoke the appropriate tool."
+    },
+    {
+      "role": "user",
+      "content": "Search the documentation for OpenVINO NPU acceleration configuration."
+    },
+    {
+      "role": "assistant",
+      "reasoning_content": "\nTo find information on configuring OpenVINO's Neural Processing Unit (NPU) acceleration, I will use the VINOX Hybrid Retrieval function since it can index various types of data including technical manuals like those found in software libraries such as OpenVINO.\n",
+      "content": "\n\ninvoke vinox.search({\"query\": \"OpenVINO NPU acceleration configuration\", \"limit\": 5})"
+    }
+  ]
+}
