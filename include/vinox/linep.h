@@ -49,6 +49,7 @@ VINOX_API void vinox_linep_worker_destroy(vinox_linep_worker* worker);
 VINOX_API vinox_status vinox_linep_worker_start(vinox_linep_worker* worker);
 VINOX_API vinox_status vinox_linep_worker_stop(vinox_linep_worker* worker);
 VINOX_API int vinox_linep_worker_is_running(const vinox_linep_worker* worker);
+VINOX_API uint16_t vinox_linep_worker_get_active_port(const vinox_linep_worker* worker);
 
 VINOX_API vinox_status vinox_linep_worker_dispatch_request(
     vinox_linep_worker* worker,

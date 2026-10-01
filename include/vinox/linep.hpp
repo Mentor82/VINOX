@@ -41,6 +41,7 @@ public:
     vinox_status Start();
     vinox_status Stop();
     bool IsRunning() const;
+    uint16_t GetActivePort() const;
 
     ExecutionResult ProcessRequest(
         const std::string& request_id,

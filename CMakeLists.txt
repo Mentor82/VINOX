@@ -466,6 +466,10 @@ if(BUILD_TESTING)
     target_link_libraries(vinox_linep_transport_smoke PRIVATE vinox::transport_linep vinox::core)
     add_test(NAME linep_transport_smoke COMMAND vinox_linep_transport_smoke)
 
+    add_executable(vinox_conformance_test_runner tests/conformance_test_runner.cpp)
+    target_include_directories(vinox_conformance_test_runner PRIVATE include)
+    target_link_libraries(vinox_conformance_test_runner PRIVATE vinox::transport_linep vinox::core)
+
     add_test(NAME audit_smoke COMMAND vinox_cli --audit)
     if(WIN32 AND VINOX_OPENVINO_SDK_ROOT)
         set_tests_properties(audit_smoke cli_process_smoke PROPERTIES ENVIRONMENT
