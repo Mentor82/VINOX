@@ -28,6 +28,8 @@ struct ToolEntry {
     std::string description;
     std::string parameters_json_schema;
     uint32_t security_class;
+    vinox_tool_handler_fn handler{nullptr};
+    void* user_data{nullptr};
 };
 
 struct PolicyRule {
@@ -119,7 +121,14 @@ vinox_status vinox_tool_registry_register_tool(vinox_tool_registry* registry, co
     }
 
     std::lock_guard<std::mutex> lock(registry->mutex);
-    registry->tools[name] = ToolEntry{name, desc, schema_str, sec_class};
+    auto it = registry->tools.find(name);
+    vinox_tool_handler_fn existing_handler = nullptr;
+    void* existing_ud = nullptr;
+    if (it != registry->tools.end()) {
+        existing_handler = it->second.handler;
+        existing_ud = it->second.user_data;
+    }
+    registry->tools[name] = ToolEntry{name, desc, schema_str, sec_class, existing_handler, existing_ud};
     return VINOX_STATUS_OK;
 }
 
@@ -547,6 +556,117 @@ vinox_status vinox_tools_parse_openai_tool_call(
     request_out->arguments_json = args;
 
     return VINOX_STATUS_OK;
+}
+
+vinox_status vinox_tool_registry_register_handler(
+    vinox_tool_registry* registry,
+    const char* tool_name,
+    vinox_tool_handler_fn handler,
+    void* user_data
+) {
+    if (!registry || !tool_name || !handler) {
+        set_tools_last_error("registry, tool_name, and handler cannot be null");
+        return VINOX_STATUS_INVALID_ARGUMENT;
+    }
+    std::lock_guard<std::mutex> lock(registry->mutex);
+    auto it = registry->tools.find(tool_name);
+    if (it == registry->tools.end()) {
+        registry->tools[tool_name] = ToolEntry{tool_name, "", "{}", VINOX_SECURITY_CLASS_READ_ONLY, handler, user_data};
+    } else {
+        it->second.handler = handler;
+        it->second.user_data = user_data;
+    }
+    return VINOX_STATUS_OK;
+}
+
+vinox_status vinox_tool_registry_execute(
+    vinox_tool_registry* registry,
+    const vinox_policy_engine* policy_engine,
+    const vinox_tool_call_request* request,
+    vinox_tool_call_result* result_out,
+    char* pool_buf,
+    size_t pool_buf_size
+) {
+    if (!registry || !request || !result_out || !pool_buf || pool_buf_size == 0) {
+        set_tools_last_error("Invalid arguments for vinox_tool_registry_execute");
+        return VINOX_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (request->struct_size < VINOX_TOOL_CALL_REQUEST_MIN_SIZE ||
+        result_out->struct_size < VINOX_TOOL_CALL_RESULT_MIN_SIZE) {
+        set_tools_last_error("ABI struct_size check failed for tool execution");
+        return VINOX_STATUS_INCOMPATIBLE_ABI;
+    }
+
+    const char* tname = request->tool_name ? request->tool_name : "";
+    const char* cid = request->call_id ? request->call_id : "call_unknown";
+    const char* args = request->arguments_json ? request->arguments_json : "{}";
+
+    result_out->call_id = cid;
+    result_out->status_code = -1;
+    result_out->result_json = "{}";
+    result_out->error_message = "";
+    result_out->execution_duration_ms = 0;
+
+    ToolEntry entry;
+    {
+        std::lock_guard<std::mutex> lock(registry->mutex);
+        auto it = registry->tools.find(tname);
+        if (it == registry->tools.end()) {
+            set_tools_last_error(std::string("Tool not found in registry: ") + tname);
+            result_out->error_message = "Tool not found";
+            return VINOX_STATUS_NOT_FOUND;
+        }
+        entry = it->second;
+    }
+
+    // 1. Validate Arguments Against Schema
+    char val_err[512] = {0};
+    vinox_status val_st = vinox_tool_registry_validate_arguments(registry, tname, args, val_err, sizeof(val_err));
+    if (val_st != VINOX_STATUS_OK) {
+        set_tools_last_error(std::string("Argument validation failed: ") + val_err);
+        result_out->error_message = "Invalid arguments schema";
+        return val_st;
+    }
+
+    // 2. Fail-Closed Policy Engine Check
+    if (policy_engine) {
+        vinox_tool_definition def{};
+        def.struct_size = sizeof(def);
+        def.name = entry.name.c_str();
+        def.description = entry.description.c_str();
+        def.parameters_json_schema = entry.parameters_json_schema.c_str();
+        def.security_class = entry.security_class;
+
+        vinox_policy_decision decision{};
+        decision.struct_size = sizeof(decision);
+        char reason_buf[256] = {0};
+        vinox_status pol_st = vinox_policy_engine_evaluate(policy_engine, request, &def, &decision, reason_buf, sizeof(reason_buf));
+        if (pol_st != VINOX_STATUS_OK || decision.allowed == 0) {
+            std::string reason = decision.reason ? decision.reason : "Policy evaluation denied execution";
+            set_tools_last_error("Policy denied tool execution: " + reason);
+            result_out->error_message = "Execution denied by policy engine";
+            result_out->status_code = 403;
+            return VINOX_STATUS_PERMISSION_DENIED;
+        }
+    }
+
+    // 3. Execution Handler Check
+    if (!entry.handler) {
+        set_tools_last_error(std::string("Tool '") + tname + "' has no execution handler registered");
+        result_out->error_message = "No execution handler";
+        result_out->status_code = 501;
+        return VINOX_STATUS_NOT_SUPPORTED;
+    }
+
+    // 4. Timed Execution
+    auto t_start = std::chrono::steady_clock::now();
+    vinox_status exec_st = entry.handler(request, result_out, pool_buf, pool_buf_size, entry.user_data);
+    auto t_end = std::chrono::steady_clock::now();
+    uint64_t dur_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_start).count();
+    result_out->execution_duration_ms = dur_ms;
+
+    return exec_st;
 }
 
 } // extern "C"
