@@ -25,6 +25,9 @@ typedef struct vinox_model_options {
     uint32_t struct_size;
     const char* model_path;
     const char* device;
+    uint8_t enable_mmap;       /**< 1 = enable ov::enable_mmap (zero-copy virtual memory mapping), 0 = disable */
+    uint8_t enable_cache;      /**< 1 = enable ov::cache_dir for compiled model blobs, 0 = disable */
+    const char* cache_dir;     /**< Path to directory for cached model execution blobs (e.g. on NVMe) */
 } vinox_model_options;
 
 #define VINOX_MODEL_OPTIONS_MIN_SIZE \
@@ -149,6 +152,8 @@ typedef struct vinox_generation_options {
     vinox_reasoning_start_policy reasoning_start_policy;
     vinox_tool_format_mode tool_format;
     const vinox_model_profile* profile;
+    const char* structured_output_json_schema; /* Optional JSONSchema for constrained decoding (OpenVINO GenAI 2026.3) */
+    uint32_t enable_native_tool_parser;        /* 1 = attach OpenVINO GenAI 2026.3 native tool parsers */
 } vinox_generation_options;
 
 VINOX_API vinox_status vinox_generation_options_from_contract(
@@ -198,6 +203,49 @@ VINOX_API vinox_status vinox_model_generate_stream(
  * Can be called safely from any thread while `vinox_model_generate` is running.
  */
 VINOX_API vinox_status vinox_model_cancel(vinox_model* model);
+
+/**
+ * @brief Information about an OpenVINO execution device.
+ */
+typedef struct vinox_device_info {
+    uint32_t struct_size;
+    char device_id[32];      /**< e.g. "NPU", "GPU", "CPU" */
+    char full_name[128];     /**< Full hardware name e.g. "Intel(R) AI Boost" */
+    uint32_t priority;       /**< 1 = highest (NPU), 2 = GPU, 3 = CPU */
+    uint8_t is_available;
+} vinox_device_info;
+
+/**
+ * @brief Queries all available OpenVINO hardware devices, sorting them by strict execution priority (NPU > GPU > CPU).
+ */
+VINOX_API vinox_status vinox_devices_query(
+    vinox_device_info* out_devices,
+    size_t max_count,
+    size_t* out_count,
+    char* out_prioritized_device,
+    size_t prioritized_device_size
+);
+
+/**
+ * @brief Information about a storage device hosting a model or cache path.
+ */
+typedef struct vinox_storage_info {
+    uint32_t struct_size;
+    uint8_t is_nvme;
+    uint8_t is_ssd;
+    char bus_type_name[32];
+    char device_name[128];
+    uint64_t total_bytes;
+    uint64_t free_bytes;
+} vinox_storage_info;
+
+/**
+ * @brief Detects hardware storage properties (NVMe, SSD, Bus Type, Capacity) for a given path.
+ */
+VINOX_API vinox_status vinox_storage_detect(
+    const char* path,
+    vinox_storage_info* info
+);
 
 VINOX_API void vinox_model_destroy(vinox_model* model);
 
