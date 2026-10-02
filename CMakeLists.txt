@@ -466,6 +466,11 @@ if(BUILD_TESTING)
     target_link_libraries(vinox_linep_transport_smoke PRIVATE vinox::transport_linep vinox::core)
     add_test(NAME linep_transport_smoke COMMAND vinox_linep_transport_smoke)
 
+    add_executable(vinox_linep_outbound_lease_smoke tests/linep_outbound_lease_smoke.cpp)
+    target_include_directories(vinox_linep_outbound_lease_smoke PRIVATE include)
+    target_link_libraries(vinox_linep_outbound_lease_smoke PRIVATE vinox::transport_linep vinox::core)
+    add_test(NAME linep_outbound_lease_smoke COMMAND vinox_linep_outbound_lease_smoke)
+
     add_executable(vinox_conformance_test_runner tests/conformance_test_runner.cpp)
     target_include_directories(vinox_conformance_test_runner PRIVATE include)
     target_link_libraries(vinox_conformance_test_runner PRIVATE vinox::transport_linep vinox::core)

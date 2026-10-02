@@ -52,6 +52,24 @@ VINOX_API vinox_status vinox_linep_worker_stop(vinox_linep_worker* worker);
 VINOX_API int vinox_linep_worker_is_running(const vinox_linep_worker* worker);
 VINOX_API uint16_t vinox_linep_worker_get_active_port(const vinox_linep_worker* worker);
 
+typedef struct vinox_linep_session0_npu_status {
+    uint32_t struct_size;
+    uint32_t session_id;
+    uint8_t is_session0;
+    uint8_t npu_available;
+    char device_name[64];
+    char status_message[256];
+} vinox_linep_session0_npu_status;
+
+VINOX_API vinox_status vinox_linep_check_session0_npu_readiness(
+    vinox_linep_session0_npu_status* out_status);
+
+VINOX_API vinox_status vinox_linep_worker_dial_outbound_lease(
+    vinox_linep_worker* worker,
+    const char* orchestrator_host,
+    uint16_t orchestrator_port,
+    const char* sl1_auth_token);
+
 VINOX_API vinox_status vinox_linep_worker_dispatch_request(
     vinox_linep_worker* worker,
     const char* request_id,

@@ -31,6 +31,16 @@ struct ExecutionResult {
     double duration_ms = 0.0;
 };
 
+struct Session0NpuStatus {
+    uint32_t session_id = 0;
+    bool is_session0 = false;
+    bool npu_available = false;
+    std::string device_name;
+    std::string status_message;
+};
+
+VINOX_API Session0NpuStatus CheckSession0NpuReadiness();
+
 class VINOX_API LinepWorker {
 public:
     explicit LinepWorker(const WorkerConfig& config);
@@ -43,6 +53,11 @@ public:
     vinox_status Stop();
     bool IsRunning() const;
     uint16_t GetActivePort() const;
+
+    vinox_status DialOutboundLease(
+        const std::string& orchestrator_host,
+        uint16_t orchestrator_port,
+        const std::string& sl1_auth_token = "");
 
     ExecutionResult ProcessRequest(
         const std::string& request_id,

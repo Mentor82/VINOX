@@ -8,6 +8,7 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
 #pragma comment(lib, "ws2_32.lib")
 typedef int socklen_t;
 #else
@@ -1032,6 +1033,60 @@ struct LinepWorker::Impl {
         }
         conn->active.store(false);
     }
+
+    vinox_status DialOutboundLease(const std::string& host, uint16_t port, const std::string& auth_token) {
+        SOCKET fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (fd == INVALID_SOCKET) return VINOX_STATUS_RUNTIME_ERROR;
+
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        inet_pton(AF_INET, host.c_str(), &addr.sin_addr);
+
+        if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
+            closesocket(fd);
+            return VINOX_STATUS_RUNTIME_ERROR;
+        }
+
+        auto conn = std::make_shared<ClientConnection>(fd);
+
+        // SL1 Initiator SessionBind frame (Envelope 5, Flags 0x01 with 24-byte Auth Extension)
+        uint8_t bind_frame[32 + 24] = {0};
+        WireHeader* bh = reinterpret_cast<WireHeader*>(bind_frame);
+        bh->magic = LINEP_V02_MAGIC;
+        bh->version_major = LINEP_V02_VERSION_MAJOR;
+        bh->version_minor = LINEP_V02_VERSION_MINOR;
+        bh->envelope_type = 5; // SessionBind
+        bh->flags = 0x01; // SL1 Auth Extension flag
+        bh->request_id = 1;
+        bh->payload_len = 0;
+
+        std::string token = auth_token.empty() ? "VINOX_SL1_LEASE_TOKEN" : auth_token;
+        std::memcpy(bind_frame + 32, token.data(), std::min<size_t>(token.size(), 24));
+
+        if (!send_all(conn->fd, bind_frame, sizeof(bind_frame))) {
+            return VINOX_STATUS_RUNTIME_ERROR;
+        }
+
+        // Await canonical Capabilities (Envelope 4) response from orchestrator
+        WireHeader resp_hdr{};
+        if (!recv_all(conn->fd, reinterpret_cast<uint8_t*>(&resp_hdr), sizeof(WireHeader))) {
+            return VINOX_STATUS_RUNTIME_ERROR;
+        }
+
+        if (resp_hdr.magic != LINEP_V02_MAGIC || resp_hdr.envelope_type != 4 /* Capabilities */) {
+            return VINOX_STATUS_RUNTIME_ERROR;
+        }
+
+        std::vector<uint8_t> payload(resp_hdr.payload_len);
+        if (resp_hdr.payload_len > 0) {
+            if (!recv_all(conn->fd, payload.data(), resp_hdr.payload_len)) return VINOX_STATUS_RUNTIME_ERROR;
+        }
+
+        running.store(true);
+        std::thread(&Impl::HandleClientSocket, this, conn).detach();
+        return VINOX_STATUS_OK;
+    }
 };
 
 LinepWorker::LinepWorker(const WorkerConfig& config)
@@ -1056,6 +1111,14 @@ bool LinepWorker::IsRunning() const {
 
 uint16_t LinepWorker::GetActivePort() const {
     return impl_->active_port;
+}
+
+vinox_status LinepWorker::DialOutboundLease(
+    const std::string& orchestrator_host,
+    uint16_t orchestrator_port,
+    const std::string& sl1_auth_token)
+{
+    return impl_->DialOutboundLease(orchestrator_host, orchestrator_port, sl1_auth_token);
 }
 
 ExecutionResult LinepWorker::ProcessRequest(
@@ -1164,6 +1227,50 @@ ExecutionResult LinepWorker::ProcessRequest(
     return result;
 }
 
+Session0NpuStatus CheckSession0NpuReadiness() {
+    Session0NpuStatus res{};
+#ifdef _WIN32
+    DWORD session_id = 0;
+    if (ProcessIdToSessionId(GetCurrentProcessId(), &session_id)) {
+        res.session_id = static_cast<uint32_t>(session_id);
+        res.is_session0 = (session_id == 0);
+    }
+#endif
+
+    vinox_device_info devs[8];
+    size_t count = 0;
+    char top_dev[32] = {0};
+    vinox_status st = vinox_devices_query(devs, 8, &count, top_dev, sizeof(top_dev));
+
+    if (st == VINOX_STATUS_OK && count > 0) {
+        for (size_t i = 0; i < count; ++i) {
+            if (devs[i].is_available && (std::string(devs[i].device_id).find("NPU") != std::string::npos)) {
+                res.npu_available = true;
+                res.device_name = devs[i].full_name;
+                break;
+            }
+        }
+        if (!res.npu_available && top_dev[0] != '\0') {
+            res.device_name = top_dev;
+        }
+    }
+
+    if (res.is_session0) {
+        if (res.npu_available) {
+            res.status_message = "Session 0 NPU readiness verified: NPU driver accessible under service context";
+        } else {
+            res.status_message = "Session 0 active: NPU driver restricted or unavailable in non-interactive session; CPU/GPU fallback ready";
+        }
+    } else {
+        if (res.npu_available) {
+            res.status_message = "Interactive Session " + std::to_string(res.session_id) + " NPU readiness verified";
+        } else {
+            res.status_message = "Interactive Session " + std::to_string(res.session_id) + " active; NPU unavailable";
+        }
+    }
+    return res;
+}
+
 } // namespace transport
 } // namespace vinox
 
@@ -1234,6 +1341,42 @@ int vinox_linep_worker_is_running(const vinox_linep_worker* worker) {
 uint16_t vinox_linep_worker_get_active_port(const vinox_linep_worker* worker) {
     if (worker == nullptr || worker->cpp_worker == nullptr) return 0;
     return worker->cpp_worker->GetActivePort();
+}
+
+vinox_status vinox_linep_check_session0_npu_readiness(
+    vinox_linep_session0_npu_status* out_status)
+{
+    if (out_status == nullptr) return VINOX_STATUS_INVALID_ARGUMENT;
+    std::memset(out_status, 0, sizeof(vinox_linep_session0_npu_status));
+    out_status->struct_size = sizeof(vinox_linep_session0_npu_status);
+
+    auto status = vinox::transport::CheckSession0NpuReadiness();
+    out_status->session_id = status.session_id;
+    out_status->is_session0 = status.is_session0 ? 1 : 0;
+    out_status->npu_available = status.npu_available ? 1 : 0;
+
+#if defined(_WIN32)
+    strncpy_s(out_status->device_name, sizeof(out_status->device_name), status.device_name.c_str(), _TRUNCATE);
+    strncpy_s(out_status->status_message, sizeof(out_status->status_message), status.status_message.c_str(), _TRUNCATE);
+#else
+    strncpy(out_status->device_name, status.device_name.c_str(), sizeof(out_status->device_name) - 1);
+    strncpy(out_status->status_message, status.status_message.c_str(), sizeof(out_status->status_message) - 1);
+#endif
+
+    return VINOX_STATUS_OK;
+}
+
+vinox_status vinox_linep_worker_dial_outbound_lease(
+    vinox_linep_worker* worker,
+    const char* orchestrator_host,
+    uint16_t orchestrator_port,
+    const char* sl1_auth_token)
+{
+    if (worker == nullptr || worker->cpp_worker == nullptr || orchestrator_host == nullptr) {
+        return VINOX_STATUS_INVALID_ARGUMENT;
+    }
+    std::string token = sl1_auth_token ? sl1_auth_token : "";
+    return worker->cpp_worker->DialOutboundLease(orchestrator_host, orchestrator_port, token);
 }
 
 vinox_status vinox_linep_worker_dispatch_request(
