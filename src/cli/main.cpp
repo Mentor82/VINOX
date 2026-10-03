@@ -40,6 +40,7 @@
 #include "vinox/plugins.hpp"
 #include "vinox/tools.h"
 #include "vinox/tools.hpp"
+#include "vinox/linep.h"
 #include "vinox/vinox.h"
 
 namespace {
@@ -101,6 +102,11 @@ struct Arguments {
     std::string tool_policy_str = "readonly";
     std::string embedding_model_path;
     std::string embedding_device = "CPU";
+
+    bool run_worker = false;
+    std::string orchestrator = "127.0.0.1:9000";
+    std::string worker_token;
+    bool allow_mock = false;
 };
 
 void print_usage() {
@@ -108,6 +114,7 @@ void print_usage() {
         << "VINOX CLI - Versatile Inference & Native OpenVINO eXecution\n\n"
         << "Usage:\n"
         << "  vinox-cli --audit\n"
+        << "  vinox-cli --worker [--orchestrator <host:port>] [--token <auth_token>] [--device <NPU|GPU|CPU>]\n"
         << "  vinox-cli --model <path> [--info] [--config-save|--config-reset]\n"
         << "  vinox-cli --model <path> --prompt <text> [--interactive] [--json] [--mode chat|plan|agent]\n"
         << "  vinox-cli --remote <url> [--interactive] [--json]\n\n"
@@ -196,13 +203,25 @@ bool parse_arguments(int argc, char* argv[], Arguments& arguments) {
             arguments.config_reset = true;
             continue;
         }
+        if (argument == "--worker") {
+            arguments.run_worker = true;
+            continue;
+        }
+        if (argument == "--allow-mock") {
+            arguments.allow_mock = true;
+            continue;
+        }
         if (index + 1 >= argc) {
             std::cerr << "Missing value for " << argument << '\n';
             return false;
         }
 
         const std::string value = argv[++index];
-        if (argument == "--model") {
+        if (argument == "--orchestrator") {
+            arguments.orchestrator = value;
+        } else if (argument == "--token") {
+            arguments.worker_token = value;
+        } else if (argument == "--model") {
             arguments.model_path = value;
         } else if (argument == "--embedding-model") {
             arguments.embedding_model_path = value;
@@ -1041,9 +1060,110 @@ ModelDetails inspect_model(const std::string& model_path) {
     return d;
 }
 
+int run_worker_mode(const Arguments& arguments) {
+    std::cout << "================================================================================\n";
+    std::cout << "           VINOX LiNeP Intranet Fleet Worker (ADR 0005)\n";
+    std::cout << "================================================================================\n";
+
+    // 1. Session 0 & Hardware NPU audit
+    vinox_linep_session0_npu_status sess_status{};
+    sess_status.struct_size = sizeof(sess_status);
+    vinox_status s0_st = vinox_linep_check_session0_npu_readiness(&sess_status);
+    if (s0_st == VINOX_STATUS_OK) {
+        std::cout << "[WORKER] Windows Session Check:\n"
+                  << "   - Session ID:       " << sess_status.session_id << "\n"
+                  << "   - Is Session 0:     " << (sess_status.is_session0 ? "YES (Service Mode)" : "NO (Interactive User)") << "\n"
+                  << "   - NPU Available:    " << (sess_status.npu_available ? "YES" : "NO") << "\n"
+                  << "   - Device Name:      " << sess_status.device_name << "\n"
+                  << "   - Status Message:   " << sess_status.status_message << "\n";
+    }
+
+    // 2. Hardware devices discovery
+    vinox_device_info devs[8];
+    size_t dev_count = 0;
+    char top_dev[32] = {0};
+    vinox_status dev_st = vinox_devices_query(devs, 8, &dev_count, top_dev, sizeof(top_dev));
+    if (dev_st == VINOX_STATUS_OK && dev_count > 0) {
+        std::cout << "[WORKER] OpenVINO Execution Devices (" << dev_count << "):\n";
+        for (size_t i = 0; i < dev_count; ++i) {
+            std::cout << "   - " << devs[i].device_id << ": " << devs[i].full_name 
+                      << (devs[i].is_available ? " [READY]" : " [UNAVAILABLE]") << "\n";
+        }
+    }
+
+    std::string target_device = arguments.set_device ? arguments.device : (top_dev[0] != '\0' ? top_dev : "NPU");
+    std::cout << "[WORKER] Target Execution Device: " << target_device << "\n";
+
+    // 3. Configure Worker
+    vinox_linep_worker_config cfg;
+    vinox_linep_worker_config_init(&cfg);
+    cfg.port = 0;
+    cfg.target_device = target_device.c_str();
+    cfg.allow_mock_models = arguments.allow_mock ? 1 : 0;
+
+    vinox_linep_worker* worker = nullptr;
+    vinox_status st = vinox_linep_worker_create(&cfg, &worker);
+    if (st != VINOX_STATUS_OK || !worker) {
+        std::cerr << "[WORKER] FAILED to create LinepWorker: " << st << "\n";
+        return 1;
+    }
+
+    // 4. Parse orchestrator host:port
+    std::string orch_host = "127.0.0.1";
+    uint16_t orch_port = 9000;
+    auto colon_pos = arguments.orchestrator.find(':');
+    if (colon_pos != std::string::npos) {
+        orch_host = arguments.orchestrator.substr(0, colon_pos);
+        try {
+            orch_port = static_cast<uint16_t>(std::stoul(arguments.orchestrator.substr(colon_pos + 1)));
+        } catch (...) {
+            orch_port = 9000;
+        }
+    } else if (!arguments.orchestrator.empty()) {
+        orch_host = arguments.orchestrator;
+    }
+
+    std::string token = arguments.worker_token;
+    if (token.empty()) {
+        const char* env_tok = std::getenv("LINEP_WORKER_TOKEN");
+        if (env_tok) token = env_tok;
+    }
+
+    std::cout << "[WORKER] Initiating Outbound LiNeP V0.2 lease dial to " << orch_host << ":" << orch_port << " ...\n";
+    std::cout.flush();
+    st = vinox_linep_worker_dial_outbound_lease(worker, orch_host.c_str(), orch_port, token.c_str());
+    if (st != VINOX_STATUS_OK) {
+        std::cerr << "[WORKER] FAILED: dial_outbound_lease returned status " << st << "\n";
+        std::cerr.flush();
+        vinox_linep_worker_destroy(worker);
+        return 1;
+    }
+
+    std::cout << "[WORKER] SUCCESS: Outbound lease bound & registered with cluster orchestrator!\n"
+              << "[WORKER] Listening for forwarded inference tasks over authenticated LiNeP trunk.\n"
+              << "[WORKER] Press Ctrl+C to terminate worker.\n";
+    std::cout.flush();
+
+    while (!g_interrupted.load()) {
+        if (!vinox_linep_worker_is_running(worker)) {
+            std::cerr << "[WORKER] Connection lost / worker stopped. Exiting.\n";
+            std::cerr.flush();
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+
+    std::cout << "\n[WORKER] Shutting down worker cleanly...\n";
+    vinox_linep_worker_destroy(worker);
+    std::cout << "[WORKER] Worker offline.\n";
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    std::setvbuf(stderr, nullptr, _IONBF, 0);
     std::signal(SIGINT, signal_handler);
 
     if (argc == 1) {
@@ -1066,6 +1186,10 @@ int main(int argc, char* argv[]) {
 
     if (arguments.run_audit) {
         return run_live_audit();
+    }
+
+    if (arguments.run_worker) {
+        return run_worker_mode(arguments);
     }
 
     // Fail-Closed Check on Remote Mode until Phase 9!

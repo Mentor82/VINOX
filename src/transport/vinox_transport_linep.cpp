@@ -246,128 +246,191 @@ struct Sl1Binding {
     uint64_t lease_token{0xAABBCCDDEEFF0011ULL};
 };
 
-struct Sha256 {
-    uint32_t state[8]{0};
-    uint64_t count{0};
-    uint8_t buffer[64]{0};
-
-    static inline uint32_t rotr(uint32_t x, uint32_t n) { return (x >> n) | (x << (32 - n)); }
-
-    void init() {
-        state[0] = 0x6a09e667;
-        state[1] = 0xbb67ae85;
-        state[2] = 0x3c6ef372;
-        state[3] = 0xa54ff53a;
-        state[4] = 0x510e527f;
-        state[5] = 0x9b05688c;
-        state[6] = 0x1f83d9ab;
-        state[7] = 0x5be0cd19;
-        count = 0;
-    }
-
-    void transform(const uint8_t data[64]) {
-        static const uint32_t K[64] = {
-            0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
-            0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
-            0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
-            0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
-            0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
-            0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
-            0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x39100b57,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
-            0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
-        };
-
-        uint32_t m[64];
-        for (int i = 0; i < 16; ++i) {
-            m[i] = (static_cast<uint32_t>(data[i * 4]) << 24) |
-                   (static_cast<uint32_t>(data[i * 4 + 1]) << 16) |
-                   (static_cast<uint32_t>(data[i * 4 + 2]) << 8) |
-                   (static_cast<uint32_t>(data[i * 4 + 3]));
-        }
-        for (int i = 16; i < 64; ++i) {
-            uint32_t s0 = rotr(m[i - 15], 7) ^ rotr(m[i - 15], 18) ^ (m[i - 15] >> 3);
-            uint32_t s1 = rotr(m[i - 2], 17) ^ rotr(m[i - 2], 19) ^ (m[i - 2] >> 10);
-            m[i] = m[i - 16] + s0 + m[i - 7] + s1;
-        }
-
-        uint32_t a = state[0], b = state[1], c = state[2], d = state[3];
-        uint32_t e = state[4], f = state[5], g = state[6], h = state[7];
-
-        for (int i = 0; i < 64; ++i) {
-            uint32_t S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
-            uint32_t ch = (e & f) ^ ((~e) & g);
-            uint32_t temp1 = h + S1 + ch + K[i] + m[i];
-            uint32_t S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
-            uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
-            uint32_t temp2 = S0 + maj;
-
-            h = g; g = f; f = e; e = d + temp1;
-            d = c; c = b; b = a; a = temp1 + temp2;
-        }
-
-        state[0] += a; state[1] += b; state[2] += c; state[3] += d;
-        state[4] += e; state[5] += f; state[6] += g; state[7] += h;
-    }
-
-    void update(const uint8_t* data, size_t len) {
-        for (size_t i = 0; i < len; ++i) {
-            buffer[count % 64] = data[i];
-            count++;
-            if (count % 64 == 0) {
-                transform(buffer);
-            }
+static inline uint32_t linep_crc32(const uint8_t* data, size_t len) {
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < len; ++i) {
+        crc ^= static_cast<uint32_t>(data[i]);
+        for (int b = 0; b < 8; ++b) {
+            uint32_t mask = -(crc & 1);
+            crc = (crc >> 1) ^ (0xEDB88320u & mask);
         }
     }
+    return ~crc;
+}
 
-    void finish(uint8_t digest[32]) {
-        uint8_t pad[64] = {0x80};
-        uint64_t total_bits = count * 8;
-        size_t pad_len = (count % 64 < 56) ? (56 - (count % 64)) : (120 - (count % 64));
-        update(pad, pad_len);
-        uint8_t len_bytes[8];
-        for (int i = 0; i < 8; ++i) {
-            len_bytes[i] = static_cast<uint8_t>((total_bits >> ((7 - i) * 8)) & 0xFF);
-        }
-        update(len_bytes, 8);
-        for (int i = 0; i < 8; ++i) {
-            digest[i * 4] = static_cast<uint8_t>((state[i] >> 24) & 0xFF);
-            digest[i * 4 + 1] = static_cast<uint8_t>((state[i] >> 16) & 0xFF);
-            digest[i * 4 + 2] = static_cast<uint8_t>((state[i] >> 8) & 0xFF);
-            digest[i * 4 + 3] = static_cast<uint8_t>(state[i] & 0xFF);
-        }
-    }
+struct SHA256_CTX {
+    uint8_t data[64];
+    uint32_t datalen;
+    uint64_t bitlen;
+    uint32_t state[8];
 };
 
-inline void hmac_sha256(const uint8_t* key, size_t key_len, const uint8_t* data, size_t data_len, uint8_t out_mac[32]) {
-    uint8_t k[64] = {0};
+#define LINEP_ROTLEFT(a,b) (((a) << (b)) | ((a) >> (32 - (b))))
+#define LINEP_ROTRIGHT(a,b) (((a) >> (b)) | ((a) << (32 - (b))))
+
+#define LINEP_CH(x,y,z) (((x) & (y)) ^ (~(x) & (z)))
+#define LINEP_MAJ(x,y,z) (((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
+#define LINEP_EP0(x) (LINEP_ROTRIGHT(x,2) ^ LINEP_ROTRIGHT(x,13) ^ LINEP_ROTRIGHT(x,22))
+#define LINEP_EP1(x) (LINEP_ROTRIGHT(x,6) ^ LINEP_ROTRIGHT(x,11) ^ LINEP_ROTRIGHT(x,25))
+#define LINEP_SIG0(x) (LINEP_ROTRIGHT(x,7) ^ LINEP_ROTRIGHT(x,18) ^ ((x) >> 3))
+#define LINEP_SIG1(x) (LINEP_ROTRIGHT(x,17) ^ LINEP_ROTRIGHT(x,19) ^ ((x) >> 10))
+
+static const uint32_t LINEP_K[64] = {
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+};
+
+static void linep_sha256_transform(SHA256_CTX* ctx, const uint8_t data[]) {
+    uint32_t a, b, c, d, e, f, g, h, i, j, t1, t2, m[64];
+
+    for (i = 0, j = 0; i < 16; ++i, j += 4)
+        m[i] = ((uint32_t)data[j] << 24) | ((uint32_t)data[j + 1] << 16) | ((uint32_t)data[j + 2] << 8) | ((uint32_t)data[j + 3]);
+    for (; i < 64; ++i)
+        m[i] = LINEP_SIG1(m[i - 2]) + m[i - 7] + LINEP_SIG0(m[i - 15]) + m[i - 16];
+
+    a = ctx->state[0];
+    b = ctx->state[1];
+    c = ctx->state[2];
+    d = ctx->state[3];
+    e = ctx->state[4];
+    f = ctx->state[5];
+    g = ctx->state[6];
+    h = ctx->state[7];
+
+    for (i = 0; i < 64; ++i) {
+        t1 = h + LINEP_EP1(e) + LINEP_CH(e, f, g) + LINEP_K[i] + m[i];
+        t2 = LINEP_EP0(a) + LINEP_MAJ(a, b, c);
+        h = g;
+        g = f;
+        f = e;
+        e = d + t1;
+        d = c;
+        c = b;
+        b = a;
+        a = t1 + t2;
+    }
+
+    ctx->state[0] += a;
+    ctx->state[1] += b;
+    ctx->state[2] += c;
+    ctx->state[3] += d;
+    ctx->state[4] += e;
+    ctx->state[5] += f;
+    ctx->state[6] += g;
+    ctx->state[7] += h;
+}
+
+static void linep_sha256_init(SHA256_CTX* ctx) noexcept {
+    ctx->datalen = 0;
+    ctx->bitlen = 0;
+    ctx->state[0] = 0x6a09e667;
+    ctx->state[1] = 0xbb67ae85;
+    ctx->state[2] = 0x3c6ef372;
+    ctx->state[3] = 0xa54ff53a;
+    ctx->state[4] = 0x510e527f;
+    ctx->state[5] = 0x9b05688c;
+    ctx->state[6] = 0x1f83d9ab;
+    ctx->state[7] = 0x5be0cd19;
+}
+
+static void linep_sha256_update(SHA256_CTX* ctx, const uint8_t* data, size_t len) noexcept {
+    for (size_t i = 0; i < len; ++i) {
+        ctx->data[ctx->datalen] = data[i];
+        ctx->datalen++;
+        if (ctx->datalen == 64) {
+            linep_sha256_transform(ctx, ctx->data);
+            ctx->bitlen += 512;
+            ctx->datalen = 0;
+        }
+    }
+}
+
+static void linep_sha256_final(SHA256_CTX* ctx, uint8_t hash[32]) noexcept {
+    uint32_t i = ctx->datalen;
+
+    if (ctx->datalen < 56) {
+        ctx->data[i++] = 0x80;
+        while (i < 56) ctx->data[i++] = 0x00;
+    } else {
+        ctx->data[i++] = 0x80;
+        while (i < 64) ctx->data[i++] = 0x00;
+        linep_sha256_transform(ctx, ctx->data);
+        std::memset(ctx->data, 0, 56);
+    }
+
+    ctx->bitlen += ctx->datalen * 8;
+    ctx->data[56] = static_cast<uint8_t>(ctx->bitlen >> 56);
+    ctx->data[57] = static_cast<uint8_t>(ctx->bitlen >> 48);
+    ctx->data[58] = static_cast<uint8_t>(ctx->bitlen >> 40);
+    ctx->data[59] = static_cast<uint8_t>(ctx->bitlen >> 32);
+    ctx->data[60] = static_cast<uint8_t>(ctx->bitlen >> 24);
+    ctx->data[61] = static_cast<uint8_t>(ctx->bitlen >> 16);
+    ctx->data[62] = static_cast<uint8_t>(ctx->bitlen >> 8);
+    ctx->data[63] = static_cast<uint8_t>(ctx->bitlen);
+    linep_sha256_transform(ctx, ctx->data);
+
+    for (i = 0; i < 4; ++i) {
+        hash[i]      = static_cast<uint8_t>((ctx->state[0] >> (24 - i * 8)) & 0x000000ff);
+        hash[i + 4]  = static_cast<uint8_t>((ctx->state[1] >> (24 - i * 8)) & 0x000000ff);
+        hash[i + 8]  = static_cast<uint8_t>((ctx->state[2] >> (24 - i * 8)) & 0x000000ff);
+        hash[i + 12] = static_cast<uint8_t>((ctx->state[3] >> (24 - i * 8)) & 0x000000ff);
+        hash[i + 16] = static_cast<uint8_t>((ctx->state[4] >> (24 - i * 8)) & 0x000000ff);
+        hash[i + 20] = static_cast<uint8_t>((ctx->state[5] >> (24 - i * 8)) & 0x000000ff);
+        hash[i + 24] = static_cast<uint8_t>((ctx->state[6] >> (24 - i * 8)) & 0x000000ff);
+        hash[i + 28] = static_cast<uint8_t>((ctx->state[7] >> (24 - i * 8)) & 0x000000ff);
+    }
+}
+
+inline void hmac_sha256(const uint8_t* key, size_t key_len, const uint8_t* data, size_t data_len, uint8_t out_mac[32]) noexcept {
+    uint8_t k[64];
+    std::memset(k, 0, sizeof(k));
+
     if (key_len > 64) {
-        Sha256 s;
-        s.init();
-        s.update(key, key_len);
-        s.finish(k);
+        SHA256_CTX ctx;
+        linep_sha256_init(&ctx);
+        linep_sha256_update(&ctx, key, key_len);
+        linep_sha256_final(&ctx, k);
     } else if (key && key_len > 0) {
         std::memcpy(k, key, key_len);
     }
-    uint8_t k_ipad[64];
-    uint8_t k_opad[64];
-    for (int i = 0; i < 64; ++i) {
-        k_ipad[i] = k[i] ^ 0x36;
-        k_opad[i] = k[i] ^ 0x5c;
-    }
-    uint8_t inner[32];
-    Sha256 s_in;
-    s_in.init();
-    s_in.update(k_ipad, 64);
-    if (data && data_len > 0) {
-        s_in.update(data, data_len);
-    }
-    s_in.finish(inner);
 
-    Sha256 s_out;
-    s_out.init();
-    s_out.update(k_opad, 64);
-    s_out.update(inner, 32);
-    s_out.finish(out_mac);
+    uint8_t ipad[64];
+    uint8_t opad[64];
+
+    for (int i = 0; i < 64; ++i) {
+        ipad[i] = k[i] ^ 0x36;
+        opad[i] = k[i] ^ 0x5c;
+    }
+
+    SHA256_CTX inner_ctx;
+    linep_sha256_init(&inner_ctx);
+    linep_sha256_update(&inner_ctx, ipad, 64);
+    if (data && data_len > 0) {
+        linep_sha256_update(&inner_ctx, data, data_len);
+    }
+    uint8_t inner_hash[32];
+    linep_sha256_final(&inner_ctx, inner_hash);
+
+    SHA256_CTX outer_ctx;
+    linep_sha256_init(&outer_ctx);
+    linep_sha256_update(&outer_ctx, opad, 64);
+    linep_sha256_update(&outer_ctx, inner_hash, 32);
+    linep_sha256_final(&outer_ctx, out_mac);
+}
+
+inline void linep_sha256(const uint8_t* data, size_t len, uint8_t digest[32]) noexcept {
+    SHA256_CTX ctx;
+    linep_sha256_init(&ctx);
+    if (data && len > 0) {
+        linep_sha256_update(&ctx, data, len);
+    }
+    linep_sha256_final(&ctx, digest);
 }
 
 inline void compute_sl1_mac(
@@ -1144,6 +1207,7 @@ struct LinepWorker::Impl {
 
         if (text == nullptr || text_size == 0) return 0;
         std::string chunk(text, text_size);
+        std::cout << "[LINEP-WORKER] Stream chunk: " << chunk << "\n" << std::flush;
 
         if (channel == VINOX_STREAM_CHANNEL_REASONING) {
             ctx->self->SendEvent(ctx->conn, ctx->session->request_id, ctx->session->execution_id, ctx->session->output_id, (*ctx->seq_ptr)++, 5 /* reasoning_delta */, chunk);
@@ -1163,6 +1227,7 @@ struct LinepWorker::Impl {
         float temp)
     {
         uint64_t seq = 1;
+        std::cout << "[LINEP-WORKER] Dispatching task req_id=" << hdr.request_id << " model=" << session->model_id << " device=" << session->executed_device << "\n" << std::flush;
 
         if (profile_val == 3 /* embed */) {
             std::string served_embedding_model = ReadLinepServeConfig().served_embedding_model;
@@ -1289,6 +1354,8 @@ struct LinepWorker::Impl {
             vinox_model_destroy(ov_model);
             session->active_model = nullptr;
 
+            std::cout << "[LINEP-WORKER] Generation completed with status=" << gen_st << " sending terminal event...\n" << std::flush;
+
             // 3. Terminal outcome (Completed = 10 with 200, Cancelled = 11 with outcome=2, err_code=499, Failed = 12 with 500)
             if (session->cancel_requested.load()) {
                 SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 11 /* cancelled */, "", 2 /* cancelled */, 499, "request cancelled");
@@ -1299,6 +1366,7 @@ struct LinepWorker::Impl {
             } else {
                 SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, seq++, 10 /* completed */, "", 1 /* completed */, 200, "");
             }
+            std::cout << "[LINEP-WORKER] Terminal event sent for req_id=" << hdr.request_id << "\n" << std::flush;
         }
 
         {
@@ -1312,17 +1380,22 @@ struct LinepWorker::Impl {
         while (running.load() && conn->active.load()) {
             WireHeader hdr{};
             if (!recv_all(conn->fd, reinterpret_cast<uint8_t*>(&hdr), sizeof(WireHeader))) {
+                std::cout << "[LINEP-WORKER] Remote orchestrator closed TCP connection.\n" << std::flush;
                 break;
             }
 
             if (hdr.magic != LINEP_V02_MAGIC) {
+                std::cerr << "[LINEP-WORKER] Protocol error: magic 0x" << std::hex << hdr.magic << std::dec << " != 0x4C494E50\n" << std::flush;
                 break;
             }
 
             bool has_auth_ext = (hdr.flags & 0x01) != 0;
             uint8_t auth_ext[24] = {0};
             if (has_auth_ext) { // Wire Auth Extension
-                if (!recv_all(conn->fd, auth_ext, 24)) break;
+                if (!recv_all(conn->fd, auth_ext, 24)) {
+                    std::cerr << "[LINEP-WORKER] Socket error reading auth extension.\n" << std::flush;
+                    break;
+                }
             }
 
             // Always drain the rest of the frame off the socket before replying or
@@ -1332,7 +1405,10 @@ struct LinepWorker::Impl {
             // (observed live as WinError 10054 on the client side).
             std::vector<uint8_t> payload(hdr.payload_len);
             if (hdr.payload_len > 0) {
-                if (!recv_all(conn->fd, payload.data(), hdr.payload_len)) break;
+                if (!recv_all(conn->fd, payload.data(), hdr.payload_len)) {
+                    std::cerr << "[LINEP-WORKER] Socket error reading payload.\n" << std::flush;
+                    break;
+                }
             }
 
             if (config.security_level == VINOX_LINEP_SL0_LOCAL && !conn->sl1_active && has_auth_ext) {
@@ -1342,6 +1418,7 @@ struct LinepWorker::Impl {
 
             if (conn->sl1_active && !conn->sl1_key.empty()) {
                 if (!has_auth_ext) {
+                    std::cerr << "[LINEP-WORKER] Auth error: missing auth extension on SL1 connection\n" << std::flush;
                     SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, 1, 12 /* failed */, "", 3 /* failed */, 401, "auth_required");
                     break;
                 }
@@ -1353,14 +1430,17 @@ struct LinepWorker::Impl {
                                   (static_cast<uint16_t>(auth_ext[5]) << 8);
 
                 if (auth_seq == 0xFFFFFFFF) {
+                    std::cerr << "[LINEP-WORKER] Auth error: auth_seq exhausted\n" << std::flush;
                     SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, 1, 12 /* failed */, "", 3 /* failed */, 401, "auth_seq_exhausted");
                     break;
                 }
                 if (auth_seq != conn->expected_inbound_seq) {
+                    std::cerr << "[LINEP-WORKER] Auth error: sequence mismatch: got " << auth_seq << " expected " << conn->expected_inbound_seq << "\n" << std::flush;
                     SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, 1, 12 /* failed */, "", 3 /* failed */, 401, "auth_replay");
                     break;
                 }
                 if (key_id != conn->sl1_key_id) {
+                    std::cerr << "[LINEP-WORKER] Auth error: key_id mismatch: got " << key_id << " expected " << conn->sl1_key_id << "\n" << std::flush;
                     SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, 1, 12 /* failed */, "", 3 /* failed */, 401, "unknown_key");
                     break;
                 }
@@ -1368,6 +1448,7 @@ struct LinepWorker::Impl {
                                       hdr, auth_ext, conn->sl1_binding,
                                       conn->inbound_direction,
                                       payload.data(), payload.size())) {
+                    std::cerr << "[LINEP-WORKER] Auth error: SL1 MAC verification failed!\n" << std::flush;
                     SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, 1, 12 /* failed */, "", 3 /* failed */, 401, "auth_invalid");
                     break;
                 }
@@ -1409,9 +1490,14 @@ struct LinepWorker::Impl {
                 reader.read_float(temp);
                 reader.read_u8(stream_req);
 
+                std::cout << "[LINEP-WORKER] Received REQUEST: model=" << model_id
+                          << " req_id=" << hdr.request_id << " exec_id=" << hdr.execution_id
+                          << " max_tokens=" << max_tokens << " temp=" << temp << "\n" << std::flush;
+
                 std::string target_device, err_msg;
                 uint32_t adm_code = 0;
                 if (!EnforceAdmissionControl(request_payload, "", target_device, err_msg, adm_code)) {
+                    std::cerr << "[LINEP-WORKER] Admission control rejected request: " << err_msg << "\n" << std::flush;
                     SendEvent(conn, hdr.request_id, hdr.execution_id, hdr.output_id, 1, 12 /* failed */, "", 3 /* failed */, adm_code, err_msg);
                     break;
                 }
@@ -1467,25 +1553,12 @@ struct LinepWorker::Impl {
             }
         }
         conn->active.store(false);
+        running.store(false);
+        std::cout << "[LINEP-WORKER] HandleClientSocket finished. Worker state set to offline.\n" << std::flush;
     }
 
     vinox_status DialOutboundLease(const std::string& host, uint16_t port, const std::string& auth_token) {
-        SOCKET fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (fd == INVALID_SOCKET) return VINOX_STATUS_RUNTIME_ERROR;
-
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(port);
-        inet_pton(AF_INET, host.c_str(), &addr.sin_addr);
-
-        if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
-            closesocket(fd);
-            return VINOX_STATUS_RUNTIME_ERROR;
-        }
-
-        auto conn = std::make_shared<ClientConnection>(fd);
-
-        // Parse auth_token into key_id, 32-byte key, and binding
+        // 1. Parse auth_token into key_id, 32-byte key, and binding
         uint16_t key_id = 1;
         std::vector<uint8_t> sl1_key;
         Sl1Binding sl1_binding{};
@@ -1509,13 +1582,12 @@ struct LinepWorker::Impl {
             try {
                 key_id = static_cast<uint16_t>(std::stoul(parts[0]));
             } catch (...) { key_id = 1; }
+            sl1_binding.node_id = key_id;
             if (parts[1].size() == 64 && parse_hex_key(parts[1], sl1_key)) {
                 // hex parsed
             } else {
-                Sha256 s; s.init();
-                s.update(reinterpret_cast<const uint8_t*>(parts[1].data()), parts[1].size());
                 sl1_key.resize(32);
-                s.finish(sl1_key.data());
+                linep_sha256(reinterpret_cast<const uint8_t*>(parts[1].data()), parts[1].size(), sl1_key.data());
             }
             if (parts.size() >= 7) {
                 try {
@@ -1525,18 +1597,142 @@ struct LinepWorker::Impl {
                     sl1_binding.control_epoch = std::stoull(parts[5]);
                     sl1_binding.lease_token = std::stoull(parts[6]);
                 } catch (...) {}
+            } else {
+                uint64_t epoch = static_cast<uint64_t>(std::time(nullptr));
+                if (epoch > 0) sl1_binding.control_epoch = epoch;
             }
         } else {
             key_id = 1;
             if (token_str.size() == 64 && parse_hex_key(token_str, sl1_key)) {
                 // hex parsed
             } else {
-                Sha256 s; s.init();
-                s.update(reinterpret_cast<const uint8_t*>(token_str.data()), token_str.size());
                 sl1_key.resize(32);
-                s.finish(sl1_key.data());
+                linep_sha256(reinterpret_cast<const uint8_t*>(token_str.data()), token_str.size(), sl1_key.data());
             }
         }
+
+        // 2. Perform UDP control plane lease handshake if lease not explicitly specified
+        if (parts.size() < 7) {
+            uint16_t udp_port = (port == 9000) ? 9001 : static_cast<uint16_t>(port + 1);
+            SOCKET udp_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+            if (udp_fd != INVALID_SOCKET) {
+#ifdef _WIN32
+                DWORD tv = 300; // 300ms timeout
+                setsockopt(udp_fd, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
+#else
+                struct timeval tv{0, 300000};
+                setsockopt(udp_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#endif
+                sockaddr_in udp_addr{};
+                udp_addr.sin_family = AF_INET;
+                udp_addr.sin_port = htons(udp_port);
+                inet_pton(AF_INET, host.c_str(), &udp_addr.sin_addr);
+
+                uint8_t hello_buf[80] = {0};
+                uint32_t udp_magic = 0x504E4C55; // "ULNP"
+                std::memcpy(hello_buf + 0, &udp_magic, 4);
+                hello_buf[4] = 0; // major
+                hello_buf[5] = 2; // minor
+                hello_buf[6] = 1; // NODE_HELLO
+                hello_buf[7] = 1; // trunk_ready
+                std::memcpy(hello_buf + 8, &sl1_binding.node_id, 8);
+                std::memcpy(hello_buf + 16, &sl1_binding.runtime_id, 8);
+                std::memcpy(hello_buf + 24, &sl1_binding.endpoint_id, 4);
+                uint64_t c_seq = 1;
+                std::memcpy(hello_buf + 28, &c_seq, 8);
+                std::memcpy(hello_buf + 36, &sl1_binding.control_epoch, 8);
+                hello_buf[44] = 1; // avail
+                hello_buf[45] = 1; // health
+                hello_buf[46] = 0; // load
+                hello_buf[47] = 0; // res
+                uint32_t q_depth = 0;
+                std::memcpy(hello_buf + 48, &q_depth, 4);
+                uint32_t cap_rev = 1;
+                std::memcpy(hello_buf + 52, &cap_rev, 4);
+                uint64_t cap_dig = 0;
+                std::memcpy(hello_buf + 56, &cap_dig, 8);
+                uint16_t local_tcp_port = (config.port > 0) ? config.port : port;
+                std::memcpy(hello_buf + 64, &local_tcp_port, 2);
+                uint16_t res2 = 0;
+                std::memcpy(hello_buf + 66, &res2, 2);
+                uint64_t zero_lease = 0;
+                std::memcpy(hello_buf + 68, &zero_lease, 8);
+                uint32_t hello_crc = linep_crc32(hello_buf, 76);
+                std::memcpy(hello_buf + 76, &hello_crc, 4);
+
+                sendto(udp_fd, reinterpret_cast<const char*>(hello_buf), sizeof(hello_buf), 0,
+                       reinterpret_cast<const sockaddr*>(&udp_addr), sizeof(udp_addr));
+
+                uint8_t invite_buf[80] = {0};
+                sockaddr_in from_addr{};
+                int from_len = sizeof(from_addr);
+                int n = recvfrom(udp_fd, reinterpret_cast<char*>(invite_buf), sizeof(invite_buf), 0,
+                                 reinterpret_cast<sockaddr*>(&from_addr), &from_len);
+                std::cout << "[LINEP-DIAL] UDP recvfrom n=" << n << " WSAGetLastError=" << WSAGetLastError() << "\n" << std::flush;
+                if (n == 80) {
+                    uint32_t exp_crc = linep_crc32(invite_buf, 76);
+                    uint32_t act_crc = 0;
+                    std::memcpy(&act_crc, invite_buf + 76, 4);
+                    uint32_t rec_magic = 0;
+                    std::memcpy(&rec_magic, invite_buf + 0, 4);
+                    uint8_t rec_type = invite_buf[6];
+                    if (exp_crc == act_crc && rec_magic == 0x504E4C55 && rec_type == 4 /* INVITE */) {
+                        uint64_t inv_seq = 0, inv_epoch = 0, inv_lease = 0;
+                        std::memcpy(&inv_seq, invite_buf + 28, 8);
+                        std::memcpy(&inv_epoch, invite_buf + 36, 8);
+                        std::memcpy(&inv_lease, invite_buf + 68, 8);
+
+                        sl1_binding.control_epoch = inv_epoch;
+                        sl1_binding.lease_token = inv_lease;
+                        std::cout << "[LINEP-DIAL] UDP INVITE accepted: epoch=" << inv_epoch << " lease=" << std::hex << inv_lease << std::dec << "\n";
+
+                        // Send LEASE_ACK (type 5)
+                        uint8_t ack_buf[80] = {0};
+                        std::memcpy(ack_buf + 0, &udp_magic, 4);
+                        ack_buf[4] = 0;
+                        ack_buf[5] = 2;
+                        ack_buf[6] = 5; // LEASE_ACK
+                        ack_buf[7] = 1; // trunk_ready
+                        std::memcpy(ack_buf + 8, &sl1_binding.node_id, 8);
+                        std::memcpy(ack_buf + 16, &sl1_binding.runtime_id, 8);
+                        std::memcpy(ack_buf + 24, &sl1_binding.endpoint_id, 4);
+                        uint64_t ack_seq = inv_seq + 1;
+                        std::memcpy(ack_buf + 28, &ack_seq, 8);
+                        std::memcpy(ack_buf + 36, &inv_epoch, 8);
+                        ack_buf[44] = 1; ack_buf[45] = 1; ack_buf[46] = 0; ack_buf[47] = 0;
+                        std::memcpy(ack_buf + 48, &q_depth, 4);
+                        std::memcpy(ack_buf + 52, &cap_rev, 4);
+                        std::memcpy(ack_buf + 56, &cap_dig, 8);
+                        std::memcpy(ack_buf + 64, &local_tcp_port, 2);
+                        std::memcpy(ack_buf + 66, &res2, 2);
+                        std::memcpy(ack_buf + 68, &inv_lease, 8);
+                        uint32_t ack_crc = linep_crc32(ack_buf, 76);
+                        std::memcpy(ack_buf + 76, &ack_crc, 4);
+
+                        sendto(udp_fd, reinterpret_cast<const char*>(ack_buf), sizeof(ack_buf), 0,
+                               reinterpret_cast<const sockaddr*>(&from_addr), from_len);
+                        std::cout << "[LINEP-DIAL] Sent UDP LEASE_ACK!\n";
+                    }
+                }
+                closesocket(udp_fd);
+            }
+        }
+
+        // 3. Connect TCP to orchestrator data trunk
+        SOCKET fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (fd == INVALID_SOCKET) return VINOX_STATUS_RUNTIME_ERROR;
+
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        inet_pton(AF_INET, host.c_str(), &addr.sin_addr);
+
+        if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
+            closesocket(fd);
+            return VINOX_STATUS_RUNTIME_ERROR;
+        }
+
+        auto conn = std::make_shared<ClientConnection>(fd);
 
         conn->sl1_active = true;
         conn->sl1_key_id = key_id;
@@ -1547,6 +1743,13 @@ struct LinepWorker::Impl {
         conn->outbound_direction = MessageDirection::InitiatorToResponder;
         conn->inbound_direction = MessageDirection::ResponderToInitiator;
 
+        std::cout << "[LINEP-DIAL] TCP connected. Sending SESSION_BIND: node_id=" << sl1_binding.node_id
+                  << " runtime_id=" << sl1_binding.runtime_id
+                  << " endpoint_id=" << sl1_binding.endpoint_id
+                  << " epoch=" << sl1_binding.control_epoch
+                  << " lease=" << std::hex << sl1_binding.lease_token << std::dec
+                  << " key_id=" << key_id << "\n" << std::flush;
+
         // Step 1: Send SESSION_BIND (Envelope 5, auth_seq = 1)
         std::vector<uint8_t> bind_payload;
         write_u64(bind_payload, sl1_binding.node_id);
@@ -1555,23 +1758,29 @@ struct LinepWorker::Impl {
         write_u64(bind_payload, sl1_binding.control_epoch);
         write_u64(bind_payload, sl1_binding.lease_token);
 
+        std::cout << "[LINEP-DIAL] Sending SESSION_BIND (Envelope 5, auth_seq=1)...\n" << std::flush;
         SendWireEnvelope(conn, 5 /* SESSION_BIND */, 0, 0, 0, bind_payload);
 
         // Step 2: Await confirmation SESSION_BIND from orchestrator (Envelope 5, auth_seq = 1)
+        std::cout << "[LINEP-DIAL] Awaiting confirmation SESSION_BIND from orchestrator...\n" << std::flush;
         WireHeader bind_resp_hdr{};
         if (!recv_all(conn->fd, reinterpret_cast<uint8_t*>(&bind_resp_hdr), sizeof(WireHeader))) {
+            std::cerr << "[LINEP-DIAL] FAILED: recv_all for confirmation SESSION_BIND header failed\n" << std::flush;
             return VINOX_STATUS_RUNTIME_ERROR;
         }
         if (bind_resp_hdr.magic != LINEP_V02_MAGIC || bind_resp_hdr.envelope_type != 5 || (bind_resp_hdr.flags & LINEP_V02_FLAG_AUTHENTICATED) == 0) {
+            std::cerr << "[LINEP-DIAL] FAILED: invalid confirmation SESSION_BIND header (magic=" << std::hex << bind_resp_hdr.magic << " type=" << (int)bind_resp_hdr.envelope_type << " flags=" << (int)bind_resp_hdr.flags << std::dec << ")\n" << std::flush;
             return VINOX_STATUS_RUNTIME_ERROR;
         }
         uint8_t bind_auth_ext[24] = {0};
         if (!recv_all(conn->fd, bind_auth_ext, 24)) {
+            std::cerr << "[LINEP-DIAL] FAILED: recv_all for confirmation SESSION_BIND auth ext failed\n" << std::flush;
             return VINOX_STATUS_RUNTIME_ERROR;
         }
         std::vector<uint8_t> bind_resp_payload(bind_resp_hdr.payload_len);
         if (bind_resp_hdr.payload_len > 0) {
             if (!recv_all(conn->fd, bind_resp_payload.data(), bind_resp_hdr.payload_len)) {
+                std::cerr << "[LINEP-DIAL] FAILED: recv_all for confirmation SESSION_BIND payload failed\n" << std::flush;
                 return VINOX_STATUS_RUNTIME_ERROR;
             }
         }
@@ -1579,6 +1788,7 @@ struct LinepWorker::Impl {
                               bind_resp_hdr, bind_auth_ext, conn->sl1_binding,
                               conn->inbound_direction,
                               bind_resp_payload.data(), bind_resp_payload.size())) {
+            std::cerr << "[LINEP-DIAL] FAILED: verification of orchestrator confirmation SESSION_BIND MAC failed\n" << std::flush;
             return VINOX_STATUS_PERMISSION_DENIED;
         }
         uint32_t in_seq1 = static_cast<uint32_t>(bind_auth_ext[0]) |
@@ -1586,9 +1796,11 @@ struct LinepWorker::Impl {
                           (static_cast<uint32_t>(bind_auth_ext[2]) << 16) |
                           (static_cast<uint32_t>(bind_auth_ext[3]) << 24);
         if (in_seq1 != conn->expected_inbound_seq) {
+            std::cerr << "[LINEP-DIAL] FAILED: confirmation SESSION_BIND in_seq=" << in_seq1 << " != expected " << conn->expected_inbound_seq << "\n" << std::flush;
             return VINOX_STATUS_PERMISSION_DENIED;
         }
         conn->expected_inbound_seq++;
+        std::cout << "[LINEP-DIAL] Confirmation SESSION_BIND verified! Sequence advanced to " << conn->expected_inbound_seq << "\n" << std::flush;
 
         // Step 3: Send RUNTIME_REGISTER (Envelope 6, Operation 1: REGISTER_RUNTIME, auth_seq = 2)
         uint32_t slots = config.max_concurrent_jobs;
@@ -1600,23 +1812,29 @@ struct LinepWorker::Impl {
         std::vector<uint8_t> cap_frame = BuildCapabilitiesFrame();
         std::vector<uint8_t> reg_payload = encode_runtime_registration_envelope(1 /* REGISTER_RUNTIME */, slots, 0, "", cap_frame);
 
+        std::cout << "[LINEP-DIAL] Sending RUNTIME_REGISTER (Envelope 6, op=REGISTER_RUNTIME, slots=" << slots << ", payload_len=" << reg_payload.size() << ")...\n" << std::flush;
         SendWireEnvelope(conn, 6 /* RUNTIME_REGISTER */, 0, 0, 0, reg_payload);
 
         // Step 4: Await RUNTIME_REGISTER result (Envelope 6, Operation 2: RESULT, auth_seq = 2)
+        std::cout << "[LINEP-DIAL] Awaiting RUNTIME_REGISTER result from orchestrator...\n" << std::flush;
         WireHeader reg_resp_hdr{};
         if (!recv_all(conn->fd, reinterpret_cast<uint8_t*>(&reg_resp_hdr), sizeof(WireHeader))) {
+            std::cerr << "[LINEP-DIAL] FAILED: recv_all for RUNTIME_REGISTER result header failed\n" << std::flush;
             return VINOX_STATUS_RUNTIME_ERROR;
         }
         if (reg_resp_hdr.magic != LINEP_V02_MAGIC || reg_resp_hdr.envelope_type != 6 || (reg_resp_hdr.flags & LINEP_V02_FLAG_AUTHENTICATED) == 0) {
+            std::cerr << "[LINEP-DIAL] FAILED: invalid RUNTIME_REGISTER result header (magic=" << std::hex << reg_resp_hdr.magic << " type=" << (int)reg_resp_hdr.envelope_type << " flags=" << (int)reg_resp_hdr.flags << std::dec << ")\n" << std::flush;
             return VINOX_STATUS_RUNTIME_ERROR;
         }
         uint8_t reg_auth_ext[24] = {0};
         if (!recv_all(conn->fd, reg_auth_ext, 24)) {
+            std::cerr << "[LINEP-DIAL] FAILED: recv_all for RUNTIME_REGISTER auth ext failed\n" << std::flush;
             return VINOX_STATUS_RUNTIME_ERROR;
         }
         std::vector<uint8_t> reg_resp_payload(reg_resp_hdr.payload_len);
         if (reg_resp_hdr.payload_len > 0) {
             if (!recv_all(conn->fd, reg_resp_payload.data(), reg_resp_hdr.payload_len)) {
+                std::cerr << "[LINEP-DIAL] FAILED: recv_all for RUNTIME_REGISTER payload failed\n" << std::flush;
                 return VINOX_STATUS_RUNTIME_ERROR;
             }
         }
@@ -1624,6 +1842,7 @@ struct LinepWorker::Impl {
                               reg_resp_hdr, reg_auth_ext, conn->sl1_binding,
                               conn->inbound_direction,
                               reg_resp_payload.data(), reg_resp_payload.size())) {
+            std::cerr << "[LINEP-DIAL] FAILED: verification of RUNTIME_REGISTER result MAC failed\n" << std::flush;
             return VINOX_STATUS_PERMISSION_DENIED;
         }
         uint32_t in_seq2 = static_cast<uint32_t>(reg_auth_ext[0]) |
@@ -1631,6 +1850,7 @@ struct LinepWorker::Impl {
                           (static_cast<uint32_t>(reg_auth_ext[2]) << 16) |
                           (static_cast<uint32_t>(reg_auth_ext[3]) << 24);
         if (in_seq2 != conn->expected_inbound_seq) {
+            std::cerr << "[LINEP-DIAL] FAILED: RUNTIME_REGISTER in_seq=" << in_seq2 << " != expected " << conn->expected_inbound_seq << "\n" << std::flush;
             return VINOX_STATUS_PERMISSION_DENIED;
         }
         conn->expected_inbound_seq++;
@@ -1639,13 +1859,20 @@ struct LinepWorker::Impl {
         uint32_t res_status = 0;
         std::string res_reason;
         if (!decode_runtime_registration_result(reg_resp_payload.data(), reg_resp_payload.size(), res_op, res_status, res_reason)) {
+            std::cerr << "[LINEP-DIAL] FAILED to decode RUNTIME_REGISTER result payload!\n" << std::flush;
             return VINOX_STATUS_RUNTIME_ERROR;
         }
+        std::cout << "[LINEP-DIAL] RUNTIME_REGISTER result: op=" << (int)res_op << " status=" << res_status << " reason=" << res_reason << "\n" << std::flush;
+        std::cout.flush();
         if (res_op != 2 /* RESULT */ || res_status != 200) {
+            std::cerr << "[LINEP-DIAL] Orchestrator rejected RUNTIME_REGISTER: " << res_status << " (" << res_reason << ")\n";
+            std::cerr.flush();
             return VINOX_STATUS_PERMISSION_DENIED;
         }
 
         // Outbound lease fully bound & registered! Detach receiver thread
+        std::cout << "[LINEP-DIAL] Outbound lease successfully bound & registered! Worker active.\n";
+        std::cout.flush();
         running.store(true);
         std::thread(&Impl::HandleClientSocket, this, conn).detach();
         return VINOX_STATUS_OK;

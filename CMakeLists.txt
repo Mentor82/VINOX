@@ -330,7 +330,7 @@ endif()
 add_executable(vinox_cli
     src/cli/main.cpp
 )
-target_link_libraries(vinox_cli PRIVATE vinox::core vinox::serving vinox::storage vinox::agent vinox::plugins nlohmann_json::nlohmann_json)
+target_link_libraries(vinox_cli PRIVATE vinox::core vinox::serving vinox::storage vinox::agent vinox::plugins vinox::transport_linep nlohmann_json::nlohmann_json)
 if(TARGET vinox_openvino)
     target_link_libraries(vinox_cli PRIVATE vinox::openvino)
 endif()

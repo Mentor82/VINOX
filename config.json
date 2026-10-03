@@ -28,7 +28,10 @@
     "vector_dimensions": 1024
   },
   "linep": {
-    "served_models": [],
+    "served_models": [
+      "Qwen2.5-1.5B-Instruct-int4-ov",
+      "linep-conformance-model-v02"
+    ],
     "served_embedding_model": "",
     "embedding_device": "CPU"
   }
