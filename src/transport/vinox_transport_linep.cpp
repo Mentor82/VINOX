@@ -191,7 +191,10 @@ bool send_all(SOCKET fd, const uint8_t* buf, size_t len) {
     size_t sent = 0;
     while (sent < len) {
         int r = send(fd, reinterpret_cast<const char*>(buf + sent), static_cast<int>(len - sent), 0);
-        if (r <= 0) return false;
+        if (r <= 0) {
+            std::cerr << "[LINEP-SOCKET] send_all failed: sent=" << sent << "/" << len << " r=" << r << " WSAErr=" << WSAGetLastError() << "\n" << std::flush;
+            return false;
+        }
         sent += static_cast<size_t>(r);
     }
     return true;
@@ -201,7 +204,10 @@ bool recv_all(SOCKET fd, uint8_t* buf, size_t len) {
     size_t recvd = 0;
     while (recvd < len) {
         int r = recv(fd, reinterpret_cast<char*>(buf + recvd), static_cast<int>(len - recvd), 0);
-        if (r <= 0) return false;
+        if (r <= 0) {
+            std::cerr << "[LINEP-SOCKET] recv_all failed: recvd=" << recvd << "/" << len << " r=" << r << " WSAErr=" << WSAGetLastError() << "\n" << std::flush;
+            return false;
+        }
         recvd += static_cast<size_t>(r);
     }
     return true;
@@ -1617,10 +1623,10 @@ struct LinepWorker::Impl {
             SOCKET udp_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
             if (udp_fd != INVALID_SOCKET) {
 #ifdef _WIN32
-                DWORD tv = 300; // 300ms timeout
+                DWORD tv = 2000; // 2000ms timeout
                 setsockopt(udp_fd, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
 #else
-                struct timeval tv{0, 300000};
+                struct timeval tv{2, 0};
                 setsockopt(udp_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 #endif
                 sockaddr_in udp_addr{};
@@ -1628,93 +1634,101 @@ struct LinepWorker::Impl {
                 udp_addr.sin_port = htons(udp_port);
                 inet_pton(AF_INET, host.c_str(), &udp_addr.sin_addr);
 
-                uint8_t hello_buf[80] = {0};
-                uint32_t udp_magic = 0x504E4C55; // "ULNP"
-                std::memcpy(hello_buf + 0, &udp_magic, 4);
-                hello_buf[4] = 0; // major
-                hello_buf[5] = 2; // minor
-                hello_buf[6] = 1; // NODE_HELLO
-                hello_buf[7] = 1; // trunk_ready
-                std::memcpy(hello_buf + 8, &sl1_binding.node_id, 8);
-                std::memcpy(hello_buf + 16, &sl1_binding.runtime_id, 8);
-                std::memcpy(hello_buf + 24, &sl1_binding.endpoint_id, 4);
-                uint64_t c_seq = 1;
-                std::memcpy(hello_buf + 28, &c_seq, 8);
-                std::memcpy(hello_buf + 36, &sl1_binding.control_epoch, 8);
-                hello_buf[44] = 1; // avail
-                hello_buf[45] = 1; // health
-                hello_buf[46] = 0; // load
-                hello_buf[47] = 0; // res
-                uint32_t q_depth = 0;
-                std::memcpy(hello_buf + 48, &q_depth, 4);
-                uint32_t cap_rev = 1;
-                std::memcpy(hello_buf + 52, &cap_rev, 4);
-                uint64_t cap_dig = 0;
-                std::memcpy(hello_buf + 56, &cap_dig, 8);
-                uint16_t local_tcp_port = (config.port > 0) ? config.port : port;
-                std::memcpy(hello_buf + 64, &local_tcp_port, 2);
-                uint16_t res2 = 0;
-                std::memcpy(hello_buf + 66, &res2, 2);
-                uint64_t zero_lease = 0;
-                std::memcpy(hello_buf + 68, &zero_lease, 8);
-                uint32_t hello_crc = linep_crc32(hello_buf, 76);
-                std::memcpy(hello_buf + 76, &hello_crc, 4);
+                bool lease_acquired = false;
+                for (int attempt = 1; attempt <= 3 && !lease_acquired; ++attempt) {
+                    uint8_t hello_buf[80] = {0};
+                    uint32_t udp_magic = 0x504E4C55; // "ULNP"
+                    std::memcpy(hello_buf + 0, &udp_magic, 4);
+                    hello_buf[4] = 0; // major
+                    hello_buf[5] = 2; // minor
+                    hello_buf[6] = 1; // NODE_HELLO
+                    hello_buf[7] = 1; // trunk_ready
+                    std::memcpy(hello_buf + 8, &sl1_binding.node_id, 8);
+                    std::memcpy(hello_buf + 16, &sl1_binding.runtime_id, 8);
+                    std::memcpy(hello_buf + 24, &sl1_binding.endpoint_id, 4);
+                    uint64_t c_seq = static_cast<uint64_t>(attempt);
+                    std::memcpy(hello_buf + 28, &c_seq, 8);
+                    std::memcpy(hello_buf + 36, &sl1_binding.control_epoch, 8);
+                    hello_buf[44] = 1; // avail
+                    hello_buf[45] = 1; // health
+                    hello_buf[46] = 0; // load
+                    hello_buf[47] = 0; // res
+                    uint32_t q_depth = 0;
+                    std::memcpy(hello_buf + 48, &q_depth, 4);
+                    uint32_t cap_rev = 1;
+                    std::memcpy(hello_buf + 52, &cap_rev, 4);
+                    uint64_t cap_dig = 0;
+                    std::memcpy(hello_buf + 56, &cap_dig, 8);
+                    uint16_t local_tcp_port = (config.port > 0) ? config.port : port;
+                    std::memcpy(hello_buf + 64, &local_tcp_port, 2);
+                    uint16_t res2 = 0;
+                    std::memcpy(hello_buf + 66, &res2, 2);
+                    uint64_t zero_lease = 0;
+                    std::memcpy(hello_buf + 68, &zero_lease, 8);
+                    uint32_t hello_crc = linep_crc32(hello_buf, 76);
+                    std::memcpy(hello_buf + 76, &hello_crc, 4);
 
-                sendto(udp_fd, reinterpret_cast<const char*>(hello_buf), sizeof(hello_buf), 0,
-                       reinterpret_cast<const sockaddr*>(&udp_addr), sizeof(udp_addr));
+                    sendto(udp_fd, reinterpret_cast<const char*>(hello_buf), sizeof(hello_buf), 0,
+                           reinterpret_cast<const sockaddr*>(&udp_addr), sizeof(udp_addr));
 
-                uint8_t invite_buf[80] = {0};
-                sockaddr_in from_addr{};
-                int from_len = sizeof(from_addr);
-                int n = recvfrom(udp_fd, reinterpret_cast<char*>(invite_buf), sizeof(invite_buf), 0,
-                                 reinterpret_cast<sockaddr*>(&from_addr), &from_len);
-                std::cout << "[LINEP-DIAL] UDP recvfrom n=" << n << " WSAGetLastError=" << WSAGetLastError() << "\n" << std::flush;
-                if (n == 80) {
-                    uint32_t exp_crc = linep_crc32(invite_buf, 76);
-                    uint32_t act_crc = 0;
-                    std::memcpy(&act_crc, invite_buf + 76, 4);
-                    uint32_t rec_magic = 0;
-                    std::memcpy(&rec_magic, invite_buf + 0, 4);
-                    uint8_t rec_type = invite_buf[6];
-                    if (exp_crc == act_crc && rec_magic == 0x504E4C55 && rec_type == 4 /* INVITE */) {
-                        uint64_t inv_seq = 0, inv_epoch = 0, inv_lease = 0;
-                        std::memcpy(&inv_seq, invite_buf + 28, 8);
-                        std::memcpy(&inv_epoch, invite_buf + 36, 8);
-                        std::memcpy(&inv_lease, invite_buf + 68, 8);
+                    uint8_t invite_buf[80] = {0};
+                    sockaddr_in from_addr{};
+                    int from_len = sizeof(from_addr);
+                    int n = recvfrom(udp_fd, reinterpret_cast<char*>(invite_buf), sizeof(invite_buf), 0,
+                                     reinterpret_cast<sockaddr*>(&from_addr), &from_len);
+                    if (n == 80) {
+                        uint32_t exp_crc = linep_crc32(invite_buf, 76);
+                        uint32_t act_crc = 0;
+                        std::memcpy(&act_crc, invite_buf + 76, 4);
+                        uint32_t rec_magic = 0;
+                        std::memcpy(&rec_magic, invite_buf + 0, 4);
+                        uint8_t rec_type = invite_buf[6];
+                        if (exp_crc == act_crc && rec_magic == 0x504E4C55 && rec_type == 4 /* INVITE */) {
+                            uint64_t inv_seq = 0, inv_epoch = 0, inv_lease = 0;
+                            std::memcpy(&inv_seq, invite_buf + 28, 8);
+                            std::memcpy(&inv_epoch, invite_buf + 36, 8);
+                            std::memcpy(&inv_lease, invite_buf + 68, 8);
 
-                        sl1_binding.control_epoch = inv_epoch;
-                        sl1_binding.lease_token = inv_lease;
-                        std::cout << "[LINEP-DIAL] UDP INVITE accepted: epoch=" << inv_epoch << " lease=" << std::hex << inv_lease << std::dec << "\n";
+                            sl1_binding.control_epoch = inv_epoch;
+                            sl1_binding.lease_token = inv_lease;
+                            std::cout << "[LINEP-DIAL] UDP INVITE accepted: epoch=" << inv_epoch << " lease=" << std::hex << inv_lease << std::dec << "\n" << std::flush;
 
-                        // Send LEASE_ACK (type 5)
-                        uint8_t ack_buf[80] = {0};
-                        std::memcpy(ack_buf + 0, &udp_magic, 4);
-                        ack_buf[4] = 0;
-                        ack_buf[5] = 2;
-                        ack_buf[6] = 5; // LEASE_ACK
-                        ack_buf[7] = 1; // trunk_ready
-                        std::memcpy(ack_buf + 8, &sl1_binding.node_id, 8);
-                        std::memcpy(ack_buf + 16, &sl1_binding.runtime_id, 8);
-                        std::memcpy(ack_buf + 24, &sl1_binding.endpoint_id, 4);
-                        uint64_t ack_seq = inv_seq + 1;
-                        std::memcpy(ack_buf + 28, &ack_seq, 8);
-                        std::memcpy(ack_buf + 36, &inv_epoch, 8);
-                        ack_buf[44] = 1; ack_buf[45] = 1; ack_buf[46] = 0; ack_buf[47] = 0;
-                        std::memcpy(ack_buf + 48, &q_depth, 4);
-                        std::memcpy(ack_buf + 52, &cap_rev, 4);
-                        std::memcpy(ack_buf + 56, &cap_dig, 8);
-                        std::memcpy(ack_buf + 64, &local_tcp_port, 2);
-                        std::memcpy(ack_buf + 66, &res2, 2);
-                        std::memcpy(ack_buf + 68, &inv_lease, 8);
-                        uint32_t ack_crc = linep_crc32(ack_buf, 76);
-                        std::memcpy(ack_buf + 76, &ack_crc, 4);
+                            // Send LEASE_ACK (type 5)
+                            uint8_t ack_buf[80] = {0};
+                            std::memcpy(ack_buf + 0, &udp_magic, 4);
+                            ack_buf[4] = 0;
+                            ack_buf[5] = 2;
+                            ack_buf[6] = 5; // LEASE_ACK
+                            ack_buf[7] = 1; // trunk_ready
+                            std::memcpy(ack_buf + 8, &sl1_binding.node_id, 8);
+                            std::memcpy(ack_buf + 16, &sl1_binding.runtime_id, 8);
+                            std::memcpy(ack_buf + 24, &sl1_binding.endpoint_id, 4);
+                            uint64_t ack_seq = inv_seq + 1;
+                            std::memcpy(ack_buf + 28, &ack_seq, 8);
+                            std::memcpy(ack_buf + 36, &inv_epoch, 8);
+                            ack_buf[44] = 1; ack_buf[45] = 1; ack_buf[46] = 0; ack_buf[47] = 0;
+                            std::memcpy(ack_buf + 48, &q_depth, 4);
+                            std::memcpy(ack_buf + 52, &cap_rev, 4);
+                            std::memcpy(ack_buf + 56, &cap_dig, 8);
+                            std::memcpy(ack_buf + 64, &local_tcp_port, 2);
+                            std::memcpy(ack_buf + 66, &res2, 2);
+                            std::memcpy(ack_buf + 68, &inv_lease, 8);
+                            uint32_t ack_crc = linep_crc32(ack_buf, 76);
+                            std::memcpy(ack_buf + 76, &ack_crc, 4);
 
-                        sendto(udp_fd, reinterpret_cast<const char*>(ack_buf), sizeof(ack_buf), 0,
-                               reinterpret_cast<const sockaddr*>(&from_addr), from_len);
-                        std::cout << "[LINEP-DIAL] Sent UDP LEASE_ACK!\n";
+                            sendto(udp_fd, reinterpret_cast<const char*>(ack_buf), sizeof(ack_buf), 0,
+                                   reinterpret_cast<const sockaddr*>(&from_addr), from_len);
+                            std::cout << "[LINEP-DIAL] Sent UDP LEASE_ACK!\n" << std::flush;
+                            lease_acquired = true;
+                            break;
+                        }
                     }
                 }
                 closesocket(udp_fd);
+                if (!lease_acquired) {
+                    std::cerr << "[LINEP-DIAL] FAILED: Could not acquire UDP control lease from orchestrator at " << host << ":" << udp_port << "\n" << std::flush;
+                    return VINOX_STATUS_PERMISSION_DENIED;
+                }
             }
         }
 
@@ -1808,6 +1822,17 @@ struct LinepWorker::Impl {
             slots = 1;
         }
         if (slots == 0) slots = 1;
+
+        std::string served_emb = ReadLinepServeConfig().served_embedding_model;
+        if (!served_emb.empty()) {
+            std::cout << "[WORKER] Pre-loading configured embedding model: " << served_emb << " ...\n" << std::flush;
+            vinox_status emb_st = EnsureEmbeddingEngineLoaded(served_emb);
+            if (emb_st == VINOX_STATUS_OK) {
+                std::cout << "[WORKER] Embedding model " << served_emb << " loaded and ready.\n" << std::flush;
+            } else {
+                std::cerr << "[WORKER] Warning: Failed to pre-load embedding model " << served_emb << " (status " << emb_st << ")\n" << std::flush;
+            }
+        }
 
         std::vector<uint8_t> cap_frame = BuildCapabilitiesFrame();
         std::vector<uint8_t> reg_payload = encode_runtime_registration_envelope(1 /* REGISTER_RUNTIME */, slots, 0, "", cap_frame);

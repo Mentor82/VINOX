@@ -30,9 +30,10 @@
   "linep": {
     "served_models": [
       "Qwen2.5-1.5B-Instruct-int4-ov",
+      "Qwen3-Embedding-0.6B-fp16-ov",
       "linep-conformance-model-v02"
     ],
-    "served_embedding_model": "",
+    "served_embedding_model": "Qwen3-Embedding-0.6B-fp16-ov",
     "embedding_device": "CPU"
   }
 }

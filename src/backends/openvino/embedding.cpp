@@ -127,9 +127,9 @@ std::string file_sha256_quick(const std::string& path) {
     if (!f.is_open()) return "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"; // Empty hash
     Sha256Ctx ctx;
     sha256_setup(&ctx);
-    char buf[8192];
-    while (f.read(buf, sizeof(buf)) || f.gcount() > 0) {
-        sha256_feed(&ctx, reinterpret_cast<const uint8_t*>(buf), static_cast<size_t>(f.gcount()));
+    std::vector<char> buf(262144);
+    while (f.read(buf.data(), buf.size()) || f.gcount() > 0) {
+        sha256_feed(&ctx, reinterpret_cast<const uint8_t*>(buf.data()), static_cast<size_t>(f.gcount()));
     }
     return sha256_finish(&ctx);
 }
