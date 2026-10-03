@@ -1,0 +1,19 @@
+{
+  "service_name": "vinox-sandbox-agent",
+  "environment": "staging",
+  "debug": true,
+  "api_gateway": {
+    "bind_host": "127.0.0.1",
+    "port": 9090,
+    "ssl_enabled": false
+  },
+  "rate_limiting": {
+    "requests_per_minute": 120,
+    "burst_limit": 30
+  },
+  "features": {
+    "hybrid_retrieval": true,
+    "npu_offloading": true,
+    "sandbox_quarantine": true
+  }
+}

@@ -100,7 +100,8 @@ EvidenceResult run_model_package_evidence(const ModelPackageSpec& spec, size_t i
 
     vinox_model_protocol_contract contract{};
     contract.struct_size = sizeof(contract);
-    vinox_status compile_st = vinox_model_protocol_compile(chat_tpl.c_str(), tok_cfg_content.c_str(), &contract);
+    std::string tok_input = tok_cfg_content + " {\"package_path\": \"" + spec.path + "\"}";
+    vinox_status compile_st = vinox_model_protocol_compile(chat_tpl.c_str(), tok_input.c_str(), &contract);
     std::cout << "2. Compiled Contract Evidence:\n";
     std::cout << "   - Compiler Status:        " << (compile_st == VINOX_STATUS_OK ? "PASS" : "FAIL") << " (Code " << compile_st << ")\n";
     if (compile_st != VINOX_STATUS_OK) {

@@ -1,0 +1,47 @@
+{
+  "id": "vinox.search_DeepSeek-R1-Distill-Qwen-1.5B-ov_20260906_174214_641799",
+  "tool": "vinox.search",
+  "model": "DeepSeek-R1-Distill-Qwen-1.5B-ov",
+  "label": "negative",
+  "notes": "ToolCall: False (Expected: False), Thinking: True",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "vinox.search",
+        "description": "VINOX Hybrid Retrieval (BM25 + sqlite-vec Vector Search) across indexed documents and knowledge base",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "The natural language query or keywords to search for"
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Maximum number of documents to return"
+            }
+          },
+          "required": [
+            "query"
+          ]
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a helpful assistant with access to tools. Always begin your response by thinking briefly inside <think>...</think> tags about which tool to call and which arguments are required. After closing </think>, invoke the appropriate tool."
+    },
+    {
+      "role": "user",
+      "content": "Search the documentation for OpenVINO NPU acceleration configuration."
+    },
+    {
+      "role": "assistant",
+      "reasoning_content": "Okay, so I'm trying to figure out how to use this VINOX hybrid retrieval system. The user mentioned using VINOX's BM25 vector search across indexed documents and a knowledge base. They provided some parameters like limit and query, but I need to make sure I understand what each part does.\n\nFirst, the `limit` parameter is an integer that specifies the maximum number of documents to return. That makes sense because if someone wants to retrieve the top 10 results from their search, they can set `limit:10`.\n\nNext, the `query` parameter is a string that contains the natural language query or keywords to search for. So, if someone wants to find information on \"machine learning\", they would set `query:\"machine learning\"`.\n\nI should also consider edge cases. What if there are no results? Maybe the `limit` needs to be adjusted, or perhaps the query isn't specific enough. Also, if the data structure isn't properly configured, the search might not work as expected.\n\nAnother thing to think about is performance. With large datasets, setting a reasonable `limit` will help optimize the response time without compromising accuracy. It's important to balance between retrieving too many results and causing delays.\n\nI wonder if there are any other parameters that could be useful. Perhaps including more context in the query could improve relevance. For example, adding \"AI\" or \"neural networks\" might yield better results than just \"information\".\n\nAlso, considering the size of the dataset is crucial. If it's too big, even with a small `limit`, the system might take longer to process. Maybe setting up a caching mechanism or limiting the initial results could help.\n\nIn summary, understanding the parameters and their roles is key to effectively using VINOX's BM25 vector search. I'll make sure to test different configurations and see how they affect the retrieval speed and result quality.\n",
+      "content": "\n\nTo use VINOX's BM25 vector search effectively, follow these steps:\n\n1. **Define Your Parameters**:\n   - **Limit**: Set the maximum number of documents to return. Adjust this based on your needs—too high may delay responses, while too low may miss relevant results.\n   - **Query**: Specify the natural language keyword(s) to search for. Ensure clarity and specificity to enhance relevance.\n\n2. **Adjust Performance Settings**:\n   - Optimize the dataset configuration to ensure efficient processing.\n   - Consider implementing caching mechanisms or limiting initial results to reduce load times.\n\n3. **Test Config"
+    }
+  ]
+}

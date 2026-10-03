@@ -1,0 +1,39 @@
+{
+  "vinox_version": "1.0.0",
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8080,
+    "cors_enabled": true,
+    "max_connections": 64,
+    "request_timeout_seconds": 120
+  },
+  "runtime": {
+    "device": "NPU",
+    "fallback_device": "CPU",
+    "precision": "INT4",
+    "supported_precisions": ["INT4", "INT8", "FP16", "Mixed"]
+  },
+  "plugins": {
+    "directory": "out/windows-msvc-debug/build/plugins",
+    "autoload": [
+      "vinox_plugin_time.dll",
+      "vinox_plugin_math.dll",
+      "vinox_plugin_fs.dll",
+      "vinox_plugin_retrieval.dll"
+    ]
+  },
+  "storage": {
+    "database_path": "vinox.db",
+    "wal_mode": true,
+    "vector_dimensions": 1024
+  },
+  "linep": {
+    "served_models": [
+      "Qwen2.5-1.5B-Instruct-int4-ov",
+      "Qwen3-Embedding-0.6B-fp16-ov",
+      "linep-conformance-model-v02"
+    ],
+    "served_embedding_model": "Qwen3-Embedding-0.6B-fp16-ov",
+    "embedding_device": "CPU"
+  }
+}

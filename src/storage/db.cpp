@@ -563,6 +563,16 @@ vinox_status vinox_storage_add_message_ex(
         return fail_runtime(sqlite3_errmsg(engine->db));
     }
 
+    // Touch conversation updated_at_ms
+    const char* update_conv_sql = "UPDATE conversations SET updated_at_ms = ? WHERE id = ?;";
+    sqlite3_stmt* ustmt = nullptr;
+    if (sqlite3_prepare_v2(engine->db, update_conv_sql, -1, &ustmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_int64(ustmt, 1, static_cast<sqlite3_int64>(entry.created_at_ms));
+        sqlite3_bind_text(ustmt, 2, entry.conversation_id.c_str(), -1, SQLITE_STATIC);
+        sqlite3_step(ustmt);
+        sqlite3_finalize(ustmt);
+    }
+
     engine->message_pool.push_back(entry);
     const auto& stored = engine->message_pool.back();
 
@@ -651,6 +661,231 @@ vinox_status vinox_storage_get_conversation_messages(
     sqlite3_finalize(stmt);
 
     *count_out = idx;
+    vinox_set_last_error(nullptr);
+    return VINOX_STATUS_OK;
+}
+
+vinox_status vinox_storage_list_conversations_json(
+    const vinox_storage_engine* engine,
+    char* json_out,
+    size_t json_out_size
+) {
+    if (engine == nullptr || engine->db == nullptr) {
+        return fail_arg("storage engine handle cannot be null");
+    }
+    if (json_out == nullptr || json_out_size < 2) {
+        return fail_arg("json_out buffer cannot be null and size must be >= 2");
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(const_cast<vinox_storage_engine*>(engine)->mutex);
+
+    const char* sql =
+        "SELECT c.id, c.title, c.created_at_ms, c.updated_at_ms, COUNT(m.id) as message_count "
+        "FROM conversations c "
+        "LEFT JOIN messages m ON c.id = m.conversation_id "
+        "GROUP BY c.id "
+        "ORDER BY c.updated_at_ms DESC;";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(engine->db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return fail_runtime(sqlite3_errmsg(engine->db));
+    }
+
+    nlohmann::json convs = nlohmann::json::array();
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        nlohmann::json item;
+        const char* id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        const char* title = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        int64_t created_at = sqlite3_column_int64(stmt, 2);
+        int64_t updated_at = sqlite3_column_int64(stmt, 3);
+        int64_t msg_count = sqlite3_column_int64(stmt, 4);
+
+        item["id"] = id ? id : "";
+        item["title"] = title ? title : "";
+        item["created_at_ms"] = created_at;
+        item["updated_at_ms"] = updated_at;
+        item["message_count"] = msg_count;
+        convs.push_back(item);
+    }
+    sqlite3_finalize(stmt);
+
+    std::string res = convs.dump();
+#if defined(_WIN32)
+    strncpy_s(json_out, json_out_size, res.c_str(), _TRUNCATE);
+#else
+    strncpy(json_out, res.c_str(), json_out_size - 1);
+    json_out[json_out_size - 1] = '\0';
+#endif
+
+    vinox_set_last_error(nullptr);
+    return VINOX_STATUS_OK;
+}
+
+vinox_status vinox_storage_get_conversation_json(
+    const vinox_storage_engine* engine,
+    const char* conversation_id,
+    char* json_out,
+    size_t json_out_size
+) {
+    if (engine == nullptr || engine->db == nullptr) {
+        return fail_arg("storage engine handle cannot be null");
+    }
+    if (conversation_id == nullptr || conversation_id[0] == '\0') {
+        return fail_arg("conversation_id cannot be null or empty");
+    }
+    if (json_out == nullptr || json_out_size < 2) {
+        return fail_arg("json_out buffer cannot be null and size must be >= 2");
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(const_cast<vinox_storage_engine*>(engine)->mutex);
+
+    const char* sql =
+        "SELECT c.id, c.title, c.created_at_ms, c.updated_at_ms, COUNT(m.id) as message_count "
+        "FROM conversations c "
+        "LEFT JOIN messages m ON c.id = m.conversation_id "
+        "WHERE c.id = ? "
+        "GROUP BY c.id;";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(engine->db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return fail_runtime(sqlite3_errmsg(engine->db));
+    }
+    sqlite3_bind_text(stmt, 1, conversation_id, -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        nlohmann::json item;
+        const char* id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        const char* title = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        int64_t created_at = sqlite3_column_int64(stmt, 2);
+        int64_t updated_at = sqlite3_column_int64(stmt, 3);
+        int64_t msg_count = sqlite3_column_int64(stmt, 4);
+
+        item["id"] = id ? id : "";
+        item["title"] = title ? title : "";
+        item["created_at_ms"] = created_at;
+        item["updated_at_ms"] = updated_at;
+        item["message_count"] = msg_count;
+        sqlite3_finalize(stmt);
+
+        std::string res = item.dump();
+#if defined(_WIN32)
+        strncpy_s(json_out, json_out_size, res.c_str(), _TRUNCATE);
+#else
+        strncpy(json_out, res.c_str(), json_out_size - 1);
+        json_out[json_out_size - 1] = '\0';
+#endif
+        vinox_set_last_error(nullptr);
+        return VINOX_STATUS_OK;
+    }
+
+    sqlite3_finalize(stmt);
+    return fail_runtime("Conversation not found");
+}
+
+vinox_status vinox_storage_get_conversation_messages_json(
+    const vinox_storage_engine* engine,
+    const char* conversation_id,
+    char* json_out,
+    size_t json_out_size
+) {
+    if (engine == nullptr || engine->db == nullptr) {
+        return fail_arg("storage engine handle cannot be null");
+    }
+    if (conversation_id == nullptr || conversation_id[0] == '\0') {
+        return fail_arg("conversation_id cannot be null or empty");
+    }
+    if (json_out == nullptr || json_out_size < 2) {
+        return fail_arg("json_out buffer cannot be null and size must be >= 2");
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(const_cast<vinox_storage_engine*>(engine)->mutex);
+
+    const char* sql =
+        "SELECT id, parent_id, role, content, provenance_kind, created_at_ms "
+        "FROM messages WHERE conversation_id = ? ORDER BY created_at_ms ASC;";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(engine->db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return fail_runtime(sqlite3_errmsg(engine->db));
+    }
+    sqlite3_bind_text(stmt, 1, conversation_id, -1, SQLITE_TRANSIENT);
+
+    nlohmann::json msgs = nlohmann::json::array();
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        nlohmann::json m;
+        const char* id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        const char* parent_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        const char* role = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        const char* content = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        int prov_kind = sqlite3_column_int(stmt, 4);
+        int64_t created_at = sqlite3_column_int64(stmt, 5);
+
+        m["id"] = id ? id : "";
+        m["conversation_id"] = conversation_id;
+        m["parent_id"] = parent_id ? parent_id : "";
+        m["role"] = role ? role : "";
+        m["content"] = content ? content : "";
+        m["provenance_kind"] = prov_kind;
+        m["created_at_ms"] = created_at;
+        msgs.push_back(m);
+    }
+    sqlite3_finalize(stmt);
+
+    std::string res = msgs.dump();
+#if defined(_WIN32)
+    strncpy_s(json_out, json_out_size, res.c_str(), _TRUNCATE);
+#else
+    strncpy(json_out, res.c_str(), json_out_size - 1);
+    json_out[json_out_size - 1] = '\0';
+#endif
+
+    vinox_set_last_error(nullptr);
+    return VINOX_STATUS_OK;
+}
+
+vinox_status vinox_storage_delete_conversation(
+    vinox_storage_engine* engine,
+    const char* conversation_id
+) {
+    if (engine == nullptr || engine->db == nullptr) {
+        return fail_arg("storage engine handle cannot be null");
+    }
+    if (conversation_id == nullptr || conversation_id[0] == '\0') {
+        return fail_arg("conversation_id cannot be null or empty");
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(engine->mutex);
+
+    // 1. Purge virtual table vec0 embeddings for messages of this conversation if table exists
+    const char* del_vec_sql =
+        "DELETE FROM message_embeddings_vec WHERE message_id IN "
+        "(SELECT id FROM messages WHERE conversation_id = ?);";
+    sqlite3_stmt* vec_stmt = nullptr;
+    if (sqlite3_prepare_v2(engine->db, del_vec_sql, -1, &vec_stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(vec_stmt, 1, conversation_id, -1, SQLITE_TRANSIENT);
+        sqlite3_step(vec_stmt);
+        sqlite3_finalize(vec_stmt);
+    }
+
+    // 2. Delete from conversations (foreign key CASCADE deletes messages, which cleans messages_fts and message_embeddings)
+    const char* del_conv_sql = "DELETE FROM conversations WHERE id = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(engine->db, del_conv_sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return fail_runtime(sqlite3_errmsg(engine->db));
+    }
+    sqlite3_bind_text(stmt, 1, conversation_id, -1, SQLITE_TRANSIENT);
+
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (rc != SQLITE_DONE) {
+        return fail_runtime(sqlite3_errmsg(engine->db));
+    }
+
+    if (sqlite3_changes(engine->db) == 0) {
+        return fail_runtime("Conversation not found");
+    }
+
     vinox_set_last_error(nullptr);
     return VINOX_STATUS_OK;
 }
@@ -892,6 +1127,83 @@ void vinox_storage_engine_close(vinox_storage_engine* engine) {
         }
         delete engine;
     }
+}
+
+VINOX_API vinox_status vinox_storage_get_message_content(
+    const vinox_storage_engine* engine,
+    const char* message_id,
+    char* content_out,
+    size_t content_out_size,
+    char* role_out,
+    size_t role_out_size
+) {
+    if (!engine || !engine->db || !message_id || !content_out || content_out_size == 0) {
+        return fail_arg("Invalid argument for vinox_storage_get_message_content");
+    }
+    std::lock_guard<std::recursive_mutex> lock(const_cast<vinox_storage_engine*>(engine)->mutex);
+
+    // 1. Check messages table first
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "SELECT content, role FROM messages WHERE id = ?;";
+    if (sqlite3_prepare_v2(engine->db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, message_id, -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* content = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+            const char* role = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+            if (content) {
+#if defined(_WIN32)
+                strncpy_s(content_out, content_out_size, content, _TRUNCATE);
+#else
+                strncpy(content_out, content, content_out_size - 1);
+                content_out[content_out_size - 1] = '\0';
+#endif
+            }
+            if (role && role_out && role_out_size > 0) {
+#if defined(_WIN32)
+                strncpy_s(role_out, role_out_size, role, _TRUNCATE);
+#else
+                strncpy(role_out, role, role_out_size - 1);
+                role_out[role_out_size - 1] = '\0';
+#endif
+            }
+            sqlite3_finalize(stmt);
+            return VINOX_STATUS_OK;
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    // 2. Check chunks table
+    const char* cid = message_id;
+    if (strncmp(cid, "chunk:", 6) == 0) cid += 6;
+    sql = "SELECT c.content, d.title FROM chunks c JOIN documents d ON c.document_id = d.id WHERE c.id = ?;";
+    if (sqlite3_prepare_v2(engine->db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, cid, -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* content = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+            const char* title = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+            if (content) {
+#if defined(_WIN32)
+                strncpy_s(content_out, content_out_size, content, _TRUNCATE);
+#else
+                strncpy(content_out, content, content_out_size - 1);
+                content_out[content_out_size - 1] = '\0';
+#endif
+            }
+            if (title && role_out && role_out_size > 0) {
+#if defined(_WIN32)
+                strncpy_s(role_out, role_out_size, title, _TRUNCATE);
+#else
+                strncpy(role_out, title, role_out_size - 1);
+                role_out[role_out_size - 1] = '\0';
+#endif
+            }
+            sqlite3_finalize(stmt);
+            return VINOX_STATUS_OK;
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    return VINOX_STATUS_NOT_FOUND;
 }
 
 /* Phase 5.3 — Documents, Typed Relations & Graph CTE Implementation */

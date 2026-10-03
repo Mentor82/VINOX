@@ -1,0 +1,35 @@
+{
+  "timestamp": "2026-09-06T17:57:47.998774",
+  "model_id": "Phi-4-mini-instruct-ov",
+  "tool_name": "fs.list",
+  "is_positive": false,
+  "evaluation_notes": "Exception during request: timed out",
+  "input": {
+    "system_prompt": "You are a helpful assistant with access to tools. Always begin your response by thinking briefly inside <think>...</think> tags about which tool to call and which arguments are required. After closing </think>, invoke the appropriate tool.",
+    "user_prompt": "List the files and directories in the current folder.",
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "fs.list",
+          "description": "List directory entries within workspace sandbox",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Path to directory to list, e.g. '.' or 'src'"
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  "output": {
+    "finish_reason": "error",
+    "reasoning_content": "",
+    "content": "ERROR: timed out",
+    "tool_calls": []
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "id": "system.time_Qwen2.5-1.5B-Instruct-int4-ov_20260906_173322_758853",
+  "tool": "system.time",
+  "model": "Qwen2.5-1.5B-Instruct-int4-ov",
+  "label": "positive",
+  "notes": "ToolCall: True (Expected: True), Thinking: False",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "system.time",
+        "description": "Gibt die aktuelle Systemzeit und das Datum zurueck.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "timezone": {
+              "type": "string",
+              "description": "Die Zeitzone, z.B. Europe/Berlin oder UTC"
+            }
+          },
+          "required": [
+            "timezone"
+          ]
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a helpful assistant with access to tools. Always begin your response by thinking briefly inside <think>...</think> tags about which tool to call and which arguments are required. After closing </think>, invoke the appropriate tool."
+    },
+    {
+      "role": "user",
+      "content": "What time is it right now in Berlin?"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"timezone\":\"Europe/ Berlin\"}",
+            "name": "system.time"
+          },
+          "id": "call_47ab1381be8b94fa",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "{\"local_time\":\"2026-09-06T17:33:13+01:00\",\"timezone_offset_minutes\":60,\"unix_timestamp_seconds\":1788708793,\"utc_time\":\"2026-09-06T16:33:13Z\"}",
+      "name": "system.time",
+      "role": "tool",
+      "tool_call_id": "call_47ab1381be8b94fa"
+    },
+    {
+      "role": "assistant",
+      "content": "The current time in Berlin (Europe/ Berlin) is 17:33 on September 6th, 2026. This corresponds to **UTC** time of 16:33 on September 6th, 2026. The Unix timestamp for this moment is `1788708793`."
+    }
+  ]
+}

@@ -1,0 +1,61 @@
+{
+  "id": "math.calculate_Qwen-2.5-Coder-0.5B_20260906_181023_752436",
+  "tool": "math.calculate",
+  "model": "Qwen-2.5-Coder-0.5B",
+  "label": "negative",
+  "notes": "ToolCall: True (Expected: False), Thinking: False",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "math.calculate",
+        "description": "Fuehrt mathematische Berechnungen durch und wertet arithmetische Ausdruecke aus.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "expression": {
+              "type": "string",
+              "description": "Der mathematische Ausdruck, z.B. '(24 * 15) / 3' oder 'sqrt(144) + 12'"
+            }
+          },
+          "required": [
+            "expression"
+          ]
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a helpful assistant with access to tools. Always begin your response by thinking briefly inside <think>...</think> tags about which tool to call and which arguments are required. After closing </think>, invoke the appropriate tool."
+    },
+    {
+      "role": "user",
+      "content": "Calculate (144 * 12) / 6. What is the exact result?"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"expression\":\"(144 * 12) / 6\"}",
+            "name": "calculate"
+          },
+          "id": "call_07b0fa6b37c77fb6",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "Tool not found",
+      "name": "calculate",
+      "role": "tool",
+      "tool_call_id": "call_07b0fa6b37c77fb6"
+    },
+    {
+      "role": "assistant",
+      "content": "The requested function `calculate` was not found in the provided XML data. Please ensure that you have correctly spelled the function name and its parameters. If the function exists but has been deprecated or removed, it might be necessary to use an alternative approach or find an alternative solution."
+    }
+  ]
+}

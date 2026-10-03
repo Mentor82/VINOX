@@ -291,7 +291,7 @@ add_library(vinox_transport_linep SHARED
 add_library(vinox::transport_linep ALIAS vinox_transport_linep)
 set_target_properties(vinox_transport_linep PROPERTIES EXPORT_NAME transport_linep)
 
-target_link_libraries(vinox_transport_linep PRIVATE vinox::core nlohmann_json::nlohmann_json)
+target_link_libraries(vinox_transport_linep PRIVATE vinox::core vinox::serving nlohmann_json::nlohmann_json)
 if(TARGET vinox_openvino)
     target_link_libraries(vinox_transport_linep PRIVATE vinox::openvino)
 endif()
@@ -330,7 +330,7 @@ endif()
 add_executable(vinox_cli
     src/cli/main.cpp
 )
-target_link_libraries(vinox_cli PRIVATE vinox::core vinox::serving vinox::storage vinox::agent vinox::plugins nlohmann_json::nlohmann_json)
+target_link_libraries(vinox_cli PRIVATE vinox::core vinox::serving vinox::storage vinox::agent vinox::plugins vinox::transport_linep nlohmann_json::nlohmann_json)
 if(TARGET vinox_openvino)
     target_link_libraries(vinox_cli PRIVATE vinox::openvino)
 endif()
@@ -465,6 +465,15 @@ if(BUILD_TESTING)
     target_include_directories(vinox_linep_transport_smoke PRIVATE include)
     target_link_libraries(vinox_linep_transport_smoke PRIVATE vinox::transport_linep vinox::core)
     add_test(NAME linep_transport_smoke COMMAND vinox_linep_transport_smoke)
+
+    add_executable(vinox_linep_outbound_lease_smoke tests/linep_outbound_lease_smoke.cpp)
+    target_include_directories(vinox_linep_outbound_lease_smoke PRIVATE include)
+    target_link_libraries(vinox_linep_outbound_lease_smoke PRIVATE vinox::transport_linep vinox::core)
+    add_test(NAME linep_outbound_lease_smoke COMMAND vinox_linep_outbound_lease_smoke)
+
+    add_executable(vinox_conformance_test_runner tests/conformance_test_runner.cpp)
+    target_include_directories(vinox_conformance_test_runner PRIVATE include)
+    target_link_libraries(vinox_conformance_test_runner PRIVATE vinox::transport_linep vinox::core)
 
     add_test(NAME audit_smoke COMMAND vinox_cli --audit)
     if(WIN32 AND VINOX_OPENVINO_SDK_ROOT)

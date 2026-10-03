@@ -1,0 +1,144 @@
+{
+  "id": "math.calculate_Phi-4-mini-instruct-ov_20260906_185519_217848",
+  "tool": "math.calculate",
+  "model": "Phi-4-mini-instruct-ov",
+  "label": "negative",
+  "notes": "ToolCall: False (Expected: math.calculate), Thinking: True",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "system.time",
+        "description": "Gibt die aktuelle Systemzeit und das Datum zurueck.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "timezone": {
+              "type": "string",
+              "description": "Die Zeitzone, z.B. Europe/Berlin oder UTC"
+            }
+          },
+          "required": [
+            "timezone"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "math.calculate",
+        "description": "Fuehrt mathematische Berechnungen durch und wertet arithmetische Ausdruecke aus (+, -, *, /, %, ^, sqrt, sin, cos, round).",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "expression": {
+              "type": "string",
+              "description": "Der mathematische Ausdruck, z.B. 'sqrt(12^2 + 16^2)' oder '5000 * ((1 + 0.045) ^ 10)'"
+            }
+          },
+          "required": [
+            "expression"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "fs.read",
+        "description": "Read file content within workspace sandbox (e.g. 'sandbox/config/app_settings.json', 'config.json')",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Path to the file to read"
+            }
+          },
+          "required": [
+            "path"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "fs.list",
+        "description": "List directory entries within workspace sandbox (e.g. 'sandbox/src', 'sandbox/data')",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Path to directory to list"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "fs.write",
+        "description": "Write file content within workspace sandbox",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Path to destination file"
+            },
+            "content": {
+              "type": "string",
+              "description": "Text content to write into the file"
+            }
+          },
+          "required": [
+            "path",
+            "content"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "vinox.search",
+        "description": "VINOX Hybrid Retrieval (BM25 + sqlite-vec Vector Search) across indexed documents",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "The natural language query or keywords to search for"
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Maximum number of documents to return"
+            }
+          },
+          "required": [
+            "query"
+          ]
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a helpful assistant with access to tools. Always begin your response by thinking briefly inside <think>...</think> tags about which tool to call and which arguments are required. After closing </think>, invoke the appropriate tool."
+    },
+    {
+      "role": "user",
+      "content": "Calculate the kinetic energy for mass 1200 kg at speed 27.78 m/s using 0.5 * 1200 * (27.78 ^ 2)."
+    },
+    {
+      "role": "assistant",
+      "reasoning_content": "I need to use the math.calculate function from my toolkit.",
+      "content": "\n\n```json\n{\n  \"calculate\": {\n    \"expression\": \"0.5 * 1200 * Math.pow(27.77899999592799, 2)\"\n  }\n}\n```"
+    }
+  ]
+}

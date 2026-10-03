@@ -1,0 +1,47 @@
+{
+  "timestamp": "2026-09-06T18:10:32.852145",
+  "model_id": "Qwen-2.5-Coder-0.5B",
+  "tool_name": "fs.read",
+  "is_positive": false,
+  "evaluation_notes": "ToolCall: True (Expected: False), Thinking: False",
+  "input": {
+    "system_prompt": "You are a helpful assistant with access to tools. Always begin your response by thinking briefly inside <think>...</think> tags about which tool to call and which arguments are required. After closing </think>, invoke the appropriate tool.",
+    "user_prompt": "Please read the contents of the file 'config.json'.",
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "fs.read",
+          "description": "Read file content within workspace sandbox",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Path to the file to read"
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "output": {
+    "finish_reason": "stop",
+    "reasoning_content": "",
+    "content": "```json\n{\n    \"name\": \"notFound\",\n    \"arguments\": {}\n}\n```",
+    "tool_calls": [
+      {
+        "function": {
+          "arguments": "{\"filePath\":\"/home/user/config.json\"}",
+          "name": "readConfig"
+        },
+        "id": "call_f6612070bccbc37c",
+        "type": "function"
+      }
+    ]
+  }
+}

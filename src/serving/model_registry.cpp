@@ -175,6 +175,7 @@ vinox_status vinox_model_registry_scan(
 
     std::lock_guard<std::mutex> lock(registry->mutex);
 
+    // 1. Scan for explicit model-manifest.json files
     for (const auto& entry : fs::recursive_directory_iterator(dir, ec)) {
         if (ec) break;
         if (entry.is_regular_file() && entry.path().filename().string() == "model-manifest.json") {
@@ -192,6 +193,81 @@ vinox_status vinox_model_registry_scan(
                 }
                 if (!exists) {
                     registry->models.push_back(model_info);
+                }
+            }
+        }
+    }
+
+    // 2. Discover standard OpenVINO model directories (openvino_model.xml / model.xml / etc.)
+    auto is_openvino_model_dir = [](const fs::path& p) -> bool {
+        std::error_code err;
+        return fs::exists(p / "openvino_model.xml", err) ||
+               fs::exists(p / "openvino_language_model.xml", err) ||
+               fs::exists(p / "model.xml", err) ||
+               (fs::exists(p / "openvino_tokenizer.xml", err) && fs::exists(p / "config.json", err));
+    };
+
+    auto register_ov_model = [&](const fs::path& p) {
+        std::string mid = p.filename().string();
+        std::string full_path = p.string();
+        bool exists = false;
+        for (const auto& m : registry->models) {
+            if (m.model_id == mid || m.local_path == full_path) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            ModelEntry ov_entry;
+            ov_entry.model_id = mid;
+            ov_entry.display_name = mid;
+            ov_entry.local_path = full_path;
+            ov_entry.default_device = "CPU";
+            ov_entry.context_length = 32768;
+            ov_entry.state = VINOX_MODEL_STATE_UNLOADED;
+
+            fs::path cfg_p = p / "config.json";
+            std::error_code cfg_ec;
+            if (fs::exists(cfg_p, cfg_ec)) {
+                try {
+                    std::ifstream cf(cfg_p);
+                    json cj;
+                    cf >> cj;
+                    if (cj.contains("max_position_embeddings") && cj["max_position_embeddings"].is_number_integer()) {
+                        ov_entry.context_length = cj["max_position_embeddings"].get<uint64_t>();
+                    }
+                } catch (...) {}
+            }
+            registry->models.push_back(ov_entry);
+        }
+    };
+
+    if (is_openvino_model_dir(dir)) {
+        register_ov_model(dir);
+    }
+
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+        if (ec) break;
+        if (entry.is_directory(ec)) {
+            std::string dir_name = entry.path().filename().string();
+            if (dir_name.empty() || dir_name[0] == '.' || dir_name.find("venv") != std::string::npos) {
+                continue;
+            }
+            if (is_openvino_model_dir(entry.path())) {
+                register_ov_model(entry.path());
+            } else {
+                // Check 1 level deeper for grouped directories
+                for (const auto& sub : fs::directory_iterator(entry.path(), ec)) {
+                    if (ec) break;
+                    if (sub.is_directory(ec)) {
+                        std::string sub_name = sub.path().filename().string();
+                        if (sub_name.empty() || sub_name[0] == '.' || sub_name.find("venv") != std::string::npos) {
+                            continue;
+                        }
+                        if (is_openvino_model_dir(sub.path())) {
+                            register_ov_model(sub.path());
+                        }
+                    }
                 }
             }
         }

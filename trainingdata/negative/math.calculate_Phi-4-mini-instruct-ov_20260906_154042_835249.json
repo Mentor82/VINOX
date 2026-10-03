@@ -1,0 +1,43 @@
+{
+  "id": "math.calculate_Phi-4-mini-instruct-ov_20260906_154042_835249",
+  "tool": "math.calculate",
+  "model": "Phi-4-mini-instruct-ov",
+  "label": "negative",
+  "notes": "ToolCall: False (Expected: False), Thinking: True",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "math.calculate",
+        "description": "Fuehrt mathematische Berechnungen durch und wertet arithmetische Ausdruecke aus.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "expression": {
+              "type": "string",
+              "description": "Der mathematische Ausdruck, z.B. '(24 * 15) / 3' oder 'sqrt(144) + 12'"
+            }
+          },
+          "required": [
+            "expression"
+          ]
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a helpful assistant with access to tools. Always begin your response by thinking briefly inside <think>...</think> tags about which tool to call and which arguments are required. After closing </think>, invoke the appropriate tool."
+    },
+    {
+      "role": "user",
+      "content": "Calculate (144 * 12) / 6. What is the exact result?"
+    },
+    {
+      "role": "assistant",
+      "reasoning_content": "I will use the math.calculate function provided in order to evaluate this arithmetic expression.",
+      "content": "\n\n```json\n{\n  \"calculate\": {\n    \"expression\": \"(144 * 12) / 6\"\n  }\n}\n```"
+    }
+  ]
+}

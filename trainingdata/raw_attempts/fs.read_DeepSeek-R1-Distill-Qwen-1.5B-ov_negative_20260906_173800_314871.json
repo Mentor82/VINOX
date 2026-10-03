@@ -1,0 +1,38 @@
+{
+  "timestamp": "2026-09-06T17:38:00.314871",
+  "model_id": "DeepSeek-R1-Distill-Qwen-1.5B-ov",
+  "tool_name": "fs.read",
+  "is_positive": false,
+  "evaluation_notes": "Exception during request: HTTP Error 500: Internal Server Error",
+  "input": {
+    "system_prompt": "You are a helpful assistant with access to tools. Always begin your response by thinking briefly inside <think>...</think> tags about which tool to call and which arguments are required. After closing </think>, invoke the appropriate tool.",
+    "user_prompt": "Please read the contents of the file 'config.json'.",
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "fs.read",
+          "description": "Read file content within workspace sandbox",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Path to the file to read"
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "output": {
+    "finish_reason": "error",
+    "reasoning_content": "",
+    "content": "ERROR: HTTP Error 500: Internal Server Error",
+    "tool_calls": []
+  }
+}

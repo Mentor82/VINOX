@@ -18,9 +18,11 @@
         "CMAKE_CXX_COMPILER": "cl.exe",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "VCPKG_INSTALLED_DIR": "${sourceDir}/out/${presetName}/vcpkg_installed",
-        "VINOX_OPENVINO_SDK_ROOT": "C:/ai/openvino_genai_2026.2.1/openvino_genai_windows_2026.2.1.0_x86_64",
-        "OpenVINO_DIR": "C:/ai/openvino_genai_2026.2.1/openvino_genai_windows_2026.2.1.0_x86_64/runtime/cmake",
-        "OpenVINOGenAI_DIR": "C:/ai/openvino_genai_2026.2.1/openvino_genai_windows_2026.2.1.0_x86_64/runtime/cmake"
+        "VCPKG_MANIFEST_MODE": "OFF",
+        "CMAKE_PREFIX_PATH": "${sourceDir}/out/${presetName}/vcpkg_installed/x64-windows;C:/Qt/6.10.1/msvc2022_64",
+        "VINOX_OPENVINO_SDK_ROOT": "C:/ai/openvino_genai_2026.3.0/openvino_genai_windows_2026.3.0.0_x86_64",
+        "OpenVINO_DIR": "C:/ai/openvino_genai_2026.3.0/openvino_genai_windows_2026.3.0.0_x86_64/runtime/cmake",
+        "OpenVINOGenAI_DIR": "C:/ai/openvino_genai_2026.3.0/openvino_genai_windows_2026.3.0.0_x86_64/runtime/cmake"
       }
     },
     {

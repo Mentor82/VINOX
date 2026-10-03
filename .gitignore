@@ -31,3 +31,8 @@ qwen2_5_eval_results.json
 .*_target/
 .cli_target_workspace/
 
+# Scratch / throwaway dev artifacts (not part of the repo)
+/scratch/
+/notes.txt
+/smoke_out.txt
+

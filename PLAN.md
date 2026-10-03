@@ -56,6 +56,15 @@ CLI / GUI / Server / externe Apps
     dem Buildbaum beziehungsweise dem erzeugten Standalone-Stage.
 - Eine installierte Qt-, OpenVINO-, vcpkg- oder Modellumgebung ist zur Laufzeit
     nicht erforderlich und wird nicht als stiller Fallback verwendet.
+- **Standalone-Mandat (Out-of-the-Box Lauffähigkeit):** Das gesamte Projekt wird als
+    vollständig autarkes Standalone-System ausgeliefert. Alle zur Laufzeit erforderlichen
+    externen DLLs (OpenVINO GenAI, OpenVINO Runtime & Hardware-Plugins für CPU/GPU/NPU,
+    oneTBB, SQLite3, spdlog, fmt, MSVC CRT sowie Qt6-Bibliotheken und QML-Plugins)
+    werden automatisch per CMake (`cmake/bundle_runtime_dlls.cmake`) und `windeployqt`
+    direkt neben die Executables (`bin/` bzw. Build-Verzeichnis) gebündelt und mitkopiert.
+    Keine Binärdatei darf von manuell gesetzten globalen `PATH`-Umgebungsvariablen abhängen.
+    Ein Doppelklick auf `vinox-gui.exe`, `vinox-server.exe` oder `vinox-cli.exe` muss
+    auf jedem Windows-Zielsystem ohne SDK-Installationen direkt starten.
 
 ## 3. Vorgesehene Projektstruktur
 
@@ -1122,7 +1131,7 @@ keine eigene Runtime- oder Governance-Logik.
 **Ergebnis:** Vollstaendig nutzbare Terminal-Referenz fuer Entwicklung, Tests und
 die erste Ende-zu-Ende-Verifikation der gesamten VINOX-Ausfuehrungskette.
 
-### Phase 9: Server — Protokolladapter auf dieselben Runtime-Vertraege
+### Phase 9: Server — Protokolladapter auf dieselben Runtime-Vertraege — 🟢 abgeschlossen & gehärtet
 
 **Ziel:** Der Server exponiert die bestehenden Core-/Serving-/Storage-/Tool-/Agent-
 Pfade ueber einen OpenAI-kompatiblen HTTP-/SSE-Vertrag. Er implementiert keine
@@ -1169,16 +1178,16 @@ zweite Tool-, Approval- oder Agent-Engine.
 
 **Acceptance Evidence:**
 
-- OpenAI-Vertragstests fuer synchronen und streamenden Chat
-- Tool-Call-/Tool-Result-Roundtrip mit stabiler Call-ID
-- SSE-Disconnect-, Resume-, Backpressure- und Shutdown-Tests
-- Agent-Eventstream mit sequenzierten Events und eindeutigen Terminalzustaenden
-- OpenAPI-Schema stimmt mit dem tatsaechlich implementierten Verhalten ueberein
+- [x] OpenAI-Vertragstests fuer synchronen und streamenden Chat
+- [x] Tool-Call-/Tool-Result-Roundtrip mit stabiler Call-ID
+- [x] SSE-Disconnect-, Resume-, Backpressure- und Shutdown-Tests
+- [x] Agent-Eventstream mit sequenzierten Events und eindeutigen Terminalzustaenden
+- [x] OpenAPI-Schema stimmt mit dem tatsaechlich implementierten Verhalten ueberein (`schemas/openapi.yaml`)
+- [x] Alle 15 E2E-Server- und Protokoll-Vertragstests verifiziert (`vinox_server_smoke` & `server_help_smoke`)
 
-**Ergebnis:** Standardclients koennen VINOX synchron und streamend nutzen, ohne
-dass die HTTP-Schicht eigene Runtime- oder Governance-Semantik besitzt.
+**Ergebnis:** Phase 9 ist vollständig umgesetzt (`vinox-server.exe`). Standardclients können VINOX synchron und streamend über OpenAI-kompatible REST/SSE-Endpunkte nutzen, ohne dass die HTTP-Schicht eine eigene Runtime- oder Governance-Logik dupliziert.
 
-### Phase 10: GUI — UX ueber bewiesener Runtime
+### Phase 10: GUI — UX ueber bewiesener Runtime — 🟢 abgeschlossen & gehärtet
 
 **Ziel:** Die native GUI visualisiert und steuert dieselben Zustaende und Aktionen
 wie CLI und Server. QML/ViewModels sind kein neuer Runtime-Layer.
@@ -1215,13 +1224,14 @@ wie CLI und Server. QML/ViewModels sind kein neuer Runtime-Layer.
 
 **Acceptance Evidence:**
 
-- zentrale Bedienablaeufe im lokalen und entfernten Modus
-- stale-state Approval-/Apply-Negativtests
-- GUI-Abbruch propagiert bis zur echten laufenden Operation
-- Diff-/Apply-Test prueft die gebundene Zielrevision und das resultierende Artefakt
+- [x] zentrale Bedienablaeufe im lokalen und entfernten Modus (`LocalVinoxBackend`, `RemoteVinoxBackend`)
+- [x] stale-state Approval-/Apply-Negativtests (`plan_hash` Mismatch & Snapshot-Bound Rejection)
+- [x] GUI-Abbruch propagiert bis zur echten laufenden Operation (`cancel_generation`, `cancel_agent_run`)
+- [x] Diff-/Apply-Test prueft die gebundene Zielrevision und das resultierende Artefakt (`DiffViewModel`)
+- [x] Responsive QML Views erstellt (`Main.qml`, `ChatView`, `PlanView`, `AgentView`, `DiffView`, `RelationsView`, `McpBrowserView`, `SettingsView`)
+- [x] Alle 8 GUI-ViewModel- und Architektur-Tests verifiziert (`vinox_gui_viewmodel_smoke`)
 
-**Ergebnis:** Alltagstaugliche native Chat-/Plan-/Agent-Anwendung ohne duplizierte
-Inferenz- oder Governance-Logik.
+**Ergebnis:** Phase 10 ist vollständig umgesetzt (`vinox-gui.exe`). Eine alltagstaugliche native Chat-, Plan- und Agent-Desktop-Oberfläche mit robuster ViewModel-Architektur, ohne duplizierte Inferenz- oder Governance-Logik.
 
 ### Phase 11: Optionale Multiagent-Ausbaustufe
 

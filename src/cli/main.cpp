@@ -34,8 +34,13 @@
 #include "vinox/openvino.h"
 #include "vinox/serving.h"
 #include "vinox/storage.h"
+#include "vinox/embedding.h"
+#include "vinox/embedding.hpp"
+#include "vinox/plugins.h"
+#include "vinox/plugins.hpp"
 #include "vinox/tools.h"
 #include "vinox/tools.hpp"
+#include "vinox/linep.h"
 #include "vinox/vinox.h"
 
 namespace {
@@ -73,9 +78,35 @@ struct Arguments {
     std::uint64_t reasoning_timeout_ms = 0;
     float temperature = 0.7f;
     float top_p = 0.9f;
+    float repetition_penalty = 0.0f;
+    float presence_penalty = 0.0f;
+    float frequency_penalty = 0.0f;
+    size_t top_k = 0;
     bool interactive = false;
     bool json_mode = false;
     bool run_audit = false;
+    bool show_info = false;
+    bool config_save = false;
+    bool config_reset = false;
+    bool show_help = false;
+    bool show_version = false;
+
+    bool set_temperature = false;
+    bool set_top_p = false;
+    bool set_repetition_penalty = false;
+    bool set_max_tokens = false;
+    bool set_device = false;
+
+    bool enable_tools = false;
+    std::string json_schema;
+    std::string tool_policy_str = "readonly";
+    std::string embedding_model_path;
+    std::string embedding_device = "CPU";
+
+    bool run_worker = false;
+    std::string orchestrator = "127.0.0.1:9000";
+    std::string worker_token;
+    bool allow_mock = false;
 };
 
 void print_usage() {
@@ -83,6 +114,8 @@ void print_usage() {
         << "VINOX CLI - Versatile Inference & Native OpenVINO eXecution\n\n"
         << "Usage:\n"
         << "  vinox-cli --audit\n"
+        << "  vinox-cli --worker [--orchestrator <host:port>] [--token <auth_token>] [--device <NPU|GPU|CPU>]\n"
+        << "  vinox-cli --model <path> [--info] [--config-save|--config-reset]\n"
         << "  vinox-cli --model <path> --prompt <text> [--interactive] [--json] [--mode chat|plan|agent]\n"
         << "  vinox-cli --remote <url> [--interactive] [--json]\n\n"
         << "Options:\n"
@@ -97,8 +130,20 @@ void print_usage() {
         << "  --remote <url>         Connect to remote VINOX HTTP server\n"
         << "  --device <CPU|NPU|GPU> Device target (default: CPU)\n"
         << "  --max-new-tokens <N>   Maximum tokens to generate (default: 128)\n"
-        << "  --temperature <val>    Sampling temperature (default: 0.7)\n"
-        << "  --top-p <val>          Top-P nucleus sampling (default: 0.9)\n"
+        << "  --temperature <val>    Sampling temperature (default: 0.7 or vinox_config.json)\n"
+        << "  --top-p <val>          Top-P nucleus sampling (default: 0.9 or vinox_config.json)\n"
+        << "  --repetition-penalty <val> Repetition penalty (default: 1.15 or vinox_config.json)\n"
+        << "  --presence-penalty <val>   Presence penalty (default: 0.0)\n"
+        << "  --frequency-penalty <val>  Frequency penalty (default: 0.0)\n"
+        << "  --top-k <N>            Top-K sampling limit (default: 50)\n"
+        << "  --tools                Enable VINOX canonical tools in session\n"
+        << "  --embedding-model <path> Path to decoupled embedding model directory\n"
+        << "  --embedding-device <CPU|NPU|GPU> Device target for embeddings (default: CPU)\n"
+        << "  --json-schema <schema> Enforce OpenVINO 2026.3 JSONSchema constrained decoding (string or filepath)\n"
+        << "  --tool-policy <mode>   Security policy (readonly|ask|allow, default: readonly)\n"
+        << "  --info                 Display model architecture, context & quantization info\n"
+        << "  --config-save          Save current sampling parameters to vinox_config.json\n"
+        << "  --config-reset         Delete vinox_config.json from model folder\n"
         << "  --audit                Run live system architecture audit\n"
         << "  --version              Print version and ABI info\n"
         << "  --help                 Show this help message\n";
@@ -122,9 +167,13 @@ bool parse_float(std::string_view text, float& value) {
 bool parse_arguments(int argc, char* argv[], Arguments& arguments) {
     for (int index = 1; index < argc; ++index) {
         const std::string_view argument = argv[index];
-        if (argument == "--help") {
-            print_usage();
-            return false;
+        if (argument == "--help" || argument == "-h") {
+            arguments.show_help = true;
+            return true;
+        }
+        if (argument == "--version" || argument == "-v") {
+            arguments.show_version = true;
+            return true;
         }
         if (argument == "--audit") {
             arguments.run_audit = true;
@@ -138,14 +187,50 @@ bool parse_arguments(int argc, char* argv[], Arguments& arguments) {
             arguments.json_mode = true;
             continue;
         }
+        if (argument == "--tools") {
+            arguments.enable_tools = true;
+            continue;
+        }
+        if (argument == "--info") {
+            arguments.show_info = true;
+            continue;
+        }
+        if (argument == "--config-save") {
+            arguments.config_save = true;
+            continue;
+        }
+        if (argument == "--config-reset") {
+            arguments.config_reset = true;
+            continue;
+        }
+        if (argument == "--worker") {
+            arguments.run_worker = true;
+            continue;
+        }
+        if (argument == "--allow-mock") {
+            arguments.allow_mock = true;
+            continue;
+        }
         if (index + 1 >= argc) {
             std::cerr << "Missing value for " << argument << '\n';
             return false;
         }
 
         const std::string value = argv[++index];
-        if (argument == "--model") {
+        if (argument == "--orchestrator") {
+            arguments.orchestrator = value;
+        } else if (argument == "--token") {
+            arguments.worker_token = value;
+        } else if (argument == "--model") {
             arguments.model_path = value;
+        } else if (argument == "--embedding-model") {
+            arguments.embedding_model_path = value;
+        } else if (argument == "--embedding-device") {
+            arguments.embedding_device = value;
+        } else if (argument == "--json-schema") {
+            arguments.json_schema = value;
+        } else if (argument == "--tool-policy") {
+            arguments.tool_policy_str = value;
         } else if (argument == "--prompt") {
             arguments.prompt = value;
         } else if (argument == "--mode") {
@@ -154,6 +239,7 @@ bool parse_arguments(int argc, char* argv[], Arguments& arguments) {
             arguments.remote_url = value;
         } else if (argument == "--device") {
             arguments.device = value;
+            arguments.set_device = true;
         } else if (argument == "--reasoning") {
             arguments.reasoning_mode_str = value;
         } else if (argument == "--reasoning-budget") {
@@ -171,16 +257,42 @@ bool parse_arguments(int argc, char* argv[], Arguments& arguments) {
                 std::cerr << "Invalid token count: " << value << '\n';
                 return false;
             }
+            arguments.set_max_tokens = true;
         } else if (argument == "--temperature") {
             if (!parse_float(value, arguments.temperature)) {
                 std::cerr << "Invalid temperature: " << value << '\n';
                 return false;
             }
+            arguments.set_temperature = true;
         } else if (argument == "--top-p") {
             if (!parse_float(value, arguments.top_p)) {
                 std::cerr << "Invalid top-p: " << value << '\n';
                 return false;
             }
+            arguments.set_top_p = true;
+        } else if (argument == "--repetition-penalty") {
+            if (!parse_float(value, arguments.repetition_penalty)) {
+                std::cerr << "Invalid repetition-penalty: " << value << '\n';
+                return false;
+            }
+            arguments.set_repetition_penalty = true;
+        } else if (argument == "--presence-penalty") {
+            if (!parse_float(value, arguments.presence_penalty)) {
+                std::cerr << "Invalid presence-penalty: " << value << '\n';
+                return false;
+            }
+        } else if (argument == "--frequency-penalty") {
+            if (!parse_float(value, arguments.frequency_penalty)) {
+                std::cerr << "Invalid frequency-penalty: " << value << '\n';
+                return false;
+            }
+        } else if (argument == "--top-k") {
+            uint64_t tk = 0;
+            if (!parse_unsigned(value, tk)) {
+                std::cerr << "Invalid top-k: " << value << '\n';
+                return false;
+            }
+            arguments.top_k = static_cast<size_t>(tk);
         } else {
             std::cerr << "Unknown argument: " << argument << '\n';
             return false;
@@ -271,6 +383,7 @@ struct CliSession {
     vinox_policy_engine* policy_engine{nullptr};
     vinox_sandbox_host* sandbox_host{nullptr};
     vinox_model* model{nullptr};
+    vinox_embedding_engine* embedding_engine{nullptr};
     vinox_plan* current_plan{nullptr};
     vinox_agent_run* current_run{nullptr};
     std::string current_plan_hash;
@@ -641,6 +754,126 @@ void handle_slash_command(const std::string& line, CliSession& session, bool& sh
             std::cout << "  - Active Mode: " << vinox_mode_controller_get_mode(session.mode_controller) << "\n";
             std::cout << "  - Conversation ID: " << session.conversation_id << "\n";
         }
+    } else if (cmd == "/embed") {
+        std::string text;
+        std::getline(iss, text);
+        if (!text.empty() && text[0] == ' ') text.erase(0, 1);
+        if (text.empty()) {
+            std::cout << "Usage: /embed <text to encode>\n";
+        } else if (!session.embedding_engine) {
+            std::cout << "No embedding model loaded. Launch CLI with --embedding-model <path> [--embedding-device <device>]\n";
+        } else {
+            size_t dim = 0;
+            vinox_embedding_get_dim(session.embedding_engine, &dim);
+            std::vector<float> vec(dim);
+            size_t actual_dim = 0;
+            auto t0 = std::chrono::steady_clock::now();
+            vinox_status st = vinox_embedding_generate(session.embedding_engine, text.c_str(), vec.data(), vec.size(), &actual_dim);
+            auto t1 = std::chrono::steady_clock::now();
+            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+
+            if (st == VINOX_STATUS_OK) {
+                vinox_embedding_info info{};
+                info.struct_size = sizeof(info);
+                char pbuf[512] = {0};
+                vinox_embedding_get_info(session.embedding_engine, &info, pbuf, sizeof(pbuf));
+
+                float norm = 0.0f;
+                for (float v : vec) norm += v * v;
+                norm = std::sqrt(norm);
+
+                if (session.json_mode) {
+                    print_json_event("cli.embed", "OK", {
+                        {"dimension", actual_dim},
+                        {"l2_norm", norm},
+                        {"space_id", info.space_id ? info.space_id : ""},
+                        {"device", info.device ? info.device : ""},
+                        {"duration_ms", elapsed_ms}
+                    });
+                } else {
+                    std::cout << "[EMBEDDING GENERATED]\n";
+                    std::cout << "  - Text:         \"" << text << "\"\n";
+                    std::cout << "  - Dimension:    " << actual_dim << "\n";
+                    std::cout << "  - L2-Norm:      " << norm << "\n";
+                    std::cout << "  - Device:       " << (info.device ? info.device : "unknown") << "\n";
+                    std::cout << "  - Space ID:     " << (info.space_id ? info.space_id : "unknown") << "\n";
+                    std::cout << "  - Duration:     " << elapsed_ms << " ms\n";
+                    std::cout << "  - First 5 dims: [";
+                    for (size_t d = 0; d < std::min<size_t>(5, actual_dim); ++d) {
+                        std::cout << vec[d] << (d + 1 < std::min<size_t>(5, actual_dim) ? ", " : "");
+                    }
+                    std::cout << "...]\n";
+                }
+            } else {
+                std::cerr << "Failed to generate embedding: " << vinox_embedding_last_error() << "\n";
+            }
+        }
+    } else if (cmd == "/search") {
+        std::string query;
+        std::getline(iss, query);
+        if (!query.empty() && query[0] == ' ') query.erase(0, 1);
+        if (query.empty()) {
+            std::cout << "Usage: /search <query text>\n";
+        } else if (!session.storage) {
+            std::cout << "No storage engine loaded.\n";
+        } else {
+            std::vector<float> q_vec;
+            if (session.embedding_engine) {
+                size_t dim = 0;
+                vinox_embedding_get_dim(session.embedding_engine, &dim);
+                if (dim > 0) {
+                    q_vec.resize(dim);
+                    size_t actual_dim = 0;
+                    vinox_embedding_generate(session.embedding_engine, query.c_str(), q_vec.data(), q_vec.size(), &actual_dim);
+                }
+            }
+            std::vector<vinox_search_result> results(5);
+            for (auto& r : results) r.struct_size = sizeof(r);
+            size_t count = 0;
+            vinox_status st = vinox_storage_search_hybrid(
+                session.storage,
+                q_vec.empty() ? nullptr : q_vec.data(),
+                q_vec.size(),
+                query.c_str(),
+                0.5f,
+                5,
+                results.data(),
+                &count
+            );
+            if (st == VINOX_STATUS_OK) {
+                std::cout << "[HYBRID RETRIEVAL MATCHES] Found " << count << " matches:\n";
+                for (size_t idx = 0; idx < count; ++idx) {
+                    std::cout << "  [" << (idx + 1) << "] ID: " << (results[idx].message_id ? results[idx].message_id : "unknown")
+                              << " | Hybrid Score: " << results[idx].hybrid_score
+                              << " (BM25: " << results[idx].bm25_score << ", Vector: " << results[idx].vector_score << ")\n";
+                }
+            } else {
+                std::cerr << "Search failed: " << vinox_storage_last_error() << "\n";
+            }
+        }
+    } else if (cmd == "/plugins" || cmd == "/tools") {
+        if (session.registry) {
+            size_t req_sz = 0;
+            vinox_tools_format_openai_schema(session.registry, nullptr, 0, &req_sz);
+            if (req_sz > 0) {
+                std::vector<char> buf(req_sz);
+                vinox_tools_format_openai_schema(session.registry, buf.data(), buf.size(), nullptr);
+                std::cout << "[REGISTERED TOOLS & PLUGINS]\n";
+                try {
+                    auto j = nlohmann::json::parse(buf.data());
+                    for (const auto& item : j) {
+                        if (item.contains("function")) {
+                            std::cout << "  - Tool: " << item["function"].value("name", "")
+                                      << " (" << item["function"].value("description", "") << ")\n";
+                        }
+                    }
+                } catch (...) {
+                    std::cout << buf.data() << "\n";
+                }
+            } else {
+                std::cout << "No tools registered.\n";
+            }
+        }
     } else {
         if (session.json_mode) {
             print_json_event("cli.error", "ERROR", {{"error", "Unknown command"}, {"cmd", cmd}});
@@ -707,9 +940,230 @@ int run_live_audit() {
     return 0;
 }
 
+struct ModelDetails {
+    std::string badge_info;
+    std::string architecture{"Transformer"};
+    std::string quantization{"FP16"};
+    uint64_t context_window{32768};
+    float temperature{0.7f};
+    float top_p{0.9f};
+    float repetition_penalty{1.15f};
+    float presence_penalty{0.0f};
+    float frequency_penalty{0.0f};
+    uint64_t max_tokens{128};
+    std::string preferred_device{"CPU"};
+    bool has_custom_config{false};
+};
+
+ModelDetails inspect_model(const std::string& model_path) {
+    ModelDetails d;
+    if (model_path.empty()) return d;
+    namespace fs = std::filesystem;
+    fs::path p(model_path);
+    std::error_code ec;
+    if (!fs::exists(p, ec) || !fs::is_directory(p, ec)) return d;
+
+    std::string dir_name = p.filename().string();
+    std::string lower_name = dir_name;
+    for (char& c : lower_name) c = static_cast<char>(std::tolower(c));
+
+    std::string params;
+    if (lower_name.find("0.5b") != std::string::npos) params = "0.5B";
+    else if (lower_name.find("1.5b") != std::string::npos) params = "1.5B";
+    else if (lower_name.find("1b") != std::string::npos) params = "1B";
+    else if (lower_name.find("3b") != std::string::npos) params = "3B";
+    else if (lower_name.find("4b") != std::string::npos) params = "4B";
+    else if (lower_name.find("7b") != std::string::npos) params = "7B";
+    else if (lower_name.find("8b") != std::string::npos) params = "8B";
+    else if (lower_name.find("14b") != std::string::npos) params = "14B";
+    else if (lower_name.find("32b") != std::string::npos) params = "32B";
+
+    if (lower_name.find("int4") != std::string::npos || lower_name.find("int-4") != std::string::npos) d.quantization = "INT4";
+    else if (lower_name.find("int8") != std::string::npos) d.quantization = "INT8";
+    else if (lower_name.find("fp16") != std::string::npos) d.quantization = "FP16";
+
+    // 1. Check vinox_config.json
+    fs::path vinox_cfg = p / "vinox_config.json";
+    if (fs::exists(vinox_cfg, ec)) {
+        try {
+            std::ifstream vf(vinox_cfg);
+            nlohmann::json vj;
+            vf >> vj;
+            if (vj.contains("temperature") && vj["temperature"].is_number()) d.temperature = vj["temperature"].get<float>();
+            if (vj.contains("top_p") && vj["top_p"].is_number()) d.top_p = vj["top_p"].get<float>();
+            if (vj.contains("repetition_penalty") && vj["repetition_penalty"].is_number()) d.repetition_penalty = vj["repetition_penalty"].get<float>();
+            if (vj.contains("presence_penalty") && vj["presence_penalty"].is_number()) d.presence_penalty = vj["presence_penalty"].get<float>();
+            if (vj.contains("frequency_penalty") && vj["frequency_penalty"].is_number()) d.frequency_penalty = vj["frequency_penalty"].get<float>();
+            if (vj.contains("max_tokens") && vj["max_tokens"].is_number_integer()) d.max_tokens = vj["max_tokens"].get<uint64_t>();
+            if (vj.contains("preferred_device") && vj["preferred_device"].is_string()) d.preferred_device = vj["preferred_device"].get<std::string>();
+            d.has_custom_config = true;
+        } catch (...) {}
+    }
+
+    // 2. Check generation_config.json
+    fs::path gen_cfg = p / "generation_config.json";
+    if (fs::exists(gen_cfg, ec) && !d.has_custom_config) {
+        try {
+            std::ifstream gf(gen_cfg);
+            nlohmann::json gj;
+            gf >> gj;
+            if (gj.contains("temperature") && gj["temperature"].is_number()) d.temperature = gj["temperature"].get<float>();
+            if (gj.contains("top_p") && gj["top_p"].is_number()) d.top_p = gj["top_p"].get<float>();
+            if (gj.contains("repetition_penalty") && gj["repetition_penalty"].is_number()) d.repetition_penalty = gj["repetition_penalty"].get<float>();
+        } catch (...) {}
+    }
+
+    // 3. Check config.json
+    fs::path cfg_file = p / "config.json";
+    if (fs::exists(cfg_file, ec)) {
+        try {
+            std::ifstream cf(cfg_file);
+            nlohmann::json cj;
+            cf >> cj;
+            if (cj.contains("model_type") && cj["model_type"].is_string()) {
+                d.architecture = cj["model_type"].get<std::string>();
+                if (!d.architecture.empty()) d.architecture[0] = static_cast<char>(std::toupper(d.architecture[0]));
+            } else if (cj.contains("architectures") && cj["architectures"].is_array() && !cj["architectures"].empty()) {
+                d.architecture = cj["architectures"][0].get<std::string>();
+            }
+            if (cj.contains("max_position_embeddings") && cj["max_position_embeddings"].is_number_integer()) {
+                d.context_window = cj["max_position_embeddings"].get<uint64_t>();
+            }
+            if (params.empty() && cj.contains("hidden_size") && cj["hidden_size"].is_number_integer()) {
+                int hs = cj["hidden_size"].get<int>();
+                if (hs <= 1024) params = "0.5B";
+                else if (hs <= 1536) params = "1.5B";
+                else if (hs <= 2048) params = "2B-3B";
+                else if (hs <= 4096) params = "7B-8B";
+                else params = "14B+";
+            }
+        } catch (...) {}
+    }
+
+    std::string ctx_str;
+    if (d.context_window >= 1000) {
+        ctx_str = std::to_string(d.context_window / 1024) + "k Kontext";
+    } else {
+        ctx_str = std::to_string(d.context_window) + " Kontext";
+    }
+
+    std::string accel = d.quantization;
+    if (d.preferred_device == "NPU" || lower_name.find("npu") != std::string::npos || d.quantization == "INT4" || d.quantization == "INT8" || d.quantization == "FP16") {
+        accel += " NPU";
+    }
+
+    std::ostringstream ss;
+    ss << d.architecture;
+    if (!params.empty()) ss << " (" << params << ")";
+    ss << " • " << ctx_str << " • " << accel << " • Default Temp: " << std::fixed << std::setprecision(1) << d.temperature;
+    d.badge_info = ss.str();
+    return d;
+}
+
+int run_worker_mode(const Arguments& arguments) {
+    std::cout << "================================================================================\n";
+    std::cout << "           VINOX LiNeP Intranet Fleet Worker (ADR 0005)\n";
+    std::cout << "================================================================================\n";
+
+    // 1. Session 0 & Hardware NPU audit
+    vinox_linep_session0_npu_status sess_status{};
+    sess_status.struct_size = sizeof(sess_status);
+    vinox_status s0_st = vinox_linep_check_session0_npu_readiness(&sess_status);
+    if (s0_st == VINOX_STATUS_OK) {
+        std::cout << "[WORKER] Windows Session Check:\n"
+                  << "   - Session ID:       " << sess_status.session_id << "\n"
+                  << "   - Is Session 0:     " << (sess_status.is_session0 ? "YES (Service Mode)" : "NO (Interactive User)") << "\n"
+                  << "   - NPU Available:    " << (sess_status.npu_available ? "YES" : "NO") << "\n"
+                  << "   - Device Name:      " << sess_status.device_name << "\n"
+                  << "   - Status Message:   " << sess_status.status_message << "\n";
+    }
+
+    // 2. Hardware devices discovery
+    vinox_device_info devs[8];
+    size_t dev_count = 0;
+    char top_dev[32] = {0};
+    vinox_status dev_st = vinox_devices_query(devs, 8, &dev_count, top_dev, sizeof(top_dev));
+    if (dev_st == VINOX_STATUS_OK && dev_count > 0) {
+        std::cout << "[WORKER] OpenVINO Execution Devices (" << dev_count << "):\n";
+        for (size_t i = 0; i < dev_count; ++i) {
+            std::cout << "   - " << devs[i].device_id << ": " << devs[i].full_name 
+                      << (devs[i].is_available ? " [READY]" : " [UNAVAILABLE]") << "\n";
+        }
+    }
+
+    std::string target_device = arguments.set_device ? arguments.device : (top_dev[0] != '\0' ? top_dev : "NPU");
+    std::cout << "[WORKER] Target Execution Device: " << target_device << "\n";
+
+    // 3. Configure Worker
+    vinox_linep_worker_config cfg;
+    vinox_linep_worker_config_init(&cfg);
+    cfg.port = 0;
+    cfg.target_device = target_device.c_str();
+    cfg.allow_mock_models = arguments.allow_mock ? 1 : 0;
+
+    vinox_linep_worker* worker = nullptr;
+    vinox_status st = vinox_linep_worker_create(&cfg, &worker);
+    if (st != VINOX_STATUS_OK || !worker) {
+        std::cerr << "[WORKER] FAILED to create LinepWorker: " << st << "\n";
+        return 1;
+    }
+
+    // 4. Parse orchestrator host:port
+    std::string orch_host = "127.0.0.1";
+    uint16_t orch_port = 9000;
+    auto colon_pos = arguments.orchestrator.find(':');
+    if (colon_pos != std::string::npos) {
+        orch_host = arguments.orchestrator.substr(0, colon_pos);
+        try {
+            orch_port = static_cast<uint16_t>(std::stoul(arguments.orchestrator.substr(colon_pos + 1)));
+        } catch (...) {
+            orch_port = 9000;
+        }
+    } else if (!arguments.orchestrator.empty()) {
+        orch_host = arguments.orchestrator;
+    }
+
+    std::string token = arguments.worker_token;
+    if (token.empty()) {
+        const char* env_tok = std::getenv("LINEP_WORKER_TOKEN");
+        if (env_tok) token = env_tok;
+    }
+
+    std::cout << "[WORKER] Initiating Outbound LiNeP V0.2 lease dial to " << orch_host << ":" << orch_port << " ...\n";
+    std::cout.flush();
+    st = vinox_linep_worker_dial_outbound_lease(worker, orch_host.c_str(), orch_port, token.c_str());
+    if (st != VINOX_STATUS_OK) {
+        std::cerr << "[WORKER] FAILED: dial_outbound_lease returned status " << st << "\n";
+        std::cerr.flush();
+        vinox_linep_worker_destroy(worker);
+        return 1;
+    }
+
+    std::cout << "[WORKER] SUCCESS: Outbound lease bound & registered with cluster orchestrator!\n"
+              << "[WORKER] Listening for forwarded inference tasks over authenticated LiNeP trunk.\n"
+              << "[WORKER] Press Ctrl+C to terminate worker.\n";
+    std::cout.flush();
+
+    while (!g_interrupted.load()) {
+        if (!vinox_linep_worker_is_running(worker)) {
+            std::cerr << "[WORKER] Connection lost / worker stopped. Exiting.\n";
+            std::cerr.flush();
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+
+    std::cout << "\n[WORKER] Shutting down worker cleanly...\n";
+    vinox_linep_worker_destroy(worker);
+    std::cout << "[WORKER] Worker offline.\n";
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    std::setvbuf(stderr, nullptr, _IONBF, 0);
     std::signal(SIGINT, signal_handler);
 
     if (argc == 1) {
@@ -721,8 +1175,21 @@ int main(int argc, char* argv[]) {
         return 2;
     }
 
+    if (arguments.show_help) {
+        print_usage();
+        return 0;
+    }
+
+    if (arguments.show_version) {
+        return print_version();
+    }
+
     if (arguments.run_audit) {
         return run_live_audit();
+    }
+
+    if (arguments.run_worker) {
+        return run_worker_mode(arguments);
     }
 
     // Fail-Closed Check on Remote Mode until Phase 9!
@@ -733,6 +1200,110 @@ int main(int argc, char* argv[]) {
             std::cerr << "FAILED: Remote HTTP mode is unavailable until Phase 9 server implementation (URL: " << arguments.remote_url << ").\n";
         }
         return 1;
+    }
+
+    // Model Inspection & Configuration Management
+    if (!arguments.model_path.empty()) {
+        ModelDetails details = inspect_model(arguments.model_path);
+
+        if (arguments.show_info) {
+            if (arguments.json_mode) {
+                nlohmann::json info_json = {
+                    {"model_path", arguments.model_path},
+                    {"badge_info", details.badge_info},
+                    {"architecture", details.architecture},
+                    {"quantization", details.quantization},
+                    {"context_window", details.context_window},
+                    {"temperature", details.temperature},
+                    {"top_p", details.top_p},
+                    {"repetition_penalty", details.repetition_penalty},
+                    {"presence_penalty", details.presence_penalty},
+                    {"frequency_penalty", details.frequency_penalty},
+                    {"max_tokens", details.max_tokens},
+                    {"preferred_device", details.preferred_device},
+                    {"has_custom_config", details.has_custom_config}
+                };
+                print_json_event("cli.model_info", "OK", info_json);
+            } else {
+                std::cout << "================================================================================\n";
+                std::cout << "                         VINOX MODEL INFORMATION\n";
+                std::cout << "================================================================================\n";
+                std::cout << "  - Model Path:          " << arguments.model_path << "\n";
+                std::cout << "  - Badge Info:          " << details.badge_info << "\n";
+                std::cout << "  - Architecture:        " << details.architecture << "\n";
+                std::cout << "  - Context Window:      " << details.context_window << " tokens\n";
+                std::cout << "  - Quantization:        " << details.quantization << "\n";
+                std::cout << "  - Target Device:       " << (arguments.set_device ? arguments.device : details.preferred_device) << "\n";
+                std::cout << "  - Configuration:       " << (details.has_custom_config ? "VINOX Config (vinox_config.json)" : "Hersteller-Defaults") << "\n";
+                std::cout << "  - Sampling Parameters: Temp=" << details.temperature << ", Top-P=" << details.top_p << ", Rep-Penalty=" << details.repetition_penalty << "\n";
+                std::cout << "================================================================================\n";
+            }
+            return 0;
+        }
+
+        if (arguments.config_save) {
+            std::filesystem::path cfg_out = std::filesystem::path(arguments.model_path) / "vinox_config.json";
+            nlohmann::json vj = {
+                {"vinox_version", "1.0"},
+                {"temperature", arguments.set_temperature ? arguments.temperature : details.temperature},
+                {"top_p", arguments.set_top_p ? arguments.top_p : details.top_p},
+                {"repetition_penalty", arguments.set_repetition_penalty ? arguments.repetition_penalty : details.repetition_penalty},
+                {"presence_penalty", arguments.presence_penalty},
+                {"frequency_penalty", arguments.frequency_penalty},
+                {"max_tokens", arguments.set_max_tokens ? arguments.max_new_tokens : details.max_tokens},
+                {"preferred_device", arguments.set_device ? arguments.device : details.preferred_device}
+            };
+            std::ofstream out(cfg_out);
+            if (out.is_open()) {
+                out << vj.dump(2);
+                out.close();
+                if (arguments.json_mode) {
+                    print_json_event("cli.config_save", "OK", {{"file", cfg_out.string()}});
+                } else {
+                    std::cout << "[VINOX-CLI] Successfully saved model configuration to: " << cfg_out.string() << "\n";
+                }
+                return 0;
+            } else {
+                std::cerr << "FAILED to write " << cfg_out.string() << "\n";
+                return 1;
+            }
+        }
+
+        if (arguments.config_reset) {
+            std::filesystem::path cfg_out = std::filesystem::path(arguments.model_path) / "vinox_config.json";
+            std::error_code ec;
+            if (std::filesystem::exists(cfg_out, ec)) {
+                std::filesystem::remove(cfg_out, ec);
+                if (arguments.json_mode) {
+                    print_json_event("cli.config_reset", "OK", {{"file", cfg_out.string()}});
+                } else {
+                    std::cout << "[VINOX-CLI] Successfully deleted " << cfg_out.string() << ". Reverted to manufacturer defaults.\n";
+                }
+            } else {
+                if (arguments.json_mode) {
+                    print_json_event("cli.config_reset", "OK", {{"status", "NOOP"}});
+                } else {
+                    std::cout << "[VINOX-CLI] No vinox_config.json found in model directory. Nothing to reset.\n";
+                }
+            }
+            return 0;
+        }
+
+        // Apply loaded defaults to arguments if not explicitly set
+        if (!arguments.set_temperature) arguments.temperature = details.temperature;
+        if (!arguments.set_top_p) arguments.top_p = details.top_p;
+        if (!arguments.set_repetition_penalty) arguments.repetition_penalty = details.repetition_penalty;
+        if (!arguments.set_max_tokens && details.has_custom_config) arguments.max_new_tokens = details.max_tokens;
+        if (!arguments.set_device && details.has_custom_config) arguments.device = details.preferred_device;
+
+        if (!arguments.json_mode) {
+            std::cout << "[VINOX-CLI] Model: " << details.badge_info << "\n";
+            std::cout << "[VINOX-CLI] Configuration: " << (details.has_custom_config ? "VINOX Config (vinox_config.json)" : "Hersteller-Defaults") << "\n";
+        }
+    }
+
+    if (arguments.repetition_penalty <= 0.0f) {
+        arguments.repetition_penalty = 1.15f;
     }
 
     // Initialize CliSession state with Fail-Closed Error Checking
@@ -774,6 +1345,13 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    if (arguments.tool_policy_str == "allow") {
+        vinox_policy_engine_set_rule(session.policy_engine, "*", VINOX_SECURITY_CLASS_ADMIN, VINOX_APPROVAL_AUTO_ALLOWED);
+    } else if (arguments.tool_policy_str == "ask") {
+        vinox_policy_engine_set_rule(session.policy_engine, "*", VINOX_SECURITY_CLASS_READ_ONLY, VINOX_APPROVAL_APPROVED_ONCE);
+    } else {
+        vinox_policy_engine_set_rule(session.policy_engine, "*", VINOX_SECURITY_CLASS_READ_ONLY, VINOX_APPROVAL_AUTO_ALLOWED);
+    }
     vinox_policy_engine_set_rule(session.policy_engine, "local_write.*", VINOX_SECURITY_CLASS_LOCAL_WRITE, VINOX_APPROVAL_AUTO_ALLOWED);
 
     vinox_tool_definition write_tool;
@@ -784,6 +1362,60 @@ int main(int argc, char* argv[]) {
     write_tool.parameters_json_schema = "{\"type\":\"object\",\"properties\":{\"filename\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"filename\",\"content\"],\"additionalProperties\":false}";
     write_tool.security_class = VINOX_SECURITY_CLASS_LOCAL_WRITE;
     vinox_tool_registry_register_tool(session.registry, &write_tool);
+
+    // Preload decoupled embedding engine if provided
+    if (!arguments.embedding_model_path.empty()) {
+        vinox_embedding_options emb_options{};
+        emb_options.struct_size = sizeof(emb_options);
+        emb_options.model_path = arguments.embedding_model_path.c_str();
+        emb_options.device = arguments.embedding_device.c_str();
+        emb_options.pooling_mode = VINOX_EMBEDDING_POOLING_AUTO;
+        emb_options.normalization = VINOX_EMBEDDING_NORM_AUTO;
+        emb_options.enable_mmap = 1;
+        emb_options.enable_cache = 1;
+
+        if (vinox_embedding_engine_create(&emb_options, &session.embedding_engine) == VINOX_STATUS_OK) {
+            size_t dim = 0;
+            vinox_embedding_get_dim(session.embedding_engine, &dim);
+            std::cout << "[VINOX-CLI] Loaded decoupled embedding model: " << arguments.embedding_model_path
+                      << " on " << arguments.embedding_device << " (Dim: " << dim << ")\n";
+        } else {
+            std::cerr << "[VINOX-CLI] Warning: Failed to load embedding model: " << vinox_embedding_last_error() << '\n';
+        }
+    }
+
+    // Register standard plugins in session registry
+    if (session.registry) {
+        vinox_tool_plugin* p_fs = nullptr;
+        if (vinox_plugin_std_fs_create(".", &p_fs) == VINOX_STATUS_OK) {
+            vinox_plugin_register(session.registry, p_fs);
+        }
+        vinox_tool_plugin* p_math = nullptr;
+        if (vinox_plugin_std_math_create(&p_math) == VINOX_STATUS_OK) {
+            vinox_plugin_register(session.registry, p_math);
+        }
+        vinox_tool_plugin* p_time = nullptr;
+        if (vinox_plugin_std_time_create(&p_time) == VINOX_STATUS_OK) {
+            vinox_plugin_register(session.registry, p_time);
+        }
+        if (session.storage) {
+            vinox_tool_plugin* p_ret = nullptr;
+            if (vinox_plugin_std_retrieval_create(session.storage, session.embedding_engine, &p_ret) == VINOX_STATUS_OK) {
+                vinox_plugin_register(session.registry, p_ret);
+            }
+        }
+    }
+
+    if (arguments.enable_tools) {
+        vinox_tool_definition search_tool;
+        std::memset(&search_tool, 0, sizeof(search_tool));
+        search_tool.struct_size = sizeof(search_tool);
+        search_tool.name = "vinox.search";
+        search_tool.description = "VINOX Hybrid Retrieval (BM25 + Vector Search)";
+        search_tool.parameters_json_schema = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"],\"additionalProperties\":false}";
+        search_tool.security_class = VINOX_SECURITY_CLASS_READ_ONLY;
+        vinox_tool_registry_register_tool(session.registry, &search_tool);
+    }
 
     session.sandbox_host = vinox_sandbox_host_create(session.overlay_dir.c_str());
     if (!session.sandbox_host || vinox_sandbox_host_start(session.sandbox_host, "vinox_sandbox_worker.exe") != VINOX_STATUS_OK) {
@@ -892,6 +1524,10 @@ int main(int argc, char* argv[]) {
                     gen_opts.max_new_tokens = arguments.max_new_tokens;
                     gen_opts.temperature = arguments.temperature;
                     gen_opts.top_p = arguments.top_p;
+                    gen_opts.repetition_penalty = arguments.repetition_penalty;
+                    gen_opts.presence_penalty = arguments.presence_penalty;
+                    gen_opts.frequency_penalty = arguments.frequency_penalty;
+                    gen_opts.top_k = arguments.top_k;
 
                     if (arguments.reasoning_mode_str == "off") {
                         gen_opts.reasoning_mode = VINOX_REASONING_NONE;
@@ -902,6 +1538,22 @@ int main(int argc, char* argv[]) {
                     gen_opts.reasoning_end_tag = "</think>";
                     gen_opts.max_reasoning_tokens = arguments.reasoning_budget;
                     gen_opts.reasoning_timeout_ms = arguments.reasoning_timeout_ms;
+
+                    std::string active_json_schema = arguments.json_schema;
+                    if (!active_json_schema.empty() && std::filesystem::exists(active_json_schema)) {
+                        std::ifstream f(active_json_schema);
+                        if (f.is_open()) {
+                            std::stringstream ss;
+                            ss << f.rdbuf();
+                            active_json_schema = ss.str();
+                        }
+                    }
+                    if (!active_json_schema.empty()) {
+                        gen_opts.structured_output_json_schema = active_json_schema.c_str();
+                    }
+                    if (arguments.enable_tools) {
+                        gen_opts.enable_native_tool_parser = 1;
+                    }
 
                     StreamUserContext stream_ctx;
                     stream_ctx.json_mode = session.json_mode;
@@ -964,6 +1616,10 @@ int main(int argc, char* argv[]) {
     generation_options.max_new_tokens = arguments.max_new_tokens;
     generation_options.temperature = arguments.temperature;
     generation_options.top_p = arguments.top_p;
+    generation_options.repetition_penalty = arguments.repetition_penalty;
+    generation_options.presence_penalty = arguments.presence_penalty;
+    generation_options.frequency_penalty = arguments.frequency_penalty;
+    generation_options.top_k = arguments.top_k;
 
     if (arguments.reasoning_mode_str == "off") {
         generation_options.reasoning_mode = VINOX_REASONING_NONE;
@@ -974,6 +1630,22 @@ int main(int argc, char* argv[]) {
     generation_options.reasoning_end_tag = "</think>";
     generation_options.max_reasoning_tokens = arguments.reasoning_budget;
     generation_options.reasoning_timeout_ms = arguments.reasoning_timeout_ms;
+
+    std::string active_oneshot_schema = arguments.json_schema;
+    if (!active_oneshot_schema.empty() && std::filesystem::exists(active_oneshot_schema)) {
+        std::ifstream f(active_oneshot_schema);
+        if (f.is_open()) {
+            std::stringstream ss;
+            ss << f.rdbuf();
+            active_oneshot_schema = ss.str();
+        }
+    }
+    if (!active_oneshot_schema.empty()) {
+        generation_options.structured_output_json_schema = active_oneshot_schema.c_str();
+    }
+    if (arguments.enable_tools) {
+        generation_options.enable_native_tool_parser = 1;
+    }
 
     StreamUserContext oneshot_ctx;
     oneshot_ctx.json_mode = session.json_mode;
@@ -987,6 +1659,7 @@ int main(int argc, char* argv[]) {
     );
 
     if (session.model) vinox_model_destroy(session.model);
+    if (session.embedding_engine) vinox_embedding_engine_destroy(session.embedding_engine);
     vinox_sandbox_host_stop(session.sandbox_host);
     vinox_sandbox_host_destroy(session.sandbox_host);
     vinox_policy_engine_destroy(session.policy_engine);

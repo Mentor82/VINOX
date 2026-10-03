@@ -1,0 +1,43 @@
+{
+  "id": "system.time_Phi-4-mini-instruct-ov_20260906_153555_572927",
+  "tool": "system.time",
+  "model": "Phi-4-mini-instruct-ov",
+  "label": "negative",
+  "notes": "ToolCall: False (Expected: False), Thinking: True",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "system.time",
+        "description": "Gibt die aktuelle Systemzeit und das Datum zurueck.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "timezone": {
+              "type": "string",
+              "description": "Die Zeitzone, z.B. Europe/Berlin oder UTC"
+            }
+          },
+          "required": [
+            "timezone"
+          ]
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a helpful assistant with access to tools. Always begin your response by thinking briefly inside <think>...</think> tags about which tool to call and which arguments are required. After closing </think>, invoke the appropriate tool."
+    },
+    {
+      "role": "user",
+      "content": "What time is it right now in Berlin?"
+    },
+    {
+      "role": "assistant",
+      "reasoning_content": "I need to use the system.time function without specifying any parameters since I want local timezone information.",
+      "content": "\n\n```json\n{\n  \"function\": {\n    \"description\": \"Gibt die aktuelle Systemzeit\",\n    \"name\": \"system.time\"\n  }\n}\n```"
+    }
+  ]
+}

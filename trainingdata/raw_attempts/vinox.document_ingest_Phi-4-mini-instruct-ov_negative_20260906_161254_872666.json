@@ -1,0 +1,43 @@
+{
+  "timestamp": "2026-09-06T16:12:54.874680",
+  "model_id": "Phi-4-mini-instruct-ov",
+  "tool_name": "vinox.document_ingest",
+  "is_positive": false,
+  "evaluation_notes": "Exception during request: HTTP Error 500: Internal Server Error",
+  "input": {
+    "system_prompt": "You are a helpful assistant with access to tools. Always begin your response by thinking briefly inside <think>...</think> tags about which tool to call and which arguments are required. After closing </think>, invoke the appropriate tool.",
+    "user_prompt": "Ingest a document titled 'ReleaseNotes' with the text 'VINOX 1.0 released with hybrid search.' into the database.",
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "vinox.document_ingest",
+          "description": "Ingest a new text document into VINOX storage and vector index",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string",
+                "description": "Title of the document"
+              },
+              "content": {
+                "type": "string",
+                "description": "Text body of the document to ingest"
+              }
+            },
+            "required": [
+              "title",
+              "content"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "output": {
+    "finish_reason": "error",
+    "reasoning_content": "",
+    "content": "ERROR: HTTP Error 500: Internal Server Error",
+    "tool_calls": []
+  }
+}

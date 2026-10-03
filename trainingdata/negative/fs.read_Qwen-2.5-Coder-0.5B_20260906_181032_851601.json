@@ -1,0 +1,61 @@
+{
+  "id": "fs.read_Qwen-2.5-Coder-0.5B_20260906_181032_851601",
+  "tool": "fs.read",
+  "model": "Qwen-2.5-Coder-0.5B",
+  "label": "negative",
+  "notes": "ToolCall: True (Expected: False), Thinking: False",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "fs.read",
+        "description": "Read file content within workspace sandbox",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Path to the file to read"
+            }
+          },
+          "required": [
+            "path"
+          ]
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a helpful assistant with access to tools. Always begin your response by thinking briefly inside <think>...</think> tags about which tool to call and which arguments are required. After closing </think>, invoke the appropriate tool."
+    },
+    {
+      "role": "user",
+      "content": "Please read the contents of the file 'config.json'."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"filePath\":\"/home/user/config.json\"}",
+            "name": "readConfig"
+          },
+          "id": "call_f6612070bccbc37c",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "Tool not found",
+      "name": "readConfig",
+      "role": "tool",
+      "tool_call_id": "call_f6612070bccbc37c"
+    },
+    {
+      "role": "assistant",
+      "content": "```json\n{\n    \"name\": \"notFound\",\n    \"arguments\": {}\n}\n```"
+    }
+  ]
+}

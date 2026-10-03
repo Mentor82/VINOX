@@ -100,6 +100,19 @@ VINOX_API vinox_status vinox_policy_engine_evaluate(const vinox_policy_engine* e
 VINOX_API vinox_status vinox_tools_format_openai_schema(const vinox_tool_registry* registry, char* output_buf, size_t output_buf_size, size_t* required_size_out);
 VINOX_API vinox_status vinox_tools_parse_openai_tool_call(const char* openai_tool_call_json, vinox_tool_call_request* request_out, char* pool_buf, size_t pool_buf_size);
 
+// Tool execution handler callback signature
+typedef vinox_status (*vinox_tool_handler_fn)(
+    const vinox_tool_call_request* request,
+    vinox_tool_call_result* result_out,
+    char* pool_buf,
+    size_t pool_buf_size,
+    void* user_data
+);
+
+// Tool Registry Execution API
+VINOX_API vinox_status vinox_tool_registry_register_handler(vinox_tool_registry* registry, const char* tool_name, vinox_tool_handler_fn handler, void* user_data);
+VINOX_API vinox_status vinox_tool_registry_execute(vinox_tool_registry* registry, const vinox_policy_engine* policy_engine, const vinox_tool_call_request* request, vinox_tool_call_result* result_out, char* pool_buf, size_t pool_buf_size);
+
 // Diagnostic Last Error API for Tools Module
 VINOX_API const char* vinox_tools_last_error(void);
 

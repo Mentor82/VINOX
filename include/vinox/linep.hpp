@@ -13,11 +13,12 @@ namespace transport {
 struct WorkerConfig {
     std::string server_address = "127.0.0.1";
     uint16_t port = 52425;
-    vinox_linep_security_level security_level = VINOX_LINEP_SL1_TOKEN;
+    vinox_linep_security_level security_level = VINOX_LINEP_SL0_LOCAL;
     vinox_linep_host_profile host_profile = VINOX_LINEP_PROFILE_BALANCED;
     std::string target_device = "NPU";
     uint32_t max_concurrent_jobs = 4;
     uint32_t payload_limit_bytes = 262144; // 256 KB governance payload bound
+    bool allow_mock_models = false;
 };
 
 struct ExecutionResult {
@@ -30,6 +31,16 @@ struct ExecutionResult {
     double duration_ms = 0.0;
 };
 
+struct Session0NpuStatus {
+    uint32_t session_id = 0;
+    bool is_session0 = false;
+    bool npu_available = false;
+    std::string device_name;
+    std::string status_message;
+};
+
+VINOX_API Session0NpuStatus CheckSession0NpuReadiness();
+
 class VINOX_API LinepWorker {
 public:
     explicit LinepWorker(const WorkerConfig& config);
@@ -41,6 +52,12 @@ public:
     vinox_status Start();
     vinox_status Stop();
     bool IsRunning() const;
+    uint16_t GetActivePort() const;
+
+    vinox_status DialOutboundLease(
+        const std::string& orchestrator_host,
+        uint16_t orchestrator_port,
+        const std::string& sl1_auth_token = "");
 
     ExecutionResult ProcessRequest(
         const std::string& request_id,

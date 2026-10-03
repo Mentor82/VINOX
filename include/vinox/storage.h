@@ -116,6 +116,31 @@ VINOX_API vinox_status vinox_storage_get_conversation_count(
     size_t* count_out
 );
 
+VINOX_API vinox_status vinox_storage_list_conversations_json(
+    const vinox_storage_engine* engine,
+    char* json_out,
+    size_t json_out_size
+);
+
+VINOX_API vinox_status vinox_storage_get_conversation_json(
+    const vinox_storage_engine* engine,
+    const char* conversation_id,
+    char* json_out,
+    size_t json_out_size
+);
+
+VINOX_API vinox_status vinox_storage_get_conversation_messages_json(
+    const vinox_storage_engine* engine,
+    const char* conversation_id,
+    char* json_out,
+    size_t json_out_size
+);
+
+VINOX_API vinox_status vinox_storage_delete_conversation(
+    vinox_storage_engine* engine,
+    const char* conversation_id
+);
+
 VINOX_API vinox_status vinox_storage_search_messages_fts(
     const vinox_storage_engine* engine,
     const char* query,
@@ -142,6 +167,15 @@ VINOX_API vinox_status vinox_storage_search_hybrid(
 );
 
 VINOX_API void vinox_storage_engine_close(vinox_storage_engine* engine);
+
+VINOX_API vinox_status vinox_storage_get_message_content(
+    const vinox_storage_engine* engine,
+    const char* message_id,
+    char* content_out,
+    size_t content_out_size,
+    char* role_out,
+    size_t role_out_size
+);
 
 /* Phase 5.3 — Documents, Typed Relations & Graph CTE API */
 VINOX_API vinox_status vinox_storage_document_ingest(
