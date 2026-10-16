@@ -352,6 +352,16 @@ static std::vector<uint8_t> sign_wire_frame(
     return frame;
 }
 
+// IEEE 802.3 CRC-32 over the first 76 bytes of a LiNeP control datagram
+static uint32_t test_crc32(const uint8_t* data, size_t len) {
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < len; ++i) {
+        crc ^= data[i];
+        for (int b = 0; b < 8; ++b) crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+    }
+    return ~crc;
+}
+
 static bool send_all_lease(SOCKET fd, const uint8_t* buf, size_t len) {
     size_t sent = 0;
     while (sent < len) {
@@ -427,22 +437,98 @@ int main() {
     listen(orch_fd, 1);
     std::cout << "[PASS 02] Mock Orchestrator listener active on port " << orch_port << "\n";
 
-    std::string token_str = "SL1_OUTBOUND_TEST_TOKEN";
+    // Worker key as `liara-noded worker-key add` issues it: "<key_id>:<64 hex>"
+    const uint16_t kKeyId = 7;
     std::vector<uint8_t> sl1_key(32);
-    SHA256_CTX k_sha;
-    test_sha256_init(&k_sha);
-    test_sha256_update(&k_sha, reinterpret_cast<const uint8_t*>(token_str.data()), token_str.size());
-    test_sha256_final(&k_sha, sl1_key.data());
+    std::string key_hex;
+    for (int i = 0; i < 32; ++i) {
+        sl1_key[i] = static_cast<uint8_t>(0xA0 + i);
+        char h[3];
+        std::snprintf(h, sizeof(h), "%02x", sl1_key[i]);
+        key_hex += h;
+    }
+    const std::string worker_key = std::to_string(kKeyId) + ":" + key_hex;
 
-    Sl1Binding binding{};
-    binding.node_id = 1001;
-    binding.runtime_id = 2001;
-    binding.endpoint_id = 1;
-    binding.control_epoch = 1;
-    binding.lease_token = 0xAABBCCDDEEFF0011ULL;
+    // Malformed keys are refused before any network traffic (no default key,
+    // no hashing of free-form strings, no caller-supplied lease)
+    {
+        vinox_linep_worker_config bad_cfg;
+        vinox_linep_worker_config_init(&bad_cfg);
+        bad_cfg.port = 0;
+        bad_cfg.allow_mock_models = 1;
+        vinox_linep_worker* bad = nullptr;
+        if (vinox_linep_worker_create(&bad_cfg, &bad) != VINOX_STATUS_OK || bad == nullptr) {
+            std::cerr << "FAILED: vinox_linep_worker_create (negative cases)\n";
+            return 1;
+        }
+        const char* bad_keys[] = {"", "SL1_OUTBOUND_TEST_TOKEN", "7:abcd", "0:" "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+                                  "7:a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf:1:2:1:5:99",
+                                  "7:zza1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf"};
+        for (const char* k : bad_keys) {
+            if (vinox_linep_worker_dial_outbound_lease(bad, "127.0.0.1", orch_port, k) != VINOX_STATUS_INVALID_ARGUMENT) {
+                std::cerr << "FAILED: malformed worker key accepted: '" << k << "'\n";
+                return 1;
+            }
+        }
+        vinox_linep_worker_destroy(bad);
+        std::cout << "[PASS 02b] Malformed worker keys refused before dialing.\n";
+    }
+
+    // Mock control plane on orch_port + 1: NODE_HELLO -> INVITE -> LEASE_ACK
+    SOCKET udp_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    sockaddr_in uaddr{};
+    uaddr.sin_family = AF_INET;
+    uaddr.sin_port = htons(static_cast<uint16_t>(orch_port + 1));
+    inet_pton(AF_INET, "127.0.0.1", &uaddr.sin_addr);
+    if (udp_fd == INVALID_SOCKET || bind(udp_fd, reinterpret_cast<sockaddr*>(&uaddr), sizeof(uaddr)) == SOCKET_ERROR) {
+        std::cerr << "FAILED: Unable to bind mock control plane socket\n";
+        return 1;
+    }
 
     // 3. Spawn Orchestrator acceptance thread
-    std::thread orch_thread([orch_fd, sl1_key, binding]() {
+    std::thread orch_thread([orch_fd, udp_fd, sl1_key, kKeyId]() {
+        const uint64_t kLease = 0x1122334455667788ULL;
+        uint8_t hello[80] = {0};
+        sockaddr_in from{};
+        socklen_t from_len = sizeof(from);
+        int n = recvfrom(udp_fd, reinterpret_cast<char*>(hello), sizeof(hello), 0, reinterpret_cast<sockaddr*>(&from), &from_len);
+        uint32_t hello_crc = 0;
+        if (n == 80) std::memcpy(&hello_crc, hello + 76, 4);
+        if (n != 80 || hello[6] != 1 /* NODE_HELLO */ || hello_crc != test_crc32(hello, 76)) {
+            std::cerr << "FAILED: no valid NODE_HELLO from the worker\n";
+            return;
+        }
+        Sl1Binding binding{};
+        std::memcpy(&binding.node_id, hello + 8, 8);
+        std::memcpy(&binding.runtime_id, hello + 16, 8);
+        std::memcpy(&binding.endpoint_id, hello + 24, 4);
+        std::memcpy(&binding.control_epoch, hello + 36, 8);
+        binding.lease_token = kLease;
+        if (binding.node_id != kKeyId || binding.control_epoch == 0) {
+            std::cerr << "FAILED: lease identity must be the key id with a fresh epoch\n";
+            return;
+        }
+        uint8_t invite[80] = {0};
+        std::memcpy(invite, hello, 6);
+        invite[6] = 4; // INVITE
+        std::memcpy(invite + 8, hello + 8, 20);
+        const uint64_t inv_seq = 1;
+        std::memcpy(invite + 28, &inv_seq, 8);
+        std::memcpy(invite + 36, &binding.control_epoch, 8);
+        std::memcpy(invite + 68, &kLease, 8);
+        const uint32_t inv_crc = test_crc32(invite, 76);
+        std::memcpy(invite + 76, &inv_crc, 4);
+        sendto(udp_fd, reinterpret_cast<const char*>(invite), sizeof(invite), 0, reinterpret_cast<sockaddr*>(&from), from_len);
+        uint8_t ack[80] = {0};
+        n = recvfrom(udp_fd, reinterpret_cast<char*>(ack), sizeof(ack), 0, nullptr, nullptr);
+        uint64_t ack_lease = 0;
+        if (n == 80) std::memcpy(&ack_lease, ack + 68, 8);
+        if (n != 80 || ack[6] != 5 /* LEASE_ACK */ || (ack[7] & 1) == 0 || ack_lease != kLease) {
+            std::cerr << "FAILED: no valid LEASE_ACK from the worker\n";
+            return;
+        }
+        std::cout << "[PASS 02c] UDP lease handshake (HELLO -> INVITE -> LEASE_ACK) completed.\n";
+
         sockaddr_in caddr{};
         socklen_t clen = sizeof(caddr);
         SOCKET conn_fd = accept(orch_fd, reinterpret_cast<sockaddr*>(&caddr), &clen);
@@ -488,7 +574,7 @@ int main() {
             bind_hdr.request_id, 0, 0,
             bind_payload,
             binding,
-            1 /* auth_seq */, 1 /* key_id */,
+            1 /* auth_seq */, kKeyId,
             sl1_key,
             MessageDirection::ResponderToInitiator
         );
@@ -558,7 +644,7 @@ int main() {
             reg_hdr.request_id, 0, 0,
             res_body,
             binding,
-            2 /* auth_seq */, 1 /* key_id */,
+            2 /* auth_seq */, kKeyId,
             sl1_key,
             MessageDirection::ResponderToInitiator
         );
@@ -587,7 +673,7 @@ int main() {
             5001, 50010, 0,
             req_payload,
             binding,
-            3 /* auth_seq */, 1 /* key_id */,
+            3 /* auth_seq */, kKeyId,
             sl1_key,
             MessageDirection::ResponderToInitiator
         );
@@ -651,7 +737,7 @@ int main() {
         return 1;
     }
 
-    st = vinox_linep_worker_dial_outbound_lease(worker, "127.0.0.1", orch_port, "SL1_OUTBOUND_TEST_TOKEN");
+    st = vinox_linep_worker_dial_outbound_lease(worker, "127.0.0.1", orch_port, worker_key.c_str());
     if (st != VINOX_STATUS_OK) {
         std::cerr << "FAILED: vinox_linep_worker_dial_outbound_lease returned " << st << "\n";
         vinox_linep_worker_destroy(worker);
@@ -662,6 +748,7 @@ int main() {
 
     orch_thread.join();
     closesocket(orch_fd);
+    closesocket(udp_fd);
 
     vinox_linep_worker_destroy(worker);
     std::cout << "[PASS 06] Worker lease disconnected cleanly.\n";
