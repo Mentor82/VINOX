@@ -707,6 +707,7 @@ struct LinepWorker::Impl {
     std::unique_ptr<vinox::embedding::EmbeddingEngine> embedding_engine;
     std::string embedding_engine_model_path; // path the cached engine was loaded from
     std::thread embedding_preload_thread;
+    std::thread lease_heartbeat_thread;
 
     explicit Impl(const WorkerConfig& cfg) : config(cfg), active_port(cfg.port) {
 #ifdef _WIN32
@@ -1021,6 +1022,52 @@ struct LinepWorker::Impl {
         if (embedding_preload_thread.joinable()) {
             embedding_preload_thread.join();
         }
+        if (lease_heartbeat_thread.joinable()) {
+            lease_heartbeat_thread.join();
+        }
+    }
+
+    // linepd drops a lease after 300 s without control datagrams
+    // (LEASE_IDLE_TIMEOUT), so an outbound worker refreshes it with HEARTBEATs.
+    static constexpr int kLeaseHeartbeatSeconds = 30;
+
+    void LeaseHeartbeatLoop(sockaddr_in peer, Sl1Binding binding, uint64_t seq, uint16_t tcp_port,
+                            std::shared_ptr<ClientConnection> conn) {
+        SOCKET fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (fd == INVALID_SOCKET) {
+            std::cerr << "[LINEP-DIAL] Warning: no UDP socket for lease heartbeats; the lease will expire\n" << std::flush;
+            return;
+        }
+        int waited = 0;
+        while (running.load() && conn->active.load()) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            if (++waited < kLeaseHeartbeatSeconds) continue;
+            waited = 0;
+            uint8_t hb[80] = {0};
+            const uint32_t magic = 0x504E4C55; // "ULNP"
+            std::memcpy(hb + 0, &magic, 4);
+            hb[4] = 0;  // major
+            hb[5] = 2;  // minor
+            hb[6] = 2;  // HEARTBEAT
+            hb[7] = 1;  // trunk_ready
+            std::memcpy(hb + 8, &binding.node_id, 8);
+            std::memcpy(hb + 16, &binding.runtime_id, 8);
+            std::memcpy(hb + 24, &binding.endpoint_id, 4);
+            ++seq;
+            std::memcpy(hb + 28, &seq, 8);
+            std::memcpy(hb + 36, &binding.control_epoch, 8);
+            hb[44] = 1; // available
+            hb[45] = 1; // healthy
+            const uint32_t cap_rev = 1;
+            std::memcpy(hb + 52, &cap_rev, 4);
+            std::memcpy(hb + 64, &tcp_port, 2);
+            std::memcpy(hb + 68, &binding.lease_token, 8);
+            const uint32_t crc = linep_crc32(hb, 76);
+            std::memcpy(hb + 76, &crc, 4);
+            sendto(fd, reinterpret_cast<const char*>(hb), sizeof(hb), 0,
+                   reinterpret_cast<const sockaddr*>(&peer), sizeof(peer));
+        }
+        closesocket(fd);
     }
 
     void AcceptLoop() {
@@ -1095,13 +1142,6 @@ struct LinepWorker::Impl {
         write_u8(payload, 1); // supports_reasoning_deltas
         write_u8(payload, 1); // supports_structured_messages
 
-        // 4. supported_models (Advertise ONLY models VINOX can actually serve locally)
-        std::vector<std::string> models = GetAvailableLocalModels();
-        write_u16(payload, static_cast<uint16_t>(models.size()));
-        for (const auto& m : models) {
-            write_string_u16(payload, m);
-        }
-
         // 5. supported_embedding_spaces (only report once the model named by
         // linep.served_embedding_model has actually finished loading). This must
         // never block: the engine is preloaded from Start() on its own thread, and
@@ -1122,11 +1162,30 @@ struct LinepWorker::Impl {
             }
         }
         std::string served_embedding_model = have_emb_info ? ReadLinepServeConfig().served_embedding_model : std::string();
+        if (served_embedding_model.empty() && have_emb_info && emb_info.model_id) {
+            served_embedding_model = emb_info.model_id;
+        }
+        have_emb_info = have_emb_info && !served_embedding_model.empty();
+
+        // 4. supported_models (Advertise ONLY models VINOX can actually serve
+        // locally). The embedding model is one of them: LiNeP requires every
+        // embedding space's model_id to be listed here, and linepd refuses a
+        // RUNTIME_REGISTER whose space names an unlisted model.
+        std::vector<std::string> models = GetAvailableLocalModels();
+        if (have_emb_info && std::find(models.begin(), models.end(), served_embedding_model) == models.end()) {
+            models.push_back(served_embedding_model);
+        }
+        write_u16(payload, static_cast<uint16_t>(models.size()));
+        for (const auto& m : models) {
+            write_string_u16(payload, m);
+        }
 
         if (have_emb_info) {
             write_u16(payload, 1);
             write_string_u16(payload, emb_info.space_id ? emb_info.space_id : served_embedding_model);
-            write_string_u16(payload, emb_info.model_id ? emb_info.model_id : served_embedding_model);
+            // the released id (linep.served_embedding_model) is what clients and
+            // the cluster allowlists name, not an internal model path or alias
+            write_string_u16(payload, served_embedding_model);
             write_string_u16(payload, "v1");
             write_u32(payload, static_cast<uint32_t>(emb_info.dimension));
             write_u8(payload, emb_info.normalization == VINOX_EMBEDDING_NORM_L2 ? 1 : 0);
@@ -1564,64 +1623,56 @@ struct LinepWorker::Impl {
     }
 
     vinox_status DialOutboundLease(const std::string& host, uint16_t port, const std::string& auth_token) {
-        // 1. Parse auth_token into key_id, 32-byte key, and binding
-        uint16_t key_id = 1;
+        // 1. Worker key (ADR 0005 §3.2): exactly "<key_id>:<64 hex chars>", as
+        // `liara-noded worker-key add` issues it. No default key, no hashing of
+        // free-form strings and no caller-supplied lease: a key that does not
+        // parse is refused, and the lease always comes from the node's INVITE.
+        uint16_t key_id = 0;
         std::vector<uint8_t> sl1_key;
-        Sl1Binding sl1_binding{};
-        sl1_binding.node_id = 1001;
-        sl1_binding.runtime_id = 2001;
-        sl1_binding.endpoint_id = 1;
-        sl1_binding.control_epoch = 1;
-        sl1_binding.lease_token = 0xAABBCCDDEEFF0011ULL;
-
-        std::string token_str = auth_token.empty() ? "VINOX_SL1_LEASE_TOKEN" : auth_token;
-        std::vector<std::string> parts;
         {
-            std::stringstream ss(token_str);
-            std::string item;
-            while (std::getline(ss, item, ':')) {
-                parts.push_back(item);
-            }
-        }
-
-        if (parts.size() >= 2) {
-            try {
-                key_id = static_cast<uint16_t>(std::stoul(parts[0]));
-            } catch (...) { key_id = 1; }
-            sl1_binding.node_id = key_id;
-            if (parts[1].size() == 64 && parse_hex_key(parts[1], sl1_key)) {
-                // hex parsed
-            } else {
-                sl1_key.resize(32);
-                linep_sha256(reinterpret_cast<const uint8_t*>(parts[1].data()), parts[1].size(), sl1_key.data());
-            }
-            if (parts.size() >= 7) {
+            const auto colon = auth_token.find(':');
+            unsigned long parsed_id = 0;
+            bool ok = colon != std::string::npos && colon > 0 && colon <= 5 &&
+                      auth_token.size() == colon + 1 + 64 &&
+                      auth_token.find(':', colon + 1) == std::string::npos;
+            if (ok) {
                 try {
-                    sl1_binding.node_id = std::stoull(parts[2]);
-                    sl1_binding.runtime_id = std::stoull(parts[3]);
-                    sl1_binding.endpoint_id = static_cast<uint32_t>(std::stoul(parts[4]));
-                    sl1_binding.control_epoch = std::stoull(parts[5]);
-                    sl1_binding.lease_token = std::stoull(parts[6]);
-                } catch (...) {}
-            } else {
-                uint64_t epoch = static_cast<uint64_t>(std::time(nullptr));
-                if (epoch > 0) sl1_binding.control_epoch = epoch;
+                    size_t used = 0;
+                    parsed_id = std::stoul(auth_token.substr(0, colon), &used, 10);
+                    ok = used == colon && parsed_id >= 1 && parsed_id <= 0xFFFF;
+                } catch (...) {
+                    ok = false;
+                }
             }
-        } else {
-            key_id = 1;
-            if (token_str.size() == 64 && parse_hex_key(token_str, sl1_key)) {
-                // hex parsed
-            } else {
-                sl1_key.resize(32);
-                linep_sha256(reinterpret_cast<const uint8_t*>(token_str.data()), token_str.size(), sl1_key.data());
+            ok = ok && parse_hex_key(auth_token.substr(colon + 1), sl1_key) && sl1_key.size() == 32;
+            if (!ok) {
+                std::cerr << "[LINEP-DIAL] FAILED: worker key must be '<key_id>:<64 hex chars>' "
+                             "(from `liara-noded worker-key add`)\n" << std::flush;
+                return VINOX_STATUS_INVALID_ARGUMENT;
             }
+            key_id = static_cast<uint16_t>(parsed_id);
         }
+        // The worker's lease identity is its key id; a new epoch per process
+        // start makes linepd issue a fresh lease (higher epoch = new incarnation).
+        Sl1Binding sl1_binding{};
+        sl1_binding.node_id = key_id;
+        sl1_binding.runtime_id = 2000 + static_cast<uint64_t>(key_id);
+        sl1_binding.endpoint_id = 1;
+        sl1_binding.control_epoch = static_cast<uint64_t>(std::time(nullptr));
+        sl1_binding.lease_token = 0;
 
-        // 2. Perform UDP control plane lease handshake if lease not explicitly specified
-        if (parts.size() < 7) {
+        // 2. UDP control plane lease handshake (always); kept for the heartbeats
+        sockaddr_in lease_peer{};
+        uint64_t lease_seq = 0;
+        uint16_t lease_tcp_port = 0;
+        {
             uint16_t udp_port = (port == 9000) ? 9001 : static_cast<uint16_t>(port + 1);
             SOCKET udp_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-            if (udp_fd != INVALID_SOCKET) {
+            if (udp_fd == INVALID_SOCKET) {
+                std::cerr << "[LINEP-DIAL] FAILED: no UDP socket for the lease handshake\n" << std::flush;
+                return VINOX_STATUS_RUNTIME_ERROR;
+            }
+            {
 #ifdef _WIN32
                 DWORD tv = 2000; // 2000ms timeout
                 setsockopt(udp_fd, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
@@ -1719,6 +1770,9 @@ struct LinepWorker::Impl {
                             sendto(udp_fd, reinterpret_cast<const char*>(ack_buf), sizeof(ack_buf), 0,
                                    reinterpret_cast<const sockaddr*>(&from_addr), from_len);
                             std::cout << "[LINEP-DIAL] Sent UDP LEASE_ACK!\n" << std::flush;
+                            lease_peer = from_addr;
+                            lease_seq = ack_seq;
+                            lease_tcp_port = local_tcp_port;
                             lease_acquired = true;
                             break;
                         }
@@ -1900,6 +1954,11 @@ struct LinepWorker::Impl {
         std::cout.flush();
         running.store(true);
         std::thread(&Impl::HandleClientSocket, this, conn).detach();
+        if (lease_heartbeat_thread.joinable()) {
+            lease_heartbeat_thread.join();
+        }
+        lease_heartbeat_thread = std::thread(&Impl::LeaseHeartbeatLoop, this, lease_peer, conn->sl1_binding,
+                                             lease_seq, lease_tcp_port, conn);
         return VINOX_STATUS_OK;
     }
 };

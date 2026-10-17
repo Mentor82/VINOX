@@ -105,7 +105,7 @@ struct Arguments {
 
     bool run_worker = false;
     std::string orchestrator = "127.0.0.1:9000";
-    std::string worker_token;
+    std::string worker_key_file;
     bool allow_mock = false;
 };
 
@@ -114,7 +114,7 @@ void print_usage() {
         << "VINOX CLI - Versatile Inference & Native OpenVINO eXecution\n\n"
         << "Usage:\n"
         << "  vinox-cli --audit\n"
-        << "  vinox-cli --worker [--orchestrator <host:port>] [--token <auth_token>] [--device <NPU|GPU|CPU>]\n"
+        << "  vinox-cli --worker [--orchestrator <host:port>] --key-file <path> [--device <NPU|GPU|CPU>]\n"
         << "  vinox-cli --model <path> [--info] [--config-save|--config-reset]\n"
         << "  vinox-cli --model <path> --prompt <text> [--interactive] [--json] [--mode chat|plan|agent]\n"
         << "  vinox-cli --remote <url> [--interactive] [--json]\n\n"
@@ -219,8 +219,15 @@ bool parse_arguments(int argc, char* argv[], Arguments& arguments) {
         const std::string value = argv[++index];
         if (argument == "--orchestrator") {
             arguments.orchestrator = value;
+        } else if (argument == "--key-file") {
+            arguments.worker_key_file = value;
         } else if (argument == "--token") {
-            arguments.worker_token = value;
+            // ADR 0005 section 3.2: the worker key never travels in argv (process
+            // lists, shell history, crash dumps); it is read from a file
+            std::cerr << "--token is no longer supported: put the worker key in a file "
+                         "readable only by the worker account and pass --key-file <path> "
+                         "(or set VINOX_LINEP_KEY_FILE)\n";
+            return false;
         } else if (argument == "--model") {
             arguments.model_path = value;
         } else if (argument == "--embedding-model") {
@@ -1123,10 +1130,28 @@ int run_worker_mode(const Arguments& arguments) {
         orch_host = arguments.orchestrator;
     }
 
-    std::string token = arguments.worker_token;
-    if (token.empty()) {
-        const char* env_tok = std::getenv("LINEP_WORKER_TOKEN");
-        if (env_tok) token = env_tok;
+    std::string key_file = arguments.worker_key_file;
+    if (key_file.empty()) {
+        const char* env_file = std::getenv("VINOX_LINEP_KEY_FILE");
+        if (env_file) key_file = env_file;
+    }
+    if (key_file.empty()) {
+        std::cerr << "[WORKER] FAILED: no worker key: pass --key-file <path> or set VINOX_LINEP_KEY_FILE\n";
+        vinox_linep_worker_destroy(worker);
+        return 1;
+    }
+    // first line "<key_id>:<64 hex>" as `liara-noded worker-key add` prints it; never logged
+    std::string token;
+    {
+        std::ifstream in(key_file);
+        if (!in || !std::getline(in, token)) {
+            std::cerr << "[WORKER] FAILED: cannot read worker key file " << key_file << "\n";
+            vinox_linep_worker_destroy(worker);
+            return 1;
+        }
+        while (!token.empty() && (token.back() == '\r' || token.back() == '\n' || token.back() == ' ')) {
+            token.pop_back();
+        }
     }
 
     std::cout << "[WORKER] Initiating Outbound LiNeP V0.2 lease dial to " << orch_host << ":" << orch_port << " ...\n";
